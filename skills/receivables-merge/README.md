@@ -13,8 +13,7 @@ receivables-merge/
 │   └── 思路_skills化.md       # 设计思路
 ├── config/
 │   ├── 列名别名.json          # S1 认列规则（会变，改这里不改码）
-│   ├── 维护表模板.xlsx        # 销售变化维护表的空模板（仓库里只放模板）
-│   └── 营销人员应收匹配规则.xlsx  # 真实维护表（.gitignore，不进仓库）
+│   └── 销售归属维护表.md       # 销售归属（离职→接手、客户→重分配）；人维护、agent 每次摆出来让人确认
 └── 工作区/{input,output}/    # 运行时数据（.gitignore）
 ```
 
@@ -27,7 +26,7 @@ python3 scripts/merge.py --inspect --input-dir <放文件的目录>
 # 2) 跑合并
 python3 scripts/merge.py \
   --source 源台账.xlsx --ref 回填源.xlsx \
-  --rules config/营销人员应收匹配规则.xlsx \
+  --rules config/销售归属维护表.md \
   --out 工作区/output/应收all.xlsx
 # --ref 省→跳回填；--rules 省→跳归属；--base-month 202606 补往月
 ```

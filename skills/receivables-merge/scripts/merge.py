@@ -40,6 +40,9 @@ CONFIG = {
     "AGING_MINUS_ONE": True,
     "KEY": "新智云单号",
     "SHEET_YEAR_LABEL": {"6月批量": "技术统一确认"},
+    # 整批"技术统一确认"的 sheet：交付月份用统一确认月(固定值)，账龄从此算——
+    # 不按每单"完成时间"各算（赵成品实证：6月批量整批交付月=202406）。
+    "SHEET_DELIVER_MONTH": {"6月批量": "202406"},
     "EXCLUDE_SHEETS": ["Sheet1", "Sheet2", "Sheet3"],
     "REF_SHEET": None,
 }
@@ -233,6 +236,10 @@ def normalize_sheet(df, sheet_name):
     out["交付月份"] = ym1.where(ym1.notna(), ym2)
     out["交付月份"] = out["交付月份"].map(lambda x: x if isinstance(x, str) else None)
     out.drop(columns=["_交付月份直取", "_交付日期回退"], inplace=True)
+    # 整批"技术统一确认"的 sheet（如6月批量）：交付月份用固定的统一确认月，覆盖逐单推导。
+    fixed_dm = CONFIG["SHEET_DELIVER_MONTH"].get(str(sheet_name).strip())
+    if fixed_dm:
+        out["交付月份"] = fixed_dm
     out["年度"] = year_label(sheet_name)
     out["应收金额"] = pd.to_numeric(out["应收金额"], errors="coerce")
     out["新智云单号"] = out["新智云单号"].map(clean_key)
@@ -348,32 +355,59 @@ def _base_name(s):
     return re.sub(r"\d+$", "", str(s).strip()).strip()
 
 
+def _parse_md_table(lines):
+    """从若干行里抽出 markdown 表格的【数据行】(每行=单元格列表)，自动跳表头行与 |---| 分隔行。"""
+    rows, seen_sep = [], False
+    for ln in lines:
+        s = ln.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if cells and all(c and set(c) <= set("-: ") for c in cells):   # |---|---| 分隔行
+            seen_sep = True
+            continue
+        if not seen_sep:                                               # 分隔行之前 = 表头行，跳过
+            continue
+        rows.append(cells)
+    return rows
+
+
 def load_rules(rules_path):
-    """读维护表 → (离职→接手, 客户→接手)。表头：离职销售|接手销售|(空)|客户需重新分配|接手销售。"""
-    d = pd.read_excel(rules_path, header=None)
-    departed_map, customer_map = {}, {}
-    for _, r in d.iterrows():
-        vals = [("" if pd.isna(x) else str(x).strip()) for x in r.tolist()]
-        vals += [""] * (5 - len(vals))
-        dep, dep_to, _, cust, cust_to = vals[0], vals[1], vals[2], vals[3], vals[4]
-        if dep and dep_to and dep not in ("离职销售",):
-            departed_map[dep] = dep_to
-        if cust and cust_to and cust not in ("客户需重新分配",):
-            customer_map[cust] = cust_to
-    return departed_map, customer_map
+    """读【MD 维护表】→ (departed_map, customer_map, composite_set)。
+       段一『按销售接手』：离职|接手|处理方式|备注；处理方式含"细分/追溯/复合" → 进 composite_set。
+       段二『按公司接手』：客户(含关键词)|接手|备注。"""
+    departed_map, customer_map, composite_set = {}, {}, set()
+    with open(rules_path, encoding="utf-8") as f:
+        text = f.read()
+    for part in re.split(r"(?m)^##\s+", text):          # 按 ## 标题切段
+        ls = part.splitlines()
+        head = ls[0] if ls else ""
+        rows = _parse_md_table(ls)
+        if "销售接手" in head:
+            for c in rows:
+                dep = c[0] if len(c) > 0 else ""
+                to = c[1] if len(c) > 1 else ""
+                mode = c[2] if len(c) > 2 else ""
+                if dep and to:
+                    departed_map[dep] = to
+                    if any(k in mode for k in ("细分", "追溯", "复合")):
+                        composite_set.add(dep)
+        elif "公司接手" in head:
+            for c in rows:
+                cust = c[0] if len(c) > 0 else ""
+                to = c[1] if len(c) > 1 else ""
+                if cust and to:
+                    customer_map[cust] = to
+    return departed_map, customer_map, composite_set
 
 
-# 只有这些离职人保留「接手-离职」复合痕迹（如高美杰=遗留坏账，要追溯）；
-# 其余离职人直接换成接手人光名（与赵成品一致：张健-张林烨等不出现，折进张健）。
-COMPOSITE_DEPARTED = {"高美杰"}
-
-
-def attribute_sales(merged, departed_map, customer_map):
-    """对每行定最终销售人员。规则（成品实证）：
-       ① 客户重分配【全局】优先——客户在清单里就归指定人，不管原销售是谁（含在职）；
-       ② 否则原销售是离职人 → 归默认接手；
-       ③ 命名：仅 COMPOSITE_DEPARTED（高美杰）保留「接手-离职」复合名（接手是其变体如高美杰1→光名），
-          其余一律用接手人光名。
+def attribute_sales(merged, departed_map, customer_map, composite_set):
+    """对每行定最终销售人员（维护表驱动，确定性应用；不写死任何人名）：
+       · 只动【离职销售】的行——在职销售当前手里的单一律不动；
+       · 接手人 = 段二客户规则(优先，对所有离职行生效) 否则 段一默认接手；
+       · 命名：处理方式=细分追溯(composite_set) → 复合名「接手-离职」(接手是其变体如高美杰1→光名)；
+              处理方式=直接接手 → 接手人光名。
+       composite_set 只决定【命名】，由维护表"处理方式"列驱动，规则变=改表不改码。
        返回(新merged, 改动清单df)。"""
     merged = merged.copy()
     changes = []
@@ -382,17 +416,15 @@ def attribute_sales(merged, departed_map, customer_map):
     for orig_raw, cust_raw in zip(merged["销售人员"], merged["客户名称"]):
         orig = "" if orig_raw is None or (isinstance(orig_raw, float) and pd.isna(orig_raw)) else str(orig_raw).strip()
         cust = "" if cust_raw is None or (isinstance(cust_raw, float) and pd.isna(cust_raw)) else str(cust_raw).strip()
-        # ① 客户重分配（全局，contains）
+        # 段二客户规则：对【所有行】生效（这些客户整体归指定人，不管现在谁持有）。
         owner = next((customer_map[k] for k in cust_keys if k and k in cust), None)
-        # ② 离职默认接手
-        if owner is None and orig in departed_map:
+        if owner is None and orig in departed_map:     # 段一：离职销售默认接手
             owner = departed_map[orig]
-        if owner is None:                      # 不动
+        if owner is None:                              # 在职且无客户规则 → 不动
             new_vals.append(orig_raw); continue
-        # ③ 命名
-        if orig in COMPOSITE_DEPARTED:
+        if orig in composite_set:                      # 处理方式=细分追溯 → 复合名
             final = owner if _base_name(owner) == _base_name(orig) else f"{owner}-{orig}"
-        else:
+        else:                                          # 处理方式=直接接手 → 光名
             final = owner
         new_vals.append(final)
         if final != orig:
@@ -442,6 +474,44 @@ def year_consistency(merged):
     return pd.DataFrame(rows, columns=["年度", "交付月份", "销售人员", "客户名称", "新智云单号"])
 
 
+def _lev1(a, b):
+    """编辑距离是否==1（错别字检测，如 尹博健 vs 尹博建）。"""
+    a, b = str(a), str(b)
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    short, long = (a, b) if la < lb else (b, a)
+    i = j = diff = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1; j += 1
+        else:
+            j += 1; diff += 1
+            if diff > 1:
+                return False
+    return True
+
+
+def suspect_attribution(orig_counts, departed_names):
+    """归属存疑：源表里出现、与维护表离职名仅差一字的（疑似同一人错别字），交人工确认。"""
+    deps = list(departed_names)
+    rows = []
+    for name, cnt in orig_counts.items():
+        nm = str(name).strip()
+        if not nm or nm in departed_names:
+            continue
+        near = [d for d in deps if _lev1(nm, d)]
+        if near:
+            rows.append({"源表销售": nm, "行数": int(cnt),
+                         "存疑": f"与维护表离职名「{near[0]}」仅差一字，是否同一人(错别字)?",
+                         "建议": "人工确认；若是→改维护表为该写法或加映射"})
+    return pd.DataFrame(rows, columns=["源表销售", "行数", "存疑", "建议"])
+
+
 # --------------------------- S8 透视 ---------------------------
 def build_pivot(master_out):
     """应收金额 按 销售人员→客户 求和（成品 Sheet2 同款）。"""
@@ -464,12 +534,13 @@ def _strip_illegal(df):
     return df
 
 
-def write_workbook(out_path, master_out, pivot, unmatched, variants, residual, ycheck, removed, report_df):
+def write_workbook(out_path, master_out, pivot, reassign, suspect, unmatched, variants, residual, ycheck, removed, report_df):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     sheets = {
-        "主表": master_out, "透视汇总": pivot, "未匹配复核": unmatched,
-        "名称变体": variants, "离职残留": residual, "年度校验": ycheck,
-        "被删0行": removed, "运行报告": report_df,
+        "主表": master_out, "透视汇总": pivot,
+        "归属变更": reassign, "归属存疑": suspect,
+        "未匹配复核": unmatched, "名称变体": variants, "离职残留": residual,
+        "年度校验": ycheck, "被删0行": removed, "运行报告": report_df,
     }
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         for name, df in sheets.items():
@@ -509,13 +580,23 @@ def run(source, ref, rules, out_path, base_month=None):
             merged[canon] = None
         merged["__matched"] = False
 
-    # S4 归属
+    # S4 归属（确定性应用维护表；变更与存疑交人工确认）
     departed_map, customer_map = ({}, {})
     reassign = pd.DataFrame(columns=["原销售", "客户名称", "最终销售"])
+    orig_counts = merged["销售人员"].map(
+        lambda x: "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x).strip()).value_counts()
     if rules:
-        departed_map, customer_map = load_rules(rules)
-        merged, reassign = attribute_sales(merged, departed_map, customer_map)
-        log(f"· S4 归属：维护表 离职{len(departed_map)}人/客户{len(customer_map)}条，改动 {len(reassign)} 行")
+        departed_map, customer_map, composite_set = load_rules(rules)
+        merged, reassign = attribute_sales(merged, departed_map, customer_map, composite_set)
+        log(f"· S4 归属：维护表 离职{len(departed_map)}人/客户{len(customer_map)}条/细分追溯{len(composite_set)}人，改动 {len(reassign)} 行")
+    if len(reassign):
+        reassign_sum = (reassign.groupby(["原销售", "最终销售"]).size()
+                        .reset_index(name="行数").sort_values("行数", ascending=False))
+    else:
+        reassign_sum = pd.DataFrame(columns=["原销售", "最终销售", "行数"])
+    suspect = suspect_attribution(orig_counts, set(departed_map))
+    if len(suspect):
+        log(f"· ⚠ 归属存疑 {len(suspect)} 项（疑似错别字/离职名对不齐），需人工确认")
 
     # S5 删 0 行
     merged, removed = drop_zero_receivable(merged)
@@ -547,6 +628,7 @@ def run(source, ref, rules, out_path, base_month=None):
            ["账龄基准月", base_yyyymm],
            ["S1 合并行数", len(master)],
            ["S4 归属改动行数", len(reassign)],
+           ["S4 归属存疑(待人工确认)", len(suspect)],
            ["S5 删0行数", len(removed)],
            ["主表最终行数", len(master_out)],
            ["未匹配(#N/A)", len(unmatched)],
@@ -555,7 +637,7 @@ def run(source, ref, rules, out_path, base_month=None):
            ["年度不一致", len(ycheck)]]
     report_df = pd.DataFrame(rep, columns=["项目", "值"])
 
-    write_workbook(out_path, master_out, pivot, unmatched, variants, residual, ycheck, removed_out, report_df)
+    write_workbook(out_path, master_out, pivot, reassign_sum, suspect, unmatched, variants, residual, ycheck, removed_out, report_df)
     log(f"\n✓ 完成：{out_path}")
     log(f"  主表 {len(master_out)} 行 | 删0 {len(removed)} | 归属改动 {len(reassign)} | #N/A {len(unmatched)} | 离职残留 {len(residual)}")
     return master_out
@@ -588,8 +670,8 @@ def main():
         source, ref, rules = find_inputs(a.input_dir)
         if not source:
             log(f"✗ 没找到源台账。请把文件放进 {a.input_dir}/ 或用 --source 指定。"); sys.exit(1)
-    rules = rules or (os.path.join(CONFIG_DIR, "营销人员应收匹配规则.xlsx")
-                      if os.path.isfile(os.path.join(CONFIG_DIR, "营销人员应收匹配规则.xlsx")) else None)
+    rules = rules or (os.path.join(CONFIG_DIR, "销售归属维护表.md")
+                      if os.path.isfile(os.path.join(CONFIG_DIR, "销售归属维护表.md")) else None)
     out_path = a.out or os.path.join(WORK_OUTPUT, f"应收all_{datetime.datetime.now():%Y%m%d_%H%M%S}.xlsx")
     run(source, ref, rules, out_path, a.base_month)
 
