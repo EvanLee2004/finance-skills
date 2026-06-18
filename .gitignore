@@ -1,0 +1,31 @@
+# ===== 敏感数据：源数据与产物都不进 git =====
+inputs/*
+!inputs/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# 常见数据文件（防误提交真实财务数据）
+*.xlsx
+*.xls
+*.csv
+*.pdf
+*.zip
+
+# ===== 密钥 / 凭证 / 本地配置 =====
+.env
+.env.*
+*.key
+*.pem
+secrets.*
+config.local.*
+*.local.json
+
+# ===== 运行 / 缓存 / 系统 =====
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+*.log
+tmp/
