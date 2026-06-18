@@ -349,6 +349,53 @@ def backfill(master, ref_path):
     return merged, meta
 
 
+# --------------------------- S4.5 结转老坏账（从上一版 all） ---------------------------
+def carry_forward(master_keys, ref_path, min_source_year):
+    """从上一版 all 结转老坏账：ref 里【年度早于源表最早年份(min_source_year) 且 应收≠0】的行——
+    这些是源台账已不再列出那些老年份(如2016-2018高美杰遗留)、但还没回款的老账。
+    近期年份(源表覆盖范围内)若不在源表，说明已回款结清，**不结转**。
+    账龄/销售归属/标注沿用上一版 all（它已是最终态，成品也不给结转行重算账龄）。
+    返回 17 列(+__carried) 的 DataFrame。"""
+    ref_sheet = CONFIG["REF_SHEET"] or detect_ref_sheet(ref_path)
+    d = pd.read_excel(ref_path, sheet_name=ref_sheet)
+    d.columns = [str(c).strip() for c in d.columns]
+    keycol = CONFIG["KEY"] if CONFIG["KEY"] in d.columns else next((c for c in d.columns if "新智云" in c), None)
+    if keycol is None:
+        return pd.DataFrame()
+    agingcol = next((c for c in d.columns if "账龄" in c), None)
+    ann_src = {}
+    for canon, kws in ANNOTATION_COLS.items():
+        ann_src[canon] = (next((c for c in d.columns if c == canon), None)
+                          or next((c for c in d.columns if any(kw in c for kw in kws)), None))
+    rows = []
+    for _, r in d.iterrows():
+        key = clean_key(r.get(keycol))
+        if not key or key in master_keys:
+            continue
+        # 只结转源表年份范围【之外】的老年份；近期年份不在源表=已结清，不结转。
+        y = r.get("年度")
+        try:
+            yi = int(str(y).strip())
+        except (TypeError, ValueError):
+            continue
+        if yi >= min_source_year:
+            continue
+        amt = pd.to_numeric(r.get("应收金额"), errors="coerce")
+        if pd.isna(amt) or amt == 0:
+            continue
+        rec = {
+            "年度": yi, "销售人员": r.get("销售人员"), "客户名称": r.get("客户名称"),
+            "新智云单号": key, "文件名": r.get("文件名"), "应收金额": amt,
+            "交付月份": to_yyyymm(r.get("交付月份")),
+            "账龄(月份)": r.get(agingcol) if agingcol else None,   # 沿用上一版账龄(成品不重算)
+            "__matched": True, "__carried": True,
+        }
+        for canon, src in ann_src.items():
+            rec[canon] = blankify_annotation(r.get(src)) if src else None
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
 # --------------------------- S4 销售归属（维护表驱动） ---------------------------
 def _base_name(s):
     """去结尾数字：高美杰1 → 高美杰。"""
@@ -598,6 +645,21 @@ def run(source, ref, rules, out_path, base_month=None):
     if len(suspect):
         log(f"· ⚠ 归属存疑 {len(suspect)} 项（疑似错别字/离职名对不齐），需人工确认")
 
+    # S4.5 结转老坏账（上一版 all 里、当周源没有、应收≠0 的行）
+    carried_n = 0
+    if ref:
+        try:
+            master_keys = set(merged[CONFIG["KEY"]].map(clean_key).dropna())
+            yrs = [y for y in merged["年度"] if isinstance(y, int)]
+            min_year = min(yrs) if yrs else 9999
+            carried = carry_forward(master_keys, ref, min_year)
+            if len(carried):
+                merged = pd.concat([merged, carried], ignore_index=True)
+                carried_n = len(carried)
+                log(f"· S4.5 结转老坏账：{carried_n} 行（上一版 all 有、当周源无、应收≠0）")
+        except Exception as e:
+            log(f"⚠ 结转失败跳过：{e}")
+
     # S5 删 0 行
     merged, removed = drop_zero_receivable(merged)
     log(f"· S5 删 0 行：删 {len(removed)} 行 → 余 {len(merged)} 行")
@@ -629,6 +691,7 @@ def run(source, ref, rules, out_path, base_month=None):
            ["S1 合并行数", len(master)],
            ["S4 归属改动行数", len(reassign)],
            ["S4 归属存疑(待人工确认)", len(suspect)],
+           ["S4.5 结转老坏账行数", carried_n],
            ["S5 删0行数", len(removed)],
            ["主表最终行数", len(master_out)],
            ["未匹配(#N/A)", len(unmatched)],
