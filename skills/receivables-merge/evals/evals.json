@@ -1,0 +1,48 @@
+{
+  "skill_name": "receivables-merge",
+  "note": "skill-creator 测试 prompt。should_trigger=true 的应触发本技能并按 SKILL.md 行为；false 的是近似干扰项不该触发。脚本层稳定性见 tests/test_robustness.py。",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我跑一下这周的应收账款合并，这周的源台账（2026.6.4日应收.xlsx）和上一版做好的 all（2026.5.28应收all.xlsx）都在我下载文件夹里",
+      "should_trigger": true,
+      "expected_output": "agent 识别源台账=日应收、回填源=上一版all（按内容认、跟我核对一句），跑 merge.py（带 --ref），跑完先把『认列告警』和『归属变更/存疑』摆出来让我确认，再给最终 应收all。"
+    },
+    {
+      "id": 2,
+      "prompt": "把应收台账按销售归并一下出个总表",
+      "should_trigger": true,
+      "expected_output": "触发本技能；若没指明文件，agent 去约定目录扫/问我要源表与上一版 all。"
+    },
+    {
+      "id": 3,
+      "prompt": "跑应收的时候提示『关键列没认出：应收金额』，sheet 2025，咋办",
+      "should_trigger": true,
+      "expected_output": "agent 解释：源表 2025 这张把『应收金额』列改了名→这批会算错；让我把新列名加进 config/列名别名.json，然后重跑确认告警消失。不擅自跳过。"
+    },
+    {
+      "id": 4,
+      "prompt": "骆利飞离职了，他名下的应收账以后归王雄接手，更新一下",
+      "should_trigger": true,
+      "expected_output": "agent 在 config/销售归属维护表.md 段一加/改『骆利飞 | 王雄 | 直接接手』，确认后 git commit 固化；不写进代码。"
+    },
+    {
+      "id": 5,
+      "prompt": "源表里多了个 sheet 叫『9月批量』，跑应收报了个未知sheet告警",
+      "should_trigger": true,
+      "expected_output": "agent 不擅自当普通年份处理；问我这是不是新的技术统一确认批次、年度记啥、整批交付月哪个月，确认后补进 config/业务规则.md 再重跑。"
+    },
+    {
+      "id": 6,
+      "prompt": "帮我把这周的银行回单 PDF 按客户名导出成台账",
+      "should_trigger": false,
+      "expected_output": "不该触发本技能（这是回单导出，另一个 skill）。"
+    },
+    {
+      "id": 7,
+      "prompt": "把应收 all 按销售人员拆成一人一个 Excel 发给他们",
+      "should_trigger": false,
+      "expected_output": "不该触发本技能（这是『按销售拆分』后续 skill，本技能只负责合并出 all）。"
+    }
+  ]
+}

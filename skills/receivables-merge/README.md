@@ -11,9 +11,12 @@ receivables-merge/
 ├── references/
 │   ├── SOP_应收账款合并.md   # 完整流程与口径（视频+成品实证）
 │   └── 思路_skills化.md       # 设计思路
-├── config/
-│   ├── 列名别名.json          # S1 认列规则（会变，改这里不改码）
-│   └── 销售归属维护表.md       # 销售归属（离职→接手、客户→重分配）；人维护、agent 每次摆出来让人确认
+├── config/                   # 「活」的配置：会变/要判断的都在这，改表不改码
+│   ├── 列名别名.json          # S1 认列规则
+│   ├── 销售归属维护表.md       # 销售归属（离职→接手、客户→重分配）；人维护、agent 每次确认
+│   └── 业务规则.md            # 特殊批次 / 跳过的 sheet / 业务规则说明；agent 跑前先读
+├── tests/test_robustness.py  # 稳定性回归测试（缺文件/坏输入/确定性）
+├── evals/evals.json          # skill-creator 测试 prompt
 └── 工作区/{input,output}/    # 运行时数据（.gitignore）
 ```
 

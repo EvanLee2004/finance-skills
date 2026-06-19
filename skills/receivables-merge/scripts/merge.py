@@ -15,9 +15,10 @@
 S1–S3 移植自验收过的 merge_receivables.py（账龄/交付月份与赵成品逐行 100% 一致）。
 
 用法（agent 识别好文件后传路径；也可自动扫工作区 input/）：
-  python3 merge.py --source 源台账.xlsx --ref 回填源.xlsx --rules 营销人员应收匹配规则.xlsx --out 应收all.xlsx
-  python3 merge.py --inspect            # 只打印识别到的三个输入与表头
-其中 --ref / --rules 可省（省 ref 跳过回填；省 rules 跳过归属）。
+  python3 merge.py --source 源台账.xlsx --ref 回填源.xlsx --rules config/销售归属维护表.md --out 应收all.xlsx
+  python3 merge.py --inspect            # 只打印识别到的输入与表头
+其中 --ref / --rules 可省（省 ref 跳过回填+结转；省 rules 跳过归属；--rules 默认用 config/销售归属维护表.md）。
+缺文件/格式不对会清晰报错或优雅跳过，不裸崩。
 """
 import os
 import re
@@ -85,6 +86,44 @@ def load_aliases():
 
 
 COLUMN_ALIASES, ANNOTATION_COLS = None, None  # 在 main 里加载
+
+
+def load_business_rules():
+    """读 config/业务规则.md 的『特殊批次』『跳过的 sheet』表 → 覆盖 CONFIG 默认。
+       缺文件/解析失败 → 保留内置默认，绝不崩。让"会变的批次规则"成为活的 MD。"""
+    p = os.path.join(CONFIG_DIR, "业务规则.md")
+    if not os.path.isfile(p):
+        return
+    try:
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
+    except Exception as e:
+        log(f"⚠ 读 业务规则.md 失败({e})，用内置默认。")
+        return
+    ylab, deliver, exclude = {}, {}, []
+    for part in re.split(r"(?m)^##\s+", text):
+        ls = part.splitlines()
+        head = ls[0] if ls else ""
+        rows = _parse_md_table(ls)
+        if "特殊批次" in head:
+            for c in rows:
+                name = (c[0] if len(c) > 0 else "").strip()
+                lab = (c[1] if len(c) > 1 else "").strip()
+                dm = (c[2] if len(c) > 2 else "").strip()
+                if name and lab:
+                    ylab[name] = lab
+                if name and re.fullmatch(r"\d{6}", dm):
+                    deliver[name] = dm
+        elif "跳过" in head:
+            for c in rows:
+                if c and c[0].strip():
+                    exclude.append(c[0].strip())
+    if ylab:
+        CONFIG["SHEET_YEAR_LABEL"] = ylab
+    if deliver:
+        CONFIG["SHEET_DELIVER_MONTH"] = deliver
+    if exclude:
+        CONFIG["EXCLUDE_SHEETS"] = exclude
 
 OUTPUT_HEADERS = [
     "年度", "销售人员", "客户名称", "新智云单号", "文件名", "应收金额", "交付月份", "账龄(月份)",
@@ -201,22 +240,23 @@ def _scan_features(path):
 
 
 def find_inputs(input_dir):
-    """从一个目录按内容认出【源台账 / 回填源 / 维护表】，不靠文件名。"""
+    """从一个目录按内容认出【源台账 / 回填源 / 维护表】，不靠文件名。
+       维护表是 .md（一般放 config/，不在 input；此处兜底）；源台账/回填源是 .xlsx。"""
     if not os.path.isdir(input_dir):
         return None, None, None
-    cands = [os.path.join(input_dir, f) for f in sorted(os.listdir(input_dir))
+    allf = sorted(os.listdir(input_dir))
+    cands = [os.path.join(input_dir, f) for f in allf
              if f.lower().endswith(EXCEL_EXTS) and not f.startswith(("~$", "."))]
+    md = [os.path.join(input_dir, f) for f in allf if f.lower().endswith(".md")]
+    rules = md[0] if md else None       # 维护表只认 .md，绝不把 xlsx 当 rules（否则 MD 解析器会吃二进制崩）
     if not cands:
-        return None, None, None
+        return None, None, rules
     feats = {p: _scan_features(p) for p in cands}
-    # 维护表：含 离职+接手 列
-    rules = next((p for p in cands if feats[p]["rules"]), None)
-    rest = [p for p in cands if p != rules]
     # 回填源：含标注列(>=3)或含年度列
-    ref_cands = [p for p in rest if feats[p]["ann"] >= 3 or feats[p]["ycol"]]
+    ref_cands = [p for p in cands if feats[p]["ann"] >= 3 or feats[p]["ycol"]]
     ref = max(ref_cands, key=lambda p: (feats[p]["ann"], feats[p]["ycol"])) if ref_cands else None
     # 源台账：剩下里年份分表最多的
-    src_cands = [p for p in rest if p != ref] or rest
+    src_cands = [p for p in cands if p != ref] or cands
     source = max(src_cands, key=lambda p: feats[p]["years"]) if src_cands else None
     if ref is not None and source is not None and os.path.abspath(ref) == os.path.abspath(source):
         ref = None
@@ -228,9 +268,17 @@ def normalize_sheet(df, sheet_name):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     out = pd.DataFrame(index=df.index)
+    matched = set()
     for canon, names in COLUMN_ALIASES.items():
         hit = next((n for n in names if n in df.columns), None)
-        out[canon] = df[hit] if hit else None
+        if hit is None:
+            out[canon] = None
+            continue
+        matched.add(canon)
+        col = df[hit]
+        if isinstance(col, pd.DataFrame):   # 源表有重名列 → 取第一列，避免赋值崩
+            col = col.iloc[:, 0]
+        out[canon] = col
     ym1 = out["_交付月份直取"].map(to_yyyymm)
     ym2 = out["_交付日期回退"].map(to_yyyymm)
     out["交付月份"] = ym1.where(ym1.notna(), ym2)
@@ -251,28 +299,42 @@ def normalize_sheet(df, sheet_name):
     out["__来源sheet"] = str(sheet_name)
     key_cols = ["客户名称", "单号", "新智云单号", "应收金额"]
     out = out[~out[key_cols].isna().all(axis=1)].reset_index(drop=True)
-    return out
+    # 关键列认列自检：关键列没认出 → 这批数据会静默丢失/算错，必须告警（不能默默丢）。
+    missing = [c for c in ("销售人员", "客户名称", "应收金额") if c not in matched]
+    if "新智云单号" not in matched and "单号" not in matched:
+        missing.append("新智云单号/单号(主键)")
+    return out, missing
 
 
 def load_and_merge(source_path):
-    frames, report = [], []
+    frames, report, col_warn = [], [], []
     xls = pd.ExcelFile(source_path)
     try:
         for s in list(xls.sheet_names):
             if s in CONFIG["EXCLUDE_SHEETS"]:
                 report.append((s, "跳过", 0)); continue
+            sn = str(s).strip()
+            # 未知 sheet 告警：不是4位年份、又不在"特殊批次"表里 → 别猜，问人
+            if not re.fullmatch(r"\d{4}", sn) and sn not in CONFIG["SHEET_YEAR_LABEL"]:
+                col_warn.append({"sheet": sn, "问题": "未知 sheet（非年份、非已登记特殊批次）",
+                                 "建议": "问人：是不是新的特殊批次？年度记啥、整批交付月哪个月？补进 业务规则.md"})
+                log(f"⚠ 未知 sheet「{sn}」：非年份、非已登记特殊批次——按普通年份处理可能出错，建议问人。")
             df = pd.read_excel(xls, sheet_name=s)
             if df.empty:
                 report.append((s, "空表", 0)); continue
-            norm = normalize_sheet(df, s)
+            norm, missing = normalize_sheet(df, s)
             frames.append(norm)
+            if missing:
+                col_warn.append({"sheet": sn, "问题": f"关键列没认出来：{'、'.join(missing)}",
+                                 "建议": "源表可能改了列名 → 这批数据会丢失/算错；在 列名别名.json 把新列名加进去"})
+                log(f"⚠ sheet「{sn}」关键列没认出：{'、'.join(missing)}（这批数据可能丢失/算错！）")
             n_fb = int(norm["__主键回退"].sum())
             report.append((s, f"年度={year_label(s)}" + (f"; 主键回退{n_fb}行" if n_fb else ""), len(norm)))
     finally:
         xls.close()
     if not frames:
         raise RuntimeError("源台账没有可合并的 sheet。")
-    return pd.concat(frames, ignore_index=True), report
+    return pd.concat(frames, ignore_index=True), report, col_warn
 
 
 # --------------------------- S2 账龄 ---------------------------
@@ -422,10 +484,22 @@ def _parse_md_table(lines):
 def load_rules(rules_path):
     """读【MD 维护表】→ (departed_map, customer_map, composite_set)。
        段一『按销售接手』：离职|接手|处理方式|备注；处理方式含"细分/追溯/复合" → 进 composite_set。
-       段二『按公司接手』：客户(含关键词)|接手|备注。"""
+       段二『按公司接手』：客户(含关键词)|接手|备注。
+       防御：缺文件/非.md/解码失败 → 警告并返回空(跳过归属)，绝不崩。"""
+    empty = ({}, {}, set())
+    if not rules_path or not os.path.isfile(rules_path):
+        log(f"⚠ 维护表不存在，跳过销售归属：{rules_path}")
+        return empty
+    if not str(rules_path).lower().endswith((".md", ".markdown", ".txt")):
+        log(f"⚠ 维护表应为 .md 文本（收到 {os.path.basename(rules_path)}），跳过销售归属。")
+        return empty
+    try:
+        with open(rules_path, encoding="utf-8") as f:
+            text = f.read()
+    except Exception as e:
+        log(f"⚠ 读维护表失败({e})，跳过销售归属。")
+        return empty
     departed_map, customer_map, composite_set = {}, {}, set()
-    with open(rules_path, encoding="utf-8") as f:
-        text = f.read()
     for part in re.split(r"(?m)^##\s+", text):          # 按 ## 标题切段
         ls = part.splitlines()
         head = ls[0] if ls else ""
@@ -581,11 +655,11 @@ def _strip_illegal(df):
     return df
 
 
-def write_workbook(out_path, master_out, pivot, reassign, suspect, unmatched, variants, residual, ycheck, removed, report_df):
+def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unmatched, variants, residual, ycheck, removed, report_df):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     sheets = {
         "主表": master_out, "透视汇总": pivot,
-        "归属变更": reassign, "归属存疑": suspect,
+        "认列告警": col_warn, "归属变更": reassign, "归属存疑": suspect,
         "未匹配复核": unmatched, "名称变体": variants, "离职残留": residual,
         "年度校验": ycheck, "被删0行": removed, "运行报告": report_df,
     }
@@ -605,8 +679,10 @@ def run(source, ref, rules, out_path, base_month=None):
     log(f"· 账龄基准月：{base_yyyymm}" + ("（月差再 -1）" if CONFIG["AGING_MINUS_ONE"] else ""))
 
     # S1 + S2
-    master, report = load_and_merge(source)
-    log(f"· S1 合并：{len(master)} 行")
+    master, report, col_warn = load_and_merge(source)
+    col_warn_df = pd.DataFrame(col_warn, columns=["sheet", "问题", "建议"]) if col_warn \
+        else pd.DataFrame(columns=["sheet", "问题", "建议"])
+    log(f"· S1 合并：{len(master)} 行" + (f"｜⚠ 认列告警 {len(col_warn)} 项" if col_warn else ""))
     master = add_aging(master, base_yyyymm)
     log("· S2 账龄完成")
 
@@ -689,6 +765,7 @@ def run(source, ref, rules, out_path, base_month=None):
            ["维护表", os.path.basename(rules) if rules else "（无）"],
            ["账龄基准月", base_yyyymm],
            ["S1 合并行数", len(master)],
+           ["⚠ 认列告警(关键列/未知sheet)", len(col_warn)],
            ["S4 归属改动行数", len(reassign)],
            ["S4 归属存疑(待人工确认)", len(suspect)],
            ["S4.5 结转老坏账行数", carried_n],
@@ -700,7 +777,7 @@ def run(source, ref, rules, out_path, base_month=None):
            ["年度不一致", len(ycheck)]]
     report_df = pd.DataFrame(rep, columns=["项目", "值"])
 
-    write_workbook(out_path, master_out, pivot, reassign_sum, suspect, unmatched, variants, residual, ycheck, removed_out, report_df)
+    write_workbook(out_path, master_out, pivot, reassign_sum, suspect, col_warn_df, unmatched, variants, residual, ycheck, removed_out, report_df)
     log(f"\n✓ 完成：{out_path}")
     log(f"  主表 {len(master_out)} 行 | 删0 {len(removed)} | 归属改动 {len(reassign)} | #N/A {len(unmatched)} | 离职残留 {len(residual)}")
     return master_out
@@ -720,6 +797,7 @@ def inspect_mode(input_dir):
 def main():
     global COLUMN_ALIASES, ANNOTATION_COLS
     COLUMN_ALIASES, ANNOTATION_COLS = load_aliases()
+    load_business_rules()    # 用活的 业务规则.md 覆盖特殊批次/跳过sheet（缺则用默认）
     ap = argparse.ArgumentParser(description="应收账款合并 S1–S8")
     ap.add_argument("--source"); ap.add_argument("--ref"); ap.add_argument("--rules")
     ap.add_argument("--out"); ap.add_argument("--base-month")
@@ -735,6 +813,13 @@ def main():
             log(f"✗ 没找到源台账。请把文件放进 {a.input_dir}/ 或用 --source 指定。"); sys.exit(1)
     rules = rules or (os.path.join(CONFIG_DIR, "销售归属维护表.md")
                       if os.path.isfile(os.path.join(CONFIG_DIR, "销售归属维护表.md")) else None)
+    # —— 预检：清晰报错而非裸崩 ——
+    if source and not os.path.isfile(source):
+        log(f"✗ 源台账文件不存在：{source}"); sys.exit(1)
+    if ref and not os.path.isfile(ref):
+        log(f"⚠ 回填源不存在，跳过回填+结转：{ref}"); ref = None
+    if a.base_month and not (re.fullmatch(r"\d{6}", str(a.base_month)) and 1 <= int(str(a.base_month)[4:6]) <= 12):
+        log(f"✗ --base-month 应为 YYYYMM 六位合法月份（收到 {a.base_month}）。"); sys.exit(1)
     out_path = a.out or os.path.join(WORK_OUTPUT, f"应收all_{datetime.datetime.now():%Y%m%d_%H%M%S}.xlsx")
     run(source, ref, rules, out_path, a.base_month)
 
