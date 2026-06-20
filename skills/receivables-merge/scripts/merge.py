@@ -554,10 +554,16 @@ def attribute_sales(merged, departed_map, customer_map, composite_set):
 
 # --------------------------- S5 删 0 行 ---------------------------
 def drop_zero_receivable(merged):
-    """删掉应收金额=0 或 空 的行（已回款/核销）。返回(保留, 被删df)。"""
+    """删掉应收金额=0 或 空 的行（已回款/核销）。返回(保留, 被删df)。
+    区分『真的0=已回款』vs『解析不出=数据异常』，别让数据异常被误当已回款。"""
     amt = pd.to_numeric(merged["应收金额"], errors="coerce")
     keep_mask = amt.notna() & (amt != 0)
     removed = merged.loc[~keep_mask].copy()
+    removed["删除原因"] = amt.loc[~keep_mask].map(
+        lambda v: "应收=0(已回款/核销)" if pd.notna(v) else "应收为空/非数字(数据异常?待查)")
+    n_nan = int(amt.loc[~keep_mask].isna().sum())
+    if n_nan:
+        log(f"⚠ {n_nan} 行应收金额解析不出(空/非数字)被删——可能数据异常，查『被删0行』删除原因列。")
     return merged.loc[keep_mask].reset_index(drop=True), removed
 
 
@@ -638,6 +644,7 @@ def build_pivot(master_out):
     d["应收金额"] = pd.to_numeric(d["应收金额"], errors="coerce").fillna(0)
     piv = (d.groupby(["销售人员", "客户名称"], dropna=False)["应收金额"]
            .sum().reset_index().sort_values(["销售人员", "应收金额"], ascending=[True, False]))
+    piv["应收金额"] = piv["应收金额"].round(2)
     return piv
 
 
@@ -747,16 +754,19 @@ def run(source, ref, rules, out_path, base_month=None):
     merged["__yorder"] = merged["年度"].map(year_sort_key)
     merged = merged.sort_values("__yorder", kind="stable").reset_index(drop=True)
     master_out = pd.DataFrame({h: (merged[h] if h in merged.columns else None) for h in OUTPUT_HEADERS})
+    # 应收金额保留 2 位小数（去浮点噪声 1369.6800000000003→1369.68；财务金额本就是分）
+    master_out["应收金额"] = pd.to_numeric(master_out["应收金额"], errors="coerce").round(2)
 
     # 未匹配清单
-    um = ~merged["__matched"].astype(bool) if "__matched" in merged.columns else merged[CONFIG["KEY"]].isna()
+    um = ~merged["__matched"].fillna(False).astype(bool) if "__matched" in merged.columns else merged[CONFIG["KEY"]].isna()
     unmatched = merged.loc[um, ["年度", "销售人员", "客户名称", "新智云单号", "应收金额", "交付月份"]].copy()
 
     # S8 透视
     pivot = build_pivot(master_out)
 
-    removed_out = removed[["年度", "销售人员", "客户名称", "新智云单号", "应收金额", "交付月份"]].copy() \
-        if len(removed) else pd.DataFrame(columns=["年度", "销售人员", "客户名称", "新智云单号", "应收金额", "交付月份"])
+    _rm_cols = ["年度", "销售人员", "客户名称", "新智云单号", "应收金额", "交付月份", "删除原因"]
+    removed_out = removed[[c for c in _rm_cols if c in removed.columns]].copy() \
+        if len(removed) else pd.DataFrame(columns=_rm_cols)
 
     rep = [["源台账", os.path.basename(source)],
            ["回填源", os.path.basename(ref) if ref else "（无）"],
