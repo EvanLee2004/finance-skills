@@ -80,6 +80,10 @@ def main():
     rc, log = run(["--source", src, "--rules", src, "--base-month", "202601", "--out", out])
     check("退出码 0 且提示应为 .md", rc == 0 and ".md" in log)
 
+    print("【4b】显式 --rules 缺文件 → 硬报错(退出1)，不静默跳过归属")
+    rc, log = run(["--source", src, "--rules", os.path.join(tmp, "no_rules.md"), "--base-month", "202601", "--out", out])
+    check("退出码 1 且提示维护表不存在", rc == 1 and "维护表文件不存在" in log)
+
     print("【5】关键列改名 → 大声告警(不静默丢)")
     bad = os.path.join(tmp, "bad.xlsx"); make_source(bad, rename_amount=True, unknown_sheet=True)
     out2 = os.path.join(tmp, "out2.xlsx")

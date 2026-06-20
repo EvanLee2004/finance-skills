@@ -855,6 +855,12 @@ def main():
         source, ref, rules = find_inputs(a.input_dir)
         if not source:
             log(f"✗ 没找到源台账。请把文件放进 {a.input_dir}/ 或用 --source 指定。"); sys.exit(1)
+    # 显式传了 --rules 却找不到 → 硬报错（别静默跳过归属！常见坑：工作目录不对、相对路径没解析到）
+    if a.rules and not os.path.isfile(a.rules):
+        log(f"✗ 维护表文件不存在：{a.rules}")
+        log("  相对路径是相对【当前工作目录】的——用相对路径请先 cd 到 skill 根目录，或改绝对路径。")
+        log("  （提示：省略 --rules 会自动用 skill 自带的 config/销售归属维护表.md，不受工作目录影响。）")
+        sys.exit(1)
     rules = rules or (os.path.join(CONFIG_DIR, "销售归属维护表.md")
                       if os.path.isfile(os.path.join(CONFIG_DIR, "销售归属维护表.md")) else None)
     # —— 预检：清晰报错而非裸崩 ——
