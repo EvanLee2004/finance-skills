@@ -215,9 +215,9 @@ EXCEL_EXTS = (".xlsx", ".xlsm")
 
 
 def _scan_features(path):
-    """提取判别特征：标注列种类数 / 是否含新智云单号 / 是否含年度列 / 年份分表数 / 是否像维护表。"""
+    """提取判别特征：标注列种类数 / 是否含新智云单号 / 是否含年度列 / 年份分表数。"""
     ann = 0
-    has_key = has_year_col = is_rules = False
+    has_key = has_year_col = False
     year_sheets = 0
     try:
         with pd.ExcelFile(path) as xls:
@@ -229,14 +229,12 @@ def _scan_features(path):
                     has_key = True
                 if "年度" in cols:
                     has_year_col = True
-                if any("离职" in c for c in cols) and any("接手" in c for c in cols):
-                    is_rules = True
                 hits = sum(1 for kws in ANNOTATION_COLS.values()
                            if any(any(kw in c for c in cols) for kw in kws))
                 ann = max(ann, hits)
     except Exception:
         pass
-    return {"ann": ann, "key": has_key, "ycol": has_year_col, "years": year_sheets, "rules": is_rules}
+    return {"ann": ann, "key": has_key, "ycol": has_year_col, "years": year_sheets}
 
 
 def find_inputs(input_dir):
@@ -794,6 +792,39 @@ def inspect_mode(input_dir):
                     log(f"   「{s}」({len(cols)}列): " + " | ".join(cols[:18]))
 
 
+def check_mode(source, ref, rules):
+    """预检：依赖 + 配置可解析 + 输入存在。跑正活前先 --check，问题早暴露。返回是否全过。"""
+    ok = True
+    log("=== 预检 (--check) ===")
+    for mod in ("pandas", "openpyxl"):
+        try:
+            __import__(mod); log(f"  ✓ 依赖 {mod}")
+        except ImportError:
+            log(f"  ✗ 缺依赖 {mod}  → pip install {mod}"); ok = False
+    for f in ("列名别名.json", "业务规则.md", "销售归属维护表.md"):
+        p = os.path.join(CONFIG_DIR, f)
+        log(f"  {'✓' if os.path.isfile(p) else '⚠'} 配置 {f}" + ("" if os.path.isfile(p) else "（缺 → 用内置默认/跳过该步）"))
+    try:
+        load_business_rules()
+        log(f"  ✓ 业务规则.md 可解析（特殊批次 {len(CONFIG['SHEET_DELIVER_MONTH'])} 个、跳过 {len(CONFIG['EXCLUDE_SHEETS'])} sheet）")
+    except Exception as e:
+        log(f"  ✗ 业务规则.md 解析失败：{e}"); ok = False
+    rp = rules or os.path.join(CONFIG_DIR, "销售归属维护表.md")
+    if os.path.isfile(rp):
+        try:
+            dm, cm, cs = load_rules(rp)
+            log(f"  ✓ 维护表可解析（离职 {len(dm)} / 客户 {len(cm)} / 细分追溯 {len(cs)}）")
+        except Exception as e:
+            log(f"  ✗ 维护表解析失败：{e}"); ok = False
+    for tag, p in [("源台账", source), ("回填源", ref)]:
+        if p:
+            exists = os.path.isfile(p)
+            log(f"  {'✓' if exists else '✗'} {tag}：{p}")
+            ok = ok and exists
+    log("=== " + ("预检通过 ✓ 可以跑" if ok else "预检发现问题 ✗ 先解决") + " ===")
+    return ok
+
+
 def main():
     global COLUMN_ALIASES, ANNOTATION_COLS
     COLUMN_ALIASES, ANNOTATION_COLS = load_aliases()
@@ -803,10 +834,13 @@ def main():
     ap.add_argument("--out"); ap.add_argument("--base-month")
     ap.add_argument("--input-dir", default=WORK_INPUT)
     ap.add_argument("--inspect", action="store_true")
+    ap.add_argument("--check", action="store_true", help="预检：依赖/配置/输入，不跑正活")
     a = ap.parse_args()
     if a.inspect:
         inspect_mode(a.input_dir); return
     source, ref, rules = a.source, a.ref, a.rules
+    if a.check:
+        sys.exit(0 if check_mode(source, ref, rules) else 1)
     if not source:  # 没显式给 → 扫工作区按内容认
         source, ref, rules = find_inputs(a.input_dir)
         if not source:
