@@ -870,7 +870,14 @@ def main():
         log(f"⚠ 回填源不存在，跳过回填+结转：{ref}"); ref = None
     if a.base_month and not (re.fullmatch(r"\d{6}", str(a.base_month)) and 1 <= int(str(a.base_month)[4:6]) <= 12):
         log(f"✗ --base-month 应为 YYYYMM 六位合法月份（收到 {a.base_month}）。"); sys.exit(1)
-    out_path = a.out or os.path.join(WORK_OUTPUT, f"应收all_{datetime.datetime.now():%Y%m%d_%H%M%S}.xlsx")
+    # 默认输出位置：落在【源文件同目录】——她在哪放的源表就在哪拿结果，agent 忘了传 --out 也不会丢进内部目录
+    if a.out:
+        out_path = a.out
+    elif source:
+        out_path = os.path.join(os.path.dirname(os.path.abspath(source)),
+                                f"应收all_{datetime.datetime.now():%Y%m%d_%H%M%S}.xlsx")
+    else:
+        out_path = os.path.join(WORK_OUTPUT, f"应收all_{datetime.datetime.now():%Y%m%d_%H%M%S}.xlsx")
     run(source, ref, rules, out_path, a.base_month)
 
 
