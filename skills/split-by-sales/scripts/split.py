@@ -126,6 +126,12 @@ def report_date(override=None):
     return datetime.date.today().strftime("%m%d")
 
 
+def _date_from_text(s):
+    """从文件名/sheet名里抠日期 → 'MMDD'。如 '2026.6.4应收all' → '0604'；抠不到返回 None。"""
+    m = re.search(r"(\d{4})[.\-/年]\s*(\d{1,2})[.\-/月]\s*(\d{1,2})", str(s or ""))
+    return f"{int(m.group(2)):02d}{int(m.group(3)):02d}" if m else None
+
+
 # ===== 输出样式 =====
 def style_sheet(ws, n_rows, date_str):
     for i, h in enumerate(HEADERS, 1):
@@ -296,7 +302,14 @@ def main():
         log(f"✗ 输入要是 .xlsx（收到 {os.path.basename(inp)}）。"); sys.exit(1)
 
     ignore_sales, gm_owners = load_split_rules()
-    date_str = report_date(a.date)
+    date_str = a.date
+    if not date_str:                   # 没显式给日期 → 优先从 all 文件名取（别用今天，免得文件名标错期）
+        date_str = _date_from_text(os.path.basename(inp))
+        if date_str:
+            log(f"· 日期自动取自文件名：{date_str}（要改用 --date）")
+        else:
+            date_str = report_date()
+            log(f"· ⚠ 文件名里没日期，用今天 {date_str}；当期不是今天的话请用 --date 指定！")
     if a.out_dir:
         out_dir = a.out_dir
     elif auto_picked:                  # 自动取的 → 结果落 工作区/output，不和输入混一起

@@ -102,6 +102,14 @@ def main():
         return ws.max_row
     check("两次张健文件行数一致", rowcount(o1, "张健") == rowcount(o2, "张健") > 1)
 
+    print("【5】不给 --date → 自动从文件名取日期（不用今天）")
+    dated = os.path.join(tmp, "2026.6.4应收all.xlsx"); make_all(dated)
+    o5 = os.path.join(tmp, "o5")
+    rc, log = run(["--input", dated, "--out-dir", o5])
+    check("日志显示自动取自文件名", "自动取自文件名" in log and "0604" in log)
+    if os.path.isdir(o5):
+        check("产物文件名含 0604（非今天）", any("0604" in f for f in os.listdir(o5)))
+
     print(f"\n{'='*40}\n通过 {PASS} / 失败 {FAIL}  →  {'ALL PASS ✓' if FAIL == 0 else 'HAS FAILURES ✗'}")
     sys.exit(0 if FAIL == 0 else 1)
 

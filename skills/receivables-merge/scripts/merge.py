@@ -679,6 +679,9 @@ def run(source, ref, rules, out_path, base_month=None):
     log(f"· 源台账：{os.path.basename(source)}")
     log(f"· 回填源：{os.path.basename(ref) if ref else '（无，跳过回填）'}")
     log(f"· 维护表：{os.path.basename(rules) if rules else '（无，跳过归属）'}")
+    if not ref:
+        log("⚠ 没给上一版 all（回填源）→ 标注列会全空、老坏账不结转。"
+            "若不是第一次建表，八成是漏放了——请把上一版 应收all 一起放进来再跑！")
 
     base_yyyymm = base_month or CONFIG["REPORT_MONTH"] or parse_report_month(source)
     log(f"· 账龄基准月：{base_yyyymm}" + ("（月差再 -1）" if CONFIG["AGING_MINUS_ONE"] else ""))
