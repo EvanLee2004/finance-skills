@@ -1,0 +1,12 @@
+# 真实批量财务数据不进库
+*.xlsx
+*.xls
+*.csv
+!config/*.xlsx
+工作区/input/*
+工作区/output/*
+!**/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store
+~$*
