@@ -38,7 +38,8 @@ def make_all(path):
     ws.append(HEADERS17)
     data = [
         ["2026", "张健", "甲公司", "SO1", "f1", 100, "202603", 2] + [""] * 9,
-        ["2026", "张健", "乙公司", "SO2", "f2", 200, "202603", 2] + [""] * 9,
+        ["2026", "张健", "乙公司", "SO2", "f2", 200, "202512", 8] + [""] * 9,   # 账龄不同，测排序
+        ["2026", "张健", "丙公司", "SO2b", "f2b", 150, "202509", 5] + [""] * 9,
         ["2026", "于占国", "丙公司", "SO3", "f3", 300, "202603", 2] + [""] * 9,
         ["2018", "于占国-高美杰", "华电", "GM1", "f4", 400, "201803", 90] + [""] * 9,   # → 于占国 GM订单
         ["2018", "梁玲玲-高美杰", "二冶", "GM2", "f5", 500, "201803", 90] + [""] * 9,   # → 梁玲玲 主表
@@ -72,6 +73,12 @@ def main():
         if yf:
             wb = openpyxl.load_workbook(os.path.join(out, yf))
             check("于占国文件里有 GM订单 sheet", "GM订单" in wb.sheetnames)
+        # 排序：张健文件账龄应【降序】（最该催的老账在前）
+        zf = next((f for f in files if "张健" in f), None)
+        if zf:
+            ws = openpyxl.load_workbook(os.path.join(out, zf), data_only=True).active
+            ages = [r[7] for r in ws.iter_rows(min_row=2, values_only=True) if isinstance(r[7], int)]
+            check("张健文件账龄降序排好", len(ages) >= 2 and ages == sorted(ages, reverse=True))
 
     print("【2】缺输入文件 → 清晰报错(退出1)")
     rc, log = run(["--input", os.path.join(tmp, "nope.xlsx"), "--out-dir", out])

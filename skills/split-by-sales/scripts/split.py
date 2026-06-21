@@ -242,7 +242,7 @@ def do_split(input_path, out_dir, date_str, ignore_sales, gm_owners):
     for name in all_names:
         main_rows = _sort_rows(groups.get(name, []))   # 账龄降序，整齐好催
         gm_rows = _sort_rows(gm_groups.get(name, []))
-        out = openpyxl.Workbook(); ws = out.active; ws.title = safe_name(name)
+        out = openpyxl.Workbook(); ws = out.active; ws.title = safe_name(name)[:31]  # openpyxl sheet名≤31
         style_sheet(ws, len(main_rows), date_str); write_rows(ws, main_rows)
         if gm_rows:
             ws2 = out.create_sheet(GM_SHEET_NAME)
@@ -282,6 +282,7 @@ def main():
     a = ap.parse_args()
 
     inp = a.input
+    auto_picked = not a.input          # 没显式给 → 自动从 工作区/input 取
     if not inp:  # 没显式给 → 去 input-dir 找最新 xlsx
         cands = [os.path.join(a.input_dir, f) for f in sorted(os.listdir(a.input_dir))] \
             if os.path.isdir(a.input_dir) else []
@@ -296,7 +297,12 @@ def main():
 
     ignore_sales, gm_owners = load_split_rules()
     date_str = report_date(a.date)
-    out_dir = a.out_dir or os.path.join(os.path.dirname(os.path.abspath(inp)), f"拆分_{date_str}")
+    if a.out_dir:
+        out_dir = a.out_dir
+    elif auto_picked:                  # 自动取的 → 结果落 工作区/output，不和输入混一起
+        out_dir = os.path.join(WORK_OUTPUT, f"拆分_{date_str}")
+    else:                              # 用户给了具体 all → 结果就放它旁边，好找
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(inp)), f"拆分_{date_str}")
     log(f"· 输入：{os.path.basename(inp)}")
     log(f"· 拆分规则：忽略 {sorted(ignore_sales)}；GM单独成sheet {sorted(gm_owners)}")
     try:
