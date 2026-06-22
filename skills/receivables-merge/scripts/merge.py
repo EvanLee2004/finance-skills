@@ -538,8 +538,10 @@ def load_rules(rules_path):
             for c in rows:
                 cust = c[0] if len(c) > 0 else ""
                 to = c[1] if len(c) > 1 else ""
+                scope = c[2] if len(c) > 2 else ""      # 范围列：仅高美杰 / 通用(默认)
                 if cust and to:
-                    customer_map[cust] = to
+                    conly = any(k in scope for k in ("仅高美杰", "仅细分", "细分追溯"))
+                    customer_map[cust] = (to, conly)     # 值=(接手人, 是否仅对细分追溯行生效)
     return departed_map, customer_map, composite_set
 
 
@@ -558,23 +560,26 @@ def attribute_sales(merged, departed_map, customer_map, composite_set):
     for orig_raw, cust_raw in zip(merged["销售人员"], merged["客户名称"]):
         orig = "" if orig_raw is None or (isinstance(orig_raw, float) and pd.isna(orig_raw)) else str(orig_raw).strip()
         cust = "" if cust_raw is None or (isinstance(cust_raw, float) and pd.isna(cust_raw)) else str(cust_raw).strip()
-        is_departed = orig in departed_map
-        is_composite = orig in composite_set           # 处理方式=细分追溯（如高美杰）
-        # 优先级（依维护表"直接接手=账全部转接手人"语义）：
-        #   · 直接接手的离职人 → 段一接手人【优先】：其名下的单整本归接手人，客户规则不覆盖。
-        #     例：骆利飞(直接接手→王雄)名下的单(特变/广州库洛/芒果超媒等) → 全部王雄。
-        #   · 细分追溯的离职人(高美杰) / 在职人 → 段二客户规则优先(对所有行生效)，否则段一默认。
-        if is_departed and not is_composite:           # 直接接手 → 段一优先
+        # 段二客户规则【优先】，cust_keys 已按长度降序→「具体客户名」盖过「笼统关键词」。
+        # 多周成品实证的真口径：
+        #   · 标"仅高美杰"的客户键(华电/特变/中国机械=高美杰遗留客户)只对【细分追溯行(高美杰)】生效；
+        #     骆利飞名下的特变因此不被它抢走，落到段一→王雄；高美杰名下的特变→于占国-高美杰。
+        #   · "通用"客户键(中国国际电视/芒果/广州库洛等)对所有行生效(含骆利飞/在职)。
+        owner = None
+        for k in cust_keys:
+            if k and k in cust:
+                cand, conly = customer_map[k]
+                if conly and orig not in composite_set:    # "仅高美杰"规则跳过非细分追溯行
+                    continue
+                owner = cand
+                break
+        if owner is None and orig in departed_map:     # 段一：离职销售名下、无客户规则 → 默认接手人
             owner = departed_map[orig]
-        else:                                          # 细分追溯/在职 → 段二客户规则优先
-            owner = next((customer_map[k] for k in cust_keys if k and k in cust), None)
-            if owner is None and is_departed:          # 段一默认接手（细分追溯无客户规则时）
-                owner = departed_map[orig]
         if owner is None:                              # 在职且无客户规则 → 不动
             new_vals.append(orig_raw); continue
-        if is_composite:                               # 细分追溯 → 复合名「接手-离职」（变体如高美杰1→光名）
+        if orig in composite_set:                      # 处理方式=细分追溯 → 复合名「接手-离职」（变体如高美杰1→光名）
             final = owner if _base_name(owner) == _base_name(orig) else f"{owner}-{orig}"
-        else:                                          # 直接接手/在职重分配 → 光名
+        else:                                          # 处理方式=直接接手/在职重分配 → 光名
             final = owner
         new_vals.append(final)
         if final != orig:

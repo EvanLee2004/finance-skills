@@ -108,6 +108,24 @@ def main():
         return [tuple("" if c is None else str(c) for c in r) for r in ws.iter_rows(values_only=True)]
     check("两次主表逐格一致", sig(o1) == sig(o2))
 
+    print("【7】归属范围：『仅高美杰』客户键只对高美杰名下生效")
+    src2 = os.path.join(tmp, "源2.xlsx")
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "2026"
+    ws.append(["销售人员", "客户名称", "单号", "新智云单号", "文件名", "应收金额", "项目交付"])
+    ws.append(["高美杰", "特变电工新疆", "A1", "A1", "f", 100, "202601"])                       # 仅高美杰→于占国-高美杰
+    ws.append(["骆利飞", "特变电工新疆新能源股份有限公司", "A2", "A2", "f", 100, "202601"])      # 仅高美杰不及骆利飞→段一王雄
+    ws.append(["骆利飞", "中国国际电视总公司", "A3", "A3", "f", 100, "202601"])                  # 通用→于占国
+    wb.save(src2)
+    o3 = os.path.join(tmp, "scope.xlsx")
+    rc, log = run(["--source", src2, "--base-month", "202601", "--out", o3])
+    if rc == 0 and os.path.isfile(o3):
+        m = {r[3]: r[1] for r in openpyxl.load_workbook(o3, data_only=True)["主表"].iter_rows(min_row=2, values_only=True)}
+        check("高美杰的特变→于占国-高美杰（仅高美杰生效）", m.get("A1") == "于占国-高美杰")
+        check("骆利飞的特变→王雄（仅高美杰不及骆利飞，落段一）", m.get("A2") == "王雄")
+        check("骆利飞的中国国际电视→于占国（通用规则生效）", m.get("A3") == "于占国")
+    else:
+        check("范围测试能跑出产物", False)
+
     print(f"\n{'='*40}\n通过 {PASS} / 失败 {FAIL}  →  {'ALL PASS ✓' if FAIL == 0 else 'HAS FAILURES ✗'}")
     sys.exit(0 if FAIL == 0 else 1)
 
