@@ -699,6 +699,25 @@ def _strip_illegal(df):
     return df
 
 
+def _style_master_header(ws, ncol):
+    """美化主表表头（只动表头显示，不改任何数据/逻辑），参考赵亮晶成品格式：
+    前8列浅蓝(BDD7EE)/后9列黄(FFFF00)、等线10.5加粗、居中换行、加粗黑色边框、冻结首行。"""
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    font = Font(name="等线", size=10.5, bold=True)
+    blue = PatternFill("solid", fgColor="BDD7EE")
+    yellow = PatternFill("solid", fgColor="FFFF00")
+    align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    border = Border(*[Side(style="medium", color="000000")] * 4)   # 加粗黑线
+    for i in range(1, ncol + 1):
+        c = ws.cell(1, i)
+        c.font = font
+        c.fill = blue if i <= 8 else yellow
+        c.alignment = align
+        c.border = border
+    ws.row_dimensions[1].height = 30
+    ws.freeze_panes = "A2"
+
+
 def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unmatched, variants, residual, ycheck, removed, report_df):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     sheets = {
@@ -710,6 +729,7 @@ def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unm
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         for name, df in sheets.items():
             _strip_illegal(df).to_excel(w, sheet_name=name, index=False)
+        _style_master_header(w.sheets["主表"], len(master_out.columns))   # 主表表头美化（不改数据）
     return out_path
 
 
