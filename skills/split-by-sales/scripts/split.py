@@ -204,16 +204,16 @@ def read_rows(ws):
 
 # ===== 排序（让每人表整齐、好催账）=====
 def _sort_rows(rows):
-    """每人文件内排序：账龄(月份)【降序】——账龄最久的老账排最上面（最该催的在前）；
-    账龄空的排最后；相同账龄按客户名归拢（同一客户的单挨在一起，整齐）。
-    （要改排序键就改这里：如想按客户排，把 key 改成 (cust, ...)。）"""
+    """每人文件内排序：按【客户名称】（亮晶姐 0620 定：全表排序销售→客户，拆出来的文件里销售恒定，
+    故等价于按客户名归拢——同一客户的单挨在一起，整齐好对）；同一客户内按账龄降序(老账在前)。
+    空客户名排最后。"""
     def key(r):
+        cust = str(r[2] or "").strip()     # 客户名称
         try:
-            a = int(r[7])              # 账龄(月份)
+            a = int(r[7])                  # 账龄(月份)
         except (TypeError, ValueError):
             a = None
-        cust = str(r[2] or "")         # 客户名称
-        return (0, -a, cust) if a is not None else (1, 0, cust)
+        return (cust == "", cust, 0 if a is None else -a)
     return sorted(rows, key=key)
 
 

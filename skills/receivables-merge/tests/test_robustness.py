@@ -42,6 +42,7 @@ def make_source(path, rename_amount=False, unknown_sheet=False):
         ws.append(["销售人员", "客户名称", "单号", "新智云单号", "文件名", amt_hdr, "项目交付"])
         ws.append(["张三", "甲公司", f"SO{yr}1", f"SO{yr}1", "f1", 1000, f"{yr}03"])
         ws.append(["李四", "乙公司", f"SO{yr}2", f"SO{yr}2", "f2", 0, f"{yr}04"])  # 应收0→应删
+        ws.append(["钱七", "己公司", f"SO{yr}3", f"SO{yr}3", "f3", 0.5, f"{yr}05"])  # ≤1→应删(新口径)
     b = wb.create_sheet("6月批量")
     b.append(["销售", "客户", "订单号", "名称", "完成时间", "订单折合本币"])
     b.append(["王五", "丙公司", "GM1", "n1", "2024-06-09", 500])
@@ -66,7 +67,9 @@ def main():
         check("含 主表/认列告警/运行报告 sheet",
               all(s in wb.sheetnames for s in ("主表", "认列告警", "运行报告")))
         rows = len(list(wb["主表"].iter_rows())) - 1
-        check("应收=0 的行被删（5源行→3行）", rows == 3)
+        check("应收=0/≤1 的行都被删（7源行→3行）", rows == 3)
+        names = {r[1] for r in wb["主表"].iter_rows(min_row=2, values_only=True)}
+        check("≤1 元行(钱七0.5)被删（新口径）", "钱七" not in names)
 
     print("【2】缺 --source → 清晰报错(退出1)")
     rc, log = run(["--source", os.path.join(tmp, "nope.xlsx"), "--out", out])

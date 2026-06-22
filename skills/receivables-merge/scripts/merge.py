@@ -46,6 +46,9 @@ CONFIG = {
     "SHEET_DELIVER_MONTH": {"6月批量": "202406"},
     "EXCLUDE_SHEETS": ["Sheet1", "Sheet2", "Sheet3"],
     "REF_SHEET": None,
+    # 小额删除阈值（含）：|应收金额| ≤ 此值的行删掉（已回款/核销/极小额坏账）。
+    # 亮晶姐 0620 定：一元以下及"-"全删（含 ¥1）。可在 业务规则.md 改。
+    "SMALL_AMOUNT_MAX": 1.0,
 }
 
 # 列名别名（会变的配置）：优先读 config/列名别名.json，缺则用内置默认。
@@ -124,6 +127,12 @@ def load_business_rules():
         CONFIG["SHEET_DELIVER_MONTH"] = deliver
     if exclude:
         CONFIG["EXCLUDE_SHEETS"] = exclude
+    m = re.search(r"小额删除阈值[^\d\-]*([\d.]+)", text)   # 活配置：|应收|≤此值删
+    if m:
+        try:
+            CONFIG["SMALL_AMOUNT_MAX"] = float(m.group(1))
+        except ValueError:
+            pass
 
 OUTPUT_HEADERS = [
     "年度", "销售人员", "客户名称", "新智云单号", "文件名", "应收金额", "交付月份", "账龄(月份)",
@@ -410,11 +419,16 @@ def backfill(master, ref_path):
 
 
 # --------------------------- S4.5 结转老坏账（从上一版 all） ---------------------------
-def carry_forward(master_keys, ref_path, min_source_year):
+def carry_forward(master_keys, ref_path, min_source_year, base_yyyymm,
+                  departed_map, customer_map, composite_set):
     """从上一版 all 结转老坏账：ref 里【年度早于源表最早年份(min_source_year) 且 应收≠0】的行——
     这些是源台账已不再列出那些老年份(如2016-2018高美杰遗留)、但还没回款的老账。
     近期年份(源表覆盖范围内)若不在源表，说明已回款结清，**不结转**。
-    账龄/销售归属/标注沿用上一版 all（它已是最终态，成品也不给结转行重算账龄）。
+    亮晶姐 0620 定：
+      · 账龄【每月跟着涨】——按交付月份对当期基准月重算，不再冻结沿用上一版（问题五）。
+      · 销售名【按最新维护表重算】——把结转行重置回原离职名(如高美杰)再走归属，
+        接手人以后再变，老账自动跟着变（问题四①）。
+    标注沿用上一版 all（老坏账多无新智云单号、回填不上，挂着即可，问题六）。
     返回 17 列(+__carried) 的 DataFrame。"""
     ref_sheet = CONFIG["REF_SHEET"] or detect_ref_sheet(ref_path)
     d = pd.read_excel(ref_path, sheet_name=ref_sheet)
@@ -443,17 +457,26 @@ def carry_forward(master_keys, ref_path, min_source_year):
         amt = pd.to_numeric(r.get("应收金额"), errors="coerce")
         if pd.isna(amt) or amt == 0:
             continue
+        dm = to_yyyymm(r.get("交付月份"))
         rec = {
             "年度": yi, "销售人员": r.get("销售人员"), "客户名称": r.get("客户名称"),
             "新智云单号": key, "文件名": r.get("文件名"), "应收金额": amt,
-            "交付月份": to_yyyymm(r.get("交付月份")),
-            "账龄(月份)": r.get(agingcol) if agingcol else None,   # 沿用上一版账龄(成品不重算)
+            "交付月份": dm,
+            "账龄(月份)": aging_months(dm, base_yyyymm, CONFIG["AGING_MINUS_ONE"]),  # 每月重算(问题五)
             "__matched": True, "__carried": True,
         }
         for canon, src in ann_src.items():
             rec[canon] = blankify_annotation(r.get(src)) if src else None
         rows.append(rec)
-    return pd.DataFrame(rows)
+    carried = pd.DataFrame(rows)
+    if len(carried):
+        # 销售名按最新维护表重算（问题四①）：先把结转行重置回"原离职名"，再走与正表相同的归属。
+        # 这样以后接手人一变（改维护表），这些老账自动跟着归到新接手人，不用手动改。
+        bases = sorted((set(composite_set) | set(departed_map)), key=len, reverse=True)
+        carried["销售人员"] = carried["销售人员"].map(
+            lambda name: next((d for d in bases if d and d in str(name or "")), str(name or "").strip()))
+        carried, _ = attribute_sales(carried, departed_map, customer_map, composite_set)
+    return carried
 
 
 # --------------------------- S4 销售归属（维护表驱动） ---------------------------
@@ -535,15 +558,23 @@ def attribute_sales(merged, departed_map, customer_map, composite_set):
     for orig_raw, cust_raw in zip(merged["销售人员"], merged["客户名称"]):
         orig = "" if orig_raw is None or (isinstance(orig_raw, float) and pd.isna(orig_raw)) else str(orig_raw).strip()
         cust = "" if cust_raw is None or (isinstance(cust_raw, float) and pd.isna(cust_raw)) else str(cust_raw).strip()
-        # 段二客户规则：对【所有行】生效（这些客户整体归指定人，不管现在谁持有）。
-        owner = next((customer_map[k] for k in cust_keys if k and k in cust), None)
-        if owner is None and orig in departed_map:     # 段一：离职销售默认接手
+        is_departed = orig in departed_map
+        is_composite = orig in composite_set           # 处理方式=细分追溯（如高美杰）
+        # 优先级（依维护表"直接接手=账全部转接手人"语义）：
+        #   · 直接接手的离职人 → 段一接手人【优先】：其名下的单整本归接手人，客户规则不覆盖。
+        #     例：骆利飞(直接接手→王雄)名下的单(特变/广州库洛/芒果超媒等) → 全部王雄。
+        #   · 细分追溯的离职人(高美杰) / 在职人 → 段二客户规则优先(对所有行生效)，否则段一默认。
+        if is_departed and not is_composite:           # 直接接手 → 段一优先
             owner = departed_map[orig]
+        else:                                          # 细分追溯/在职 → 段二客户规则优先
+            owner = next((customer_map[k] for k in cust_keys if k and k in cust), None)
+            if owner is None and is_departed:          # 段一默认接手（细分追溯无客户规则时）
+                owner = departed_map[orig]
         if owner is None:                              # 在职且无客户规则 → 不动
             new_vals.append(orig_raw); continue
-        if orig in composite_set:                      # 处理方式=细分追溯 → 复合名
+        if is_composite:                               # 细分追溯 → 复合名「接手-离职」（变体如高美杰1→光名）
             final = owner if _base_name(owner) == _base_name(orig) else f"{owner}-{orig}"
-        else:                                          # 处理方式=直接接手 → 光名
+        else:                                          # 直接接手/在职重分配 → 光名
             final = owner
         new_vals.append(final)
         if final != orig:
@@ -554,13 +585,16 @@ def attribute_sales(merged, departed_map, customer_map, composite_set):
 
 # --------------------------- S5 删 0 行 ---------------------------
 def drop_zero_receivable(merged):
-    """删掉应收金额=0 或 空 的行（已回款/核销）。返回(保留, 被删df)。
-    区分『真的0=已回款』vs『解析不出=数据异常』，别让数据异常被误当已回款。"""
+    """删掉【|应收金额| ≤ 小额阈值】或【空/非数字】的行（已回款/核销/极小额）。返回(保留, 被删df)。
+    阈值 = CONFIG['SMALL_AMOUNT_MAX']（默认1，含；亮晶姐 0620 定：一元以下及"-"全删）。
+    区分『小额=已回款/极小额』vs『解析不出=数据异常』，别让数据异常被误当已回款。"""
+    thr = CONFIG.get("SMALL_AMOUNT_MAX", 1.0)
     amt = pd.to_numeric(merged["应收金额"], errors="coerce")
-    keep_mask = amt.notna() & (amt != 0)
+    keep_mask = amt.notna() & (amt.abs() > thr)
     removed = merged.loc[~keep_mask].copy()
     removed["删除原因"] = amt.loc[~keep_mask].map(
-        lambda v: "应收=0(已回款/核销)" if pd.notna(v) else "应收为空/非数字(数据异常?待查)")
+        lambda v: (f"应收≤{thr:g}元(已回款/核销/极小额)" if pd.notna(v)
+                   else "应收为空/非数字(数据异常?待查)"))
     n_nan = int(amt.loc[~keep_mask].isna().sum())
     if n_nan:
         log(f"⚠ {n_nan} 行应收金额解析不出(空/非数字)被删——可能数据异常，查『被删0行』删除原因列。")
@@ -712,7 +746,7 @@ def run(source, ref, rules, out_path, base_month=None):
         merged["__matched"] = False
 
     # S4 归属（确定性应用维护表；变更与存疑交人工确认）
-    departed_map, customer_map = ({}, {})
+    departed_map, customer_map, composite_set = ({}, {}, set())
     reassign = pd.DataFrame(columns=["原销售", "客户名称", "最终销售"])
     orig_counts = merged["销售人员"].map(
         lambda x: "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x).strip()).value_counts()
@@ -736,7 +770,8 @@ def run(source, ref, rules, out_path, base_month=None):
             master_keys = set(merged[CONFIG["KEY"]].map(clean_key).dropna())
             yrs = [y for y in merged["年度"] if isinstance(y, int)]
             min_year = min(yrs) if yrs else 9999
-            carried = carry_forward(master_keys, ref, min_year)
+            carried = carry_forward(master_keys, ref, min_year, base_yyyymm,
+                                    departed_map, customer_map, composite_set)
             if len(carried):
                 merged = pd.concat([merged, carried], ignore_index=True)
                 carried_n = len(carried)
@@ -744,18 +779,23 @@ def run(source, ref, rules, out_path, base_month=None):
         except Exception as e:
             log(f"⚠ 结转失败跳过：{e}")
 
-    # S5 删 0 行
+    # S5 删小额行（|应收|≤阈值）
     merged, removed = drop_zero_receivable(merged)
-    log(f"· S5 删 0 行：删 {len(removed)} 行 → 余 {len(merged)} 行")
+    log(f"· S5 删小额行(|应收|≤{CONFIG.get('SMALL_AMOUNT_MAX',1):g})：删 {len(removed)} 行 → 余 {len(merged)} 行")
 
     # S6 复核
     variants = detect_name_variants(merged)
     residual = residual_departed(merged, departed_map)
     ycheck = year_consistency(merged)
 
-    # S7 排序
+    # S7 排序：按 销售人员 → 客户名称（亮晶姐 0620 定，和她手工自定义排序一致）；
+    #          空销售/空客户排最后，同客户内年度新→旧兜底。
+    _blank = lambda x: x is None or (isinstance(x, float) and pd.isna(x)) or str(x).strip() == ""
+    merged["__s"] = merged["销售人员"].map(lambda x: "￿" if _blank(x) else str(x).strip())
+    merged["__c"] = merged["客户名称"].map(lambda x: "￿" if _blank(x) else str(x).strip())
     merged["__yorder"] = merged["年度"].map(year_sort_key)
-    merged = merged.sort_values("__yorder", kind="stable").reset_index(drop=True)
+    merged = merged.sort_values(["__s", "__c", "__yorder"], kind="stable").reset_index(drop=True)
+    merged = merged.drop(columns=["__s", "__c", "__yorder"])
     master_out = pd.DataFrame({h: (merged[h] if h in merged.columns else None) for h in OUTPUT_HEADERS})
     # 应收金额保留 2 位小数（去浮点噪声 1369.6800000000003→1369.68；财务金额本就是分）
     master_out["应收金额"] = pd.to_numeric(master_out["应收金额"], errors="coerce").round(2)
@@ -790,7 +830,7 @@ def run(source, ref, rules, out_path, base_month=None):
 
     write_workbook(out_path, master_out, pivot, reassign_sum, suspect, col_warn_df, unmatched, variants, residual, ycheck, removed_out, report_df)
     log(f"\n✓ 完成：{out_path}")
-    log(f"  主表 {len(master_out)} 行 | 删0 {len(removed)} | 归属改动 {len(reassign)} | #N/A {len(unmatched)} | 离职残留 {len(residual)}")
+    log(f"  主表 {len(master_out)} 行 | 删小额 {len(removed)} | 归属改动 {len(reassign)} | #N/A {len(unmatched)} | 离职残留 {len(residual)}")
     return master_out
 
 

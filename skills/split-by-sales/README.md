@@ -18,7 +18,7 @@ python3 scripts/split.py --input <应收all.xlsx绝对路径> --date 0604
 # --out-dir 可省：给了具体 all → 输出在它同目录的 拆分_<日期>/；
 #                没给(自动从 工作区/input/ 取) → 落 工作区/output/拆分_<日期>/。
 # --date 不给会自动从 all 文件名取(2026.6.4应收all→0604),没日期才退回当天。
-# 每人表自动【按账龄降序】排好（老账在前，整齐好催）。
+# 每人表自动【按客户名称】排好（同一客户归拢，亮晶姐 0620 定：销售→客户）。
 ```
 依赖：`python3 -m pip install openpyxl`
 

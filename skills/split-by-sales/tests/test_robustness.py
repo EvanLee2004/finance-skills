@@ -73,12 +73,13 @@ def main():
         if yf:
             wb = openpyxl.load_workbook(os.path.join(out, yf))
             check("于占国文件里有 GM订单 sheet", "GM订单" in wb.sheetnames)
-        # 排序：张健文件账龄应【降序】（最该催的老账在前）
+        # 排序：张健文件按【客户名称】升序（亮晶姐 0620：销售→客户，文件内销售恒定故按客户）
         zf = next((f for f in files if "张健" in f), None)
         if zf:
             ws = openpyxl.load_workbook(os.path.join(out, zf), data_only=True).active
-            ages = [r[7] for r in ws.iter_rows(min_row=2, values_only=True) if isinstance(r[7], int)]
-            check("张健文件账龄降序排好", len(ages) >= 2 and ages == sorted(ages, reverse=True))
+            custs = [str(r[2] or "").strip() for r in ws.iter_rows(min_row=2, values_only=True)]
+            custs = [c for c in custs if c]
+            check("张健文件按客户名升序排好", len(custs) >= 2 and custs == sorted(custs))
 
     print("【2】缺输入文件 → 清晰报错(退出1)")
     rc, log = run(["--input", os.path.join(tmp, "nope.xlsx"), "--out-dir", out])
