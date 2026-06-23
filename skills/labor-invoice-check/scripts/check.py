@@ -135,34 +135,50 @@ def _find_col(header, aliases):
     return None
 
 
-def _pick_list_sheet(wb):
-    """挑「国内个人」sheet；没有就用第一个。"""
-    for n in wb.sheetnames:
-        if "国内个人" in n or "个人" in n:
-            return n
-    return wb.sheetnames[0]
-
-
-def _detect_header_row(ws, alias_map):
-    """前 5 行里找含『供应商姓名』别名的那行作表头（清单标题常在第1行、表头在第2行）。"""
-    names = alias_map.get("供应商姓名", _LIST_ALIAS_DEFAULT["供应商姓名"])
-    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=5, values_only=True)):
+def _header_row_with(ws, required_groups, max_scan=6):
+    """在 ws 前 max_scan 行里找一行表头：该行需含 required_groups 里**每一组**的至少一个别名。
+       返回该行 0-based 索引；找不到返回 None。"""
+    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=max_scan, values_only=True)):
         cells = [str(c).strip() if c is not None else "" for c in row]
-        if any(n in cells for n in names):
-            return ri  # 0-based
-    return 0
+        if all(any(a in cells for a in group) for group in required_groups):
+            return ri
+    return None
+
+
+def _pick_sheet(wb, required_groups):
+    """按**列特征**认出目标 sheet（无视 sheet 名/顺序/其它干扰 sheet）：
+       挑表头含所有 required_groups 列的 sheet；多个匹配选数据行最多的。
+       返回 (sheet名, 表头0-based行号) 或 (None, None)。"""
+    best = None  # (rows, name, header_idx)
+    for name in wb.sheetnames:
+        hr = _header_row_with(wb[name], required_groups)
+        if hr is None:
+            continue
+        try:
+            nrows = wb[name].max_row or 0
+        except Exception:
+            nrows = 0
+        if best is None or nrows > best[0]:
+            best = (nrows, name, hr)
+    return (best[1], best[2]) if best else (None, None)
 
 
 # ----------------- 读两张表 -----------------
 def read_list(path, list_alias):
-    """读待支付清单（国内个人 sheet，自动定位表头行）→ list[dict(name,pay,note,idno)]。"""
+    """读待支付清单 → list[dict(name,pay,note,idno)]。
+       按列特征认 sheet（需含『供应商姓名』+『应付金额』），自动定位表头行，无视其它干扰 sheet。"""
+    name_al = list_alias.get("供应商姓名", _LIST_ALIAS_DEFAULT["供应商姓名"])
+    pay_al = list_alias.get("应付金额", _LIST_ALIAS_DEFAULT["应付金额"])
     wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb[_pick_list_sheet(wb)]
-    hr = _detect_header_row(ws, list_alias)
+    sheet, hr = _pick_sheet(wb, [name_al, pay_al])
+    warns = []
+    if sheet is None:  # 没认出含关键列的 sheet → 退回第一个、表头第一行，并告警
+        sheet, hr = wb.sheetnames[0], 0
+        warns.append(f"清单未按列认出目标 sheet（需含『供应商姓名』+『应付金额』），暂用首个 sheet「{sheet}」")
+    ws = wb[sheet]
     rows = list(ws.iter_rows(min_row=hr + 1, values_only=True))
     wb.close()
     header = [str(c).strip() if c is not None else "" for c in rows[0]]
-    warns = []
     idx = {}
     for key, default in _LIST_ALIAS_DEFAULT.items():
         aliases = list_alias.get(key, default)
@@ -188,13 +204,21 @@ def read_list(path, list_alias):
 
 
 def read_invoices(path, inv_alias):
-    """读发票台账(Sheet1)→ 按身份证号求和合计金额；同时记一份按姓名(兜底/展示)。"""
+    """读发票台账 → 按身份证号求和合计金额；同时记一份按姓名(兜底/展示)。
+       按列特征认台账 sheet（需含『纳税人识别号』+『合计金额』），**无视 Sheet4/财务核对/Sheet2 等
+       手工底稿等干扰 sheet**，也不依赖它叫不叫 Sheet1。"""
+    id_al = inv_alias.get("身份证号", _INV_ALIAS_DEFAULT["身份证号"])
+    amt_al = inv_alias.get("发票金额", _INV_ALIAS_DEFAULT["发票金额"])
     wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb[wb.sheetnames[0]]
-    rows = list(ws.iter_rows(min_row=1, values_only=True))
+    warns = []
+    sheet, hr = _pick_sheet(wb, [id_al, amt_al])   # 台账=唯一同时含 纳税人识别号+合计金额 的 sheet
+    if sheet is None:
+        sheet, hr = ("Sheet1" if "Sheet1" in wb.sheetnames else wb.sheetnames[0]), 0
+        warns.append(f"发票台账未按列认出目标 sheet（需含『纳税人识别号』+『合计金额』），暂用「{sheet}」")
+    ws = wb[sheet]
+    rows = list(ws.iter_rows(min_row=hr + 1, values_only=True))
     wb.close()
     header = [str(c).strip() if c is not None else "" for c in rows[0]]
-    warns = []
     ci_id = _find_col(header, inv_alias.get("身份证号", _INV_ALIAS_DEFAULT["身份证号"]))
     ci_amt = _find_col(header, inv_alias.get("发票金额", _INV_ALIAS_DEFAULT["发票金额"]))
     ci_nm = _find_col(header, inv_alias.get("开票人姓名", _INV_ALIAS_DEFAULT["开票人姓名"]))
