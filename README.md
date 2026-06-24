@@ -4,21 +4,50 @@
 
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
-## 技能清单
+## 技能清单（两层：业务技能 + 通用基座）
+
+技能分两层：**业务技能**封装财务部某个具体的活（口径、归属规则写进 `config/`，结果可逐行复现）；**通用基座**是处理四类文档（Excel/PDF/Word/PPT）的底层能力，给业务技能"打下手"、也兜住够不上独立技能的零散文档活。
+
+### 业务技能（财务专有，config 驱动、可复现）
 
 | skill | 解决什么 | 状态 |
 |-------|----------|------|
-| [receivables-merge](skills/receivables-merge/) | **应收账款合并**：合并分年表、算账龄、按上一版回填标注、按维护表做销售归属、删已回款行、结转老坏账、出透视汇总 | ✅ 真实数据验证 · grok 9/10 |
-| [split-by-sales](skills/split-by-sales/) | **按销售拆分**：把应收 all 按销售人员拆成一人一份带下拉框 Excel（账龄降序排好、坏账桶忽略、GM单独成sheet、对账）——接在合并之后 | ✅ 回归12/12 · 链路通 |
-| [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx | ✅ 已入库 |
-| [pptx](skills/pptx/) | **PPT 演示文稿**：创建/编辑 .pptx | ✅ 已入库 |
-| [xlsx](skills/xlsx/) | **Excel 表格**：读写/公式/清洗 .xlsx | ✅ 已入库 |
-| [pdf](skills/pdf/) | **PDF 处理**：合并/拆分/填表/OCR 等 | ✅ 已入库 |
+| [receivables-merge](skills/receivables-merge/) | **应收账款合并**：合并分年表、算账龄、按上一版回填标注、按维护表做销售归属、删已回款行、结转老坏账、出透视汇总 | ✅ 真实数据验证 · 回归17/17 |
+| [split-by-sales](skills/split-by-sales/) | **按销售拆分**：把应收 all 按销售人员拆成一人一份带下拉框 Excel（账龄降序排好、坏账桶忽略、GM单独成sheet、对账）——接在合并之后 | ✅ 回归15/15 · 链路通 |
+| [labor-invoice-check](skills/labor-invoice-check/) | **劳务发票核对**：待支付清单(国内个人)×发票台账，按身份证号求和多张发票、实习生/外国人豁免、≤800放行、>800缺票/未开票标黄催票 → 主核对表+不付名单+可付名单 | ✅ 回归26/26 · 真实464人验证 |
 | …更多 | 回单查询 / 销售反馈汇总 / 费用归集 等 | 规划中 |
+
+### 通用基座（自研通用，处理四类文档；改自 Anthropic 官方 office skills）
+
+| skill | 解决什么 | 状态 |
+|-------|----------|------|
+| [xlsx](skills/xlsx/) | **Excel 表格**：读写/公式/清洗/出成品 .xlsx；`recalc.py` 校验零公式错误 | ✅ 已入库 · 冒烟通过 |
+| [pdf](skills/pdf/) | **PDF 处理**：读文抽表、合并拆分、旋转水印、填表、加解密、转图、OCR | ✅ 已入库 · 冒烟通过 |
+| [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx，批注修订、插图、提正文 | ✅ 已入库 · 冒烟通过 |
+| [pptx](skills/pptx/) | **PPT 演示文稿**：做幻灯片、改模板、抽正文、合并拆分 deck | ✅ 已入库 · 冒烟通过 |
+
+> **环境依赖（部署到同事机器时注意）**：① 四类通用基座的"校验"脚本 `office/validate.py` 用了 `match` 语法，**需 Python ≥3.10**（3.9 会报 SyntaxError）——核心读写不受影响，仅可选校验步骤受限。② `xlsx/recalc.py`、`pptx/thumbnail.py`、`docx/accept_changes.py` 依赖 **LibreOffice（soffice）**重算/转图/接受修订；没装 LibreOffice 时这几个功能降级，openpyxl/python-docx/pypdf 的基本读写仍正常。
+> **以上环境问题统一交给 `env-doctor` 处理**（见下）——任何技能缺库/缺工具，agent 查它的清单按国内镜像装齐再重试。
+
+### 环境工具
+
+| skill | 解决什么 | 状态 |
+|-------|----------|------|
+| [env-doctor](skills/env-doctor/) | **环境管家**：任何技能跑不起来（缺 Python 库 / 缺 LibreOffice·poppler·tesseract / Python 版本太老）时，查《依赖与安装清单》按**国内镜像优先**装齐、重试。纯提示词驱动、无脚本、不碰业务数据 | ✅ 清单覆盖全 8 技能 · 清华镜像实装验证 |
 
 ## 每个 skill 长什么样（标准）
 
 见 [docs/技能标准规范.md](docs/技能标准规范.md)：标准四件套 `SKILL.md + scripts/ + references/ + config/`；核心原则**人说人话、脏活归 agent**；会变的东西（认列、归属规则）外置成可维护的配置表，规则变改表不改码。
+
+## 新做涉及 Excel 的技能：怎么用 xlsx 这个基座（架构约定）
+
+结论：**xlsx 当"工具箱 + 规范"，不当"代码母本去 fork"。** 三种姿势按场景选——
+
+1. **够不上独立技能的零散 Excel 活**（临时加列、做张小表、洗个乱表）→ **不必新建技能**，直接让 agent 用 xlsx 这个通用基座干。
+2. **新的业务 Excel 技能**（如费用归集、回单台账）→ **照四件套新建独立技能**（自己的 `scripts/` 用 openpyxl/pandas 直接写、业务规则进自己的 `config/`），**不要把 xlsx 的代码 fork 进来**——xlsx 自带几百个 XML schema，业务技能用不上，fork 只会臃肿、还得跟着升级。业务技能可**调用** xlsx 的 `recalc.py` 做"零公式错误"自检、按 xlsx 的配色/数字格式规范出成品，但**依赖关系是"调用/参照"，不是"继承代码"**。
+3. **要深改 Excel 底层 XML**（普通 openpyxl 干不了的，如复杂图表、特殊样式）→ 借 xlsx 的 `office/unpack.py`、`pack.py` 解包改包。
+
+> 一句话：业务技能保持**独立、config 驱动、可复现**（这是它的价值）；xlsx 提供**通用能力 + 出品规范 + 自检工具**。两层解耦——业务规则变了改业务技能的 config，文档处理能力升级了升基座，互不牵连。
 
 ## 数据安全
 

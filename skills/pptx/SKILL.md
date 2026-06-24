@@ -1,7 +1,13 @@
 ---
 name: pptx
-description: "Use this skill any time a .pptx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations; reading, parsing, or extracting text from any .pptx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates, layouts, speaker notes, or comments. Trigger whenever the user mentions \"deck,\" \"slides,\" \"presentation,\" or references a .pptx filename, regardless of what they plan to do with the content afterward. If a .pptx file needs to be opened, created, or touched, use this skill."
+description: >-
+  创建、编辑、解析 PPT 演示文稿（.pptx）：做幻灯片、改模板、抽正文、合并拆分 deck 等。
+  当用户说「做 PPT / 写幻灯片 / 改这份演示文稿 / presentation / deck」或涉及 .pptx 时，主动使用本技能。
 ---
+
+# PPT 演示文稿处理（pptx）
+
+> **研发说明** · 甲骨易财务部自研通用技能（研发维护：李明昊，2026-06）。补业务类 skill 管不到的日常演示文稿需求，与 receivables-merge 等同属 `finance-skills` 包，供 opencode 财务同事说人话触发。**纯本地**：python-pptx + `scripts/` 配套工具，数据不出本机、无联网/API 依赖。
 
 # PPTX Skill
 

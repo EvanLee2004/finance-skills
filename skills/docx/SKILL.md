@@ -1,7 +1,14 @@
 ---
 name: docx
-description: "Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx files). Triggers include: any mention of 'Word doc', 'word document', '.docx', or requests to produce professional documents with formatting like tables of contents, headings, page numbers, or letterheads. Also use when extracting or reorganizing content from .docx files, inserting or replacing images in documents, performing find-and-replace in Word files, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a 'report', 'memo', 'letter', 'template', or similar deliverable as a Word or .docx file, use this skill. Do NOT use for PDFs, spreadsheets, Google Docs, or general coding tasks unrelated to document generation."
+description: >-
+  创建、读取、编辑 Word 文档（.docx）：写报告/备忘录/函件、套格式、改批注与修订、插图、提取正文等。
+  当用户说「做 Word / 写 docx / 出一份报告 / 备忘录 / 函 / 改这份 Word」或给到 .docx 要处理时，主动使用本技能。
+  产出是 Word 时用本技能；纯 PDF/Excel/PPT 或无关编码任务不用。
 ---
+
+# Word 文档处理（docx）
+
+> **研发说明** · 甲骨易财务部自研通用技能（研发维护：李明昊，2026-06）。补业务类 skill 管不到的日常 Word 需求，与 receivables-merge 等同属 `finance-skills` 包，供 opencode 财务同事说人话触发。**纯本地**：python-docx + `scripts/` 配套工具，数据不出本机、无联网/API 依赖。
 
 # DOCX creation, editing, and analysis
 

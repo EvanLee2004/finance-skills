@@ -1,7 +1,14 @@
 ---
 name: xlsx
-description: "Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit, or fix an existing .xlsx, .xlsm, .csv, or .tsv file (e.g., adding columns, computing formulas, formatting, charting, cleaning messy data); create a new spreadsheet from scratch or from other data sources; or convert between tabular file formats. Trigger especially when the user references a spreadsheet file by name or path — even casually (like \"the xlsx in my downloads\") — and wants something done to it or produced from it. Also trigger for cleaning or restructuring messy tabular data files (malformed rows, misplaced headers, junk data) into proper spreadsheets. The deliverable must be a spreadsheet file. Do NOT trigger when the primary deliverable is a Word document, HTML report, standalone Python script, database pipeline, or Google Sheets API integration, even if tabular data is involved."
+description: >-
+  读写、清洗、格式化 Excel/表格（.xlsx/.xlsm/.csv/.tsv）：加列算公式、做表、洗乱表、出成品 spreadsheet。
+  当用户说「做 Excel / 改 xlsx / 建个表 / 算一下这张表」或给表格文件要处理、且**交付物是表格文件**时，主动使用本技能。
+  主交付是 Word/HTML/脚本/数据库管道时不用。
 ---
+
+# Excel 表格处理（xlsx）
+
+> **研发说明** · 甲骨易财务部自研通用技能（研发维护：李明昊，2026-06）。补业务类 skill 管不到的日常 Excel 整理与小表制作，与 receivables-merge 等同属 `finance-skills` 包，供 opencode 财务同事说人话触发。**纯本地**：openpyxl/pandas + `scripts/recalc.py` 等，数据不出本机、无联网/API 依赖。
 
 # Requirements for Outputs
 
