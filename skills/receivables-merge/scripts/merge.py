@@ -817,6 +817,50 @@ def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unm
     return out_path
 
 
+# --------------------------- 领导版（部分版）---------------------------
+def load_leader_exclusions():
+    """读 config/领导版排除销售.md → 要在部分版里删掉的销售人员名 set。
+    缺文件/空名单 → 空 set（则不产部分版，向后兼容）。"""
+    path = os.path.join(CONFIG_DIR, "领导版排除销售.md")
+    names = set()
+    if not os.path.isfile(path):
+        return names
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith(("-", "*")):              # 只认列表项，跳过标题/说明/引用
+                name = s.lstrip("-* ").strip()
+                if name and not name.startswith(("#", ">", "`")):
+                    names.add(name)
+    return names
+
+
+def _restricted_path(out_path):
+    """应收all_2026.6.25.xlsx → 应收all_2026.6.25（部分）.xlsx"""
+    base, ext = os.path.splitext(out_path)
+    return f"{base}（部分）{ext}"
+
+
+def write_restricted_workbook(out_path, master_out):
+    """部分版（给领导）：精简工作簿——只 主表(已过滤) + 透视汇总(重算)，同款样式。
+    不带任何诊断 sheet，避免被排除销售的名字从告警/变更页泄漏。"""
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    ncol = len(master_out.columns)
+    amount_idx = (list(master_out.columns).index("应收金额") + 1) if "应收金额" in master_out.columns else None
+    pivot = build_pivot(master_out)
+    with pd.ExcelWriter(out_path, engine="openpyxl") as w:
+        _strip_illegal(master_out).to_excel(w, sheet_name="主表", index=False)
+        ws = w.sheets["主表"]
+        _style_master_header(ws, ncol)
+        _style_master_body(ws, len(master_out) + 1, ncol, amount_idx)
+        wb = w.book
+        pv = wb.create_sheet("透视汇总")
+        _write_pivot_grouped(pv, pivot)
+        wb._sheets.remove(pv)
+        wb._sheets.insert(1, pv)
+    return out_path
+
+
 # --------------------------- 主流程 ---------------------------
 def run(source, ref, rules, out_path, base_month=None):
     log(f"· 源台账：{os.path.basename(source)}")
@@ -940,6 +984,24 @@ def run(source, ref, rules, out_path, base_month=None):
     write_workbook(out_path, master_out, pivot, reassign_sum, suspect, col_warn_df, unmatched, variants, residual, ycheck, removed_out, report_df)
     log(f"\n✓ 完成：{out_path}")
     log(f"  主表 {len(master_out)} 行 | 删小额 {len(removed)} | 归属改动 {len(reassign)} | #N/A {len(unmatched)} | 离职残留 {len(residual)}")
+
+    # 部分版（领导权限隔离）：名单非空时，再出一份不含这些销售的「应收all（部分）」
+    excl = load_leader_exclusions()
+    if excl:
+        def _blank_name(x):
+            return "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x).strip()
+
+        def _is_excluded(x):
+            s = _blank_name(x)
+            return any(s == e or s.startswith(e + "-") for e in excl)
+
+        mask = master_out["销售人员"].map(_is_excluded)
+        restricted = master_out[~mask].reset_index(drop=True)
+        n_drop = int(mask.sum())
+        rpath = _restricted_path(out_path)
+        write_restricted_workbook(rpath, restricted)
+        log(f"\n✓ 部分版（给领导）：{rpath}")
+        log(f"  已删 {('、'.join(sorted(excl)))} 共 {n_drop} 行 → 部分版 {len(restricted)} 行")
     return master_out
 
 
