@@ -707,6 +707,10 @@ def _strip_illegal(df):
     return df
 
 
+# 会计专用·无货币符号（亮晶要的：1,234.56 这种千分位两位小数、负数/零对齐）
+ACCT_FMT = '_-* #,##0.00_-;-* #,##0.00_-;_-* "-"??_-;_-@_-'
+
+
 def _style_master_header(ws, ncol):
     """美化主表表头（只动表头显示，不改任何数据/逻辑），参考赵亮晶成品格式：
     前8列浅蓝(BDD7EE)/后9列黄(FFFF00)、等线10.5加粗、居中换行、加粗黑色边框、冻结首行。"""
@@ -726,18 +730,90 @@ def _style_master_header(ws, ncol):
     ws.freeze_panes = "A2"
 
 
+def _style_master_body(ws, nrow, ncol, amount_col_idx):
+    """主表正文：①整体加细黑边框线（亮晶要的网格线）；②应收金额列套会计专用格式。
+    纯显示，不动任何值。"""
+    from openpyxl.styles import Border, Side
+    thin = Border(*[Side(style="thin", color="000000")] * 4)
+    for r in range(2, nrow + 1):
+        for c in range(1, ncol + 1):
+            cell = ws.cell(r, c)
+            cell.border = thin
+            if amount_col_idx and c == amount_col_idx:
+                cell.number_format = ACCT_FMT
+
+
+def _write_pivot_grouped(ws, pivot):
+    """把 销售人员→客户名称→应收金额 写成"像数据透视表"的分组汇总：
+    销售人员按总额降序、每人一行加粗小计 + 下面客户明细（按金额降序）、
+    客户明细行 outline 分组可 +/- 折叠、末尾总计。金额套会计专用格式。"""
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    sub_font = Font(name="等线", size=10.5, bold=True)
+    det_font = Font(name="等线", size=10.5)
+    hdr_fill = PatternFill("solid", fgColor="D9E1F2")
+    indent = Alignment(indent=2)
+    thin = Border(*[Side(style="thin", color="D9D9D9")] * 4)
+
+    def clean(v):
+        return _ILLEGAL_RE.sub("", str(v)) if v is not None else ""
+
+    d = pivot.copy()
+    d["应收金额"] = pd.to_numeric(d["应收金额"], errors="coerce").fillna(0)
+    d["__人"] = d["销售人员"].map(
+        lambda v: "(空白)" if v is None or (isinstance(v, float) and pd.isna(v))
+        or str(v).strip() in ("", "nan") else str(v))
+    totals = d.groupby("__人")["应收金额"].sum().sort_values(ascending=False)
+
+    ws.cell(1, 1, "行标签").font = sub_font
+    ws.cell(1, 2, "求和项:应收金额").font = sub_font
+    ws.cell(1, 1).fill = hdr_fill
+    ws.cell(1, 2).fill = hdr_fill
+    ws.sheet_properties.outlinePr.summaryBelow = False  # 小计在明细上方（与透视表一致）
+
+    r = 2
+    grand = 0.0
+    for person, sub in totals.items():
+        grand += float(sub)
+        a = ws.cell(r, 1, person); a.font = sub_font; a.border = thin
+        b = ws.cell(r, 2, round(float(sub), 2)); b.font = sub_font; b.number_format = ACCT_FMT; b.border = thin
+        r += 1
+        rows_p = d[d["__人"] == person].sort_values("应收金额", ascending=False)
+        for _, row in rows_p.iterrows():
+            c1 = ws.cell(r, 1, clean(row["客户名称"])); c1.font = det_font; c1.alignment = indent; c1.border = thin
+            c2 = ws.cell(r, 2, round(float(row["应收金额"]), 2)); c2.font = det_font; c2.number_format = ACCT_FMT; c2.border = thin
+            ws.row_dimensions[r].outline_level = 1
+            r += 1
+    t1 = ws.cell(r, 1, "总计"); t1.font = sub_font; t1.border = thin
+    t2 = ws.cell(r, 2, round(grand, 2)); t2.font = sub_font; t2.number_format = ACCT_FMT; t2.border = thin
+
+    ws.column_dimensions["A"].width = 44
+    ws.column_dimensions["B"].width = 18
+    ws.freeze_panes = "A2"
+
+
 def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unmatched, variants, residual, ycheck, removed, report_df):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    # 透视汇总不走 pandas（要做分组/折叠/会计格式），用 openpyxl 手工渲染，故从这里剔除
     sheets = {
-        "主表": master_out, "透视汇总": pivot,
+        "主表": master_out,
         "认列告警": col_warn, "归属变更": reassign, "归属存疑": suspect,
         "未匹配复核": unmatched, "名称变体": variants, "离职残留": residual,
         "年度校验": ycheck, "被删0行": removed, "运行报告": report_df,
     }
+    ncol = len(master_out.columns)
+    amount_idx = (list(master_out.columns).index("应收金额") + 1) if "应收金额" in master_out.columns else None
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         for name, df in sheets.items():
             _strip_illegal(df).to_excel(w, sheet_name=name, index=False)
-        _style_master_header(w.sheets["主表"], len(master_out.columns))   # 主表表头美化（不改数据）
+        ws_master = w.sheets["主表"]
+        _style_master_header(ws_master, ncol)                       # 表头美化（不改数据）
+        _style_master_body(ws_master, len(master_out) + 1, ncol, amount_idx)  # 正文加边框 + 应收金额会计格式
+        # 分组汇总「透视汇总」——手工建表后挪到第 2 个 sheet（紧跟主表）
+        wb = w.book
+        pv = wb.create_sheet("透视汇总")
+        _write_pivot_grouped(pv, pivot)
+        wb._sheets.remove(pv)
+        wb._sheets.insert(1, pv)
     return out_path
 
 
