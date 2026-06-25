@@ -29,6 +29,14 @@ import datetime
 from collections import defaultdict
 import pandas as pd
 
+# Windows GBK 终端下 print 含 ✓ 等符号会 UnicodeEncodeError（数据其实已写好、只是末尾打印崩、看着像失败）。
+# 统一把标准输出设成 UTF-8、容错，彻底避免这个吓人的报错。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 CONFIG_DIR = os.path.join(SKILL_DIR, "config")
