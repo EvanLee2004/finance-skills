@@ -159,15 +159,15 @@ def run_service_status_tests():
 
 
 def run_real_smoke_tests():
-    """真实数据冒烟：用 payroll-info-match 已验证过的湖南分公司数据链路，核对真实已知数值。缺文件则跳过。"""
+    """真实数据冒烟：用湖南分公司真实数据链路，核对真实已知数值。缺文件则跳过。"""
     print("== 真实数据冒烟（缺文件自动跳过） ==")
     payroll_out = os.path.abspath(os.path.join(
-        HERE, "..", "..", "payroll-info-match", "工作区", "output", "工资底表_202606.xlsx"))
+        HERE, "..", "..", "..", "..", "技能", "社保公积金合并与在职台账", "测试数据", "工资底表_202606.xlsx"))
     combined = os.path.abspath(os.path.join(
-        HERE, "..", "..", "..", "..", "技能", "工资表清洗与信息匹配", "测试数据", "薪酬底稿",
+        HERE, "..", "..", "..", "..", "技能", "社保公积金合并与在职台账", "测试数据", "薪酬底稿",
         "6. 湖南", "湖南分公司五险一金台账202606.xlsx"))
     if not (os.path.isfile(payroll_out) and os.path.isfile(combined)):
-        print("  （跳过：本机没有真实测试数据/依赖 payroll-info-match 先跑过一次，属正常，不算失败）")
+        print("  （跳过：本机没有真实测试数据，属正常，不算失败）")
         return
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "out.xlsx")
