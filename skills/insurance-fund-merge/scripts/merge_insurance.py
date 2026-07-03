@@ -317,7 +317,7 @@ def parse_combined_sheet(ws):
     return social, fund, diag
 
 
-# ----------------- 工资表（可以是 payroll-info-match 的干净底表，也可以是原始工资表） -----------------
+# ----------------- 工资表（可以是清洗过的干净底表，也可以是原始工资表） -----------------
 _PAYROLL_ALIAS = {
     "姓名": ["姓名"],
     "地区": ["地区"],
@@ -355,12 +355,12 @@ def load_payroll_month(path, sheet_hint_month=None, sheet_override=None):
             sheet_name = candidates[0]
         else:
             # 多个像工资表的 sheet（常见于把多个主体堆在一个文件里的"大杂烩"工作簿，
-            # 或者是 payroll-info-match 的输出——"主表/待人工核实/匹配成功"三个 sheet列结构相同、互为子集）。
+            # 或者是某些清洗工具的输出——"主表/待人工核实/匹配成功"三个 sheet列结构相同、互为子集）。
             month_matched = [sn for sn in candidates if sheet_hint_month and normalize_month_token(sn) == sheet_hint_month]
             if len(month_matched) == 1:
                 sheet_name = month_matched[0]
             elif "主表" in candidates:
-                # payroll-info-match 等技能的输出约定：「主表」是完整表，「待人工核实/匹配成功」只是它的子集视图，优先用完整表。
+                # 「主表」通常是完整表，「待人工核实/匹配成功」只是它的子集视图，优先用完整表。
                 sheet_name = "主表"
             else:
                 wb.close()

@@ -1,6 +1,6 @@
 # insurance-fund-merge（社保公积金合并与在职台账）
 
-给同事用 opencode 说人话跑；也可命令行直接跑。是 [payroll-info-match](../payroll-info-match/) 的下一段流程。
+给同事用 opencode 说人话跑；也可命令行直接跑。
 
 ⚠ **这是"先做出来试"的版本，没走完需求确认书流程**——详见 `SKILL.md` 开头和 `config/业务规则.md` 第一节。
 
