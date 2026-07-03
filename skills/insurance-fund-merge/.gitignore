@@ -1,7 +1,0 @@
-工作区/input/*
-工作区/output/*
-!工作区/**/.gitkeep
-__pycache__/
-*.pyc
-*.xlsx
-*.xls
