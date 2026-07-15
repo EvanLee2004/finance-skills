@@ -93,19 +93,6 @@ def make_hist(path, rows):
             w.writerow(r)
 
 
-def parse_list_block(log: str):
-    if "===== 本周抽查建议清单" not in log:
-        return ""
-    part = log.split("===== 本周抽查建议清单", 1)[1]
-    if "===== 清单结束" in part:
-        part = part.split("===== 清单结束", 1)[0]
-    # 去掉标题行残留
-    lines = part.strip().splitlines()
-    if lines and "可粘贴" in lines[0]:
-        lines = lines[1:]
-    return "\n".join(lines).strip() + ("\n" if lines else "")
-
-
 def main():
     tmp = tempfile.mkdtemp(prefix="compliance_spot_")
     allp = os.path.join(tmp, "合成_应收all.xlsx")
@@ -174,8 +161,8 @@ def main():
     check("提示历史不存在并继续", "不存在" in log and ("继续" in log or "无历史" in log or "按无历史" in log))
     check("仍产出清单", os.path.isfile(os.path.join(tmp, "b3.txt")) and os.path.getsize(os.path.join(tmp, "b3.txt")) > 20)
 
-    # —— 边界 4：应收表缺列 ——
-    print("【4】边界：应收表缺列 → 清晰报错")
+    # —— 边界 4a：表头完全不对 → 找不到 sheet ——
+    print("【4a】边界：表头全错 → 没找到数据 sheet")
     bad = os.path.join(tmp, "bad.xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -185,7 +172,21 @@ def main():
     wb.save(bad)
     rc, log = run(["--input", bad, "--out", os.path.join(tmp, "b4.txt")])
     check("退出码 1", rc == 1)
-    check("报错含缺列/必要列/没找到", ("缺" in log and "列" in log) or "没找到数据 sheet" in log or "必要列" in log)
+    check("报错含没找到数据 sheet", "没找到数据 sheet" in log)
+
+    # —— 边界 4b：像应收但缺账龄列 → 精确缺列报错 ——
+    print("【4b】边界：缺账龄列 → 应收表缺必要列")
+    miss = os.path.join(tmp, "miss_aging.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "2026.6.4"
+    # 够认 sheet（≥5 个 HEADER_KEYS），但缺账龄
+    ws.append(["年度", "销售人员", "客户名称", "新智云单号", "文件名", "应收金额", "交付月份", "结算阶段"])
+    ws.append([2026, "测销甲", "甲公司", "SO1", "f1", 1000, "202501", ""])
+    wb.save(miss)
+    rc, log = run(["--input", miss, "--out", os.path.join(tmp, "b4b.txt")])
+    check("退出码 1", rc == 1)
+    check("报错含缺必要列与账龄", "缺必要列" in log and "账龄" in log)
 
     # —— 纯函数：聚合同月两单 ——
     print("【5】纯函数：同客户同月多单金额合计")
@@ -198,15 +199,36 @@ def main():
     check("聚合成 1 个单位", len(units) == 1)
     check("金额合计 150", abs(units[0]["金额"] - 150) < 1e-6)
     check("账龄取最大 5", units[0]["账龄"] == 5)
+    check("销售名归一（去-高美杰）", units[0]["销售"] == "A")
+    units_gm = R.group_units([
+        {"销售": "张三-高美杰", "客户": "C", "金额": 10.0, "交付月份": "202401", "账龄": 1},
+    ])
+    check("X-高美杰 归张三", units_gm[0]["销售"] == "张三")
+
+    # 资格：三条 OR，无魔法 5/2
+    print("【5b】资格规则纯函数")
+    cfg = R.load_rules()
+    fake_units = [
+        {"销售": "S", "客户": "老客", "交付月份": "202401", "金额": 100.0, "账龄": 8.0, "订单数": 1},
+        {"销售": "S", "客户": "大客", "交付月份": "202402", "金额": 20000.0, "账龄": 1.0, "订单数": 1},
+        {"销售": "S", "客户": "中客", "交付月份": "202403", "金额": 5000.0, "账龄": 4.0, "订单数": 1},
+        {"销售": "S", "客户": "渣客", "交付月份": "202404", "金额": 100.0, "账龄": 0.0, "订单数": 1},
+    ]
+    scored = R.score_units(fake_units, [], cfg)
+    by_cust = {u["客户"]: u for u in scored}
+    check("长账龄够格", by_cust["老客"]["资格"] is True)
+    check("金额兜底够格", by_cust["大客"]["资格"] is True)
+    check("相对金额+够账龄够格", by_cust["中客"]["资格"] is True)
+    check("短账龄小额不够格", by_cust["渣客"]["资格"] is False)
 
     # 配置五项可读
     print("【6】配置五项待确认默认存在")
-    cfg = R.load_rules()
     check("weekly_cap 有值", int(cfg["weekly_cap"]) > 0)
     check("include_reason 默认 True", cfg["include_reason"] is True)
     check("special 含默认客户", any("方圆" in str(x) for x in cfg["special_customers"]))
     check("history_mode 非空", bool(cfg.get("history_mode")))
     check("acceptor 默认可为空字符串", cfg.get("acceptor") == "" or cfg.get("acceptor") is not None)
+    check("相对金额门槛在配置", 0 < float(cfg["relative_amount_pct"]) <= 1)
 
     # 若仓库内 测试数据 存在，额外跑一次（全路径）
     if os.path.isdir(FIXTURE_DIR):
