@@ -396,19 +396,35 @@ def load_history(path: Optional[str]) -> List[HistoryRec]:
 
 
 def index_history(history: List[HistoryRec]) -> Tuple[Set[str], Set[Tuple[str, str, str]], Set[Tuple[str, str, str]]]:
-    """→ (未反馈销售norm集合, 未反馈key集合, 已反馈/已抽key集合)。"""
-    unfed_sales: Set[str] = set()
-    unfed_keys: Set[Tuple[str, str, str]] = set()
-    checked_keys: Set[Tuple[str, str, str]] = set()
+    """汇总历史（亮晶口径：同销售+客户+交付月，**只要出现过已反馈 → 整月算完**）。
+
+    返回：
+      unfed_sales — 仍有「仅未反馈、从无已反馈」单位的销售
+      unfed_keys  — 仅未反馈、需继续盯的 key
+      checked_keys — 出现过已反馈（或非未反馈）的 key，主名单排除
+    同一 key 不会同时落在 unfed_keys 与 checked_keys。
+    """
+    # key → 是否见过「已反馈/非未反馈」
+    saw_done: Dict[Tuple[str, str, str], bool] = {}
+    saw_unfed: Dict[Tuple[str, str, str], bool] = {}
     for h in history:
         sn, cn, m = norm(h["销售"]), norm(h["客户"]), h["交付月份"]
+        if not sn and not cn:
+            continue
         key = (sn, cn, m)
         st = (h.get("反馈状态") or "").strip()
         if "未反馈" in st:
-            unfed_sales.add(sn)
-            unfed_keys.add(key)
+            saw_unfed[key] = True
         else:
-            checked_keys.add(key)
+            # 已反馈、空状态、其它写法 → 视为「有结果/已处理过」
+            saw_done[key] = True
+
+    checked_keys: Set[Tuple[str, str, str]] = set(saw_done.keys())
+    # 仅未反馈且从未已反馈 → 继续优先；若同 key 后来有反馈，不算未反馈
+    unfed_keys: Set[Tuple[str, str, str]] = {
+        k for k in saw_unfed if k not in checked_keys
+    }
+    unfed_sales: Set[str] = {k[0] for k in unfed_keys if k[0]}
     return unfed_sales, unfed_keys, checked_keys
 
 
@@ -499,7 +515,8 @@ def score_units(
             continue
 
         key = (sn, norm(u["客户"]), u["交付月份"])
-        if exclude_checked and key in checked_keys and key not in unfed_keys:
+        # checked 与 unfed 互斥（index_history 已保证）；有过反馈的整月排除
+        if exclude_checked and key in checked_keys:
             continue
 
         amount = float(u["金额"] or 0)

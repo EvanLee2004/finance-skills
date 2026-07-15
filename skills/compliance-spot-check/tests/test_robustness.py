@@ -221,6 +221,38 @@ def main():
     check("相对金额+够账龄够格", by_cust["中客"]["资格"] is True)
     check("短账龄小额不够格", by_cust["渣客"]["资格"] is False)
 
+    # 亮晶口径：同客户同月先未反馈后已反馈 → 算过关，不进名单
+    print("【5c】历史汇总：有反馈即过（同 key 多条）")
+    unfed_s, unfed_k, checked_k = R.index_history([
+        {"销售": "测销甲", "客户": "星河科技有限公司", "交付月份": "202412",
+         "反馈状态": "未反馈", "抽查日期": "2026-04-01"},
+        {"销售": "测销甲", "客户": "星河科技有限公司", "交付月份": "202412",
+         "反馈状态": "已反馈", "抽查日期": "2026-05-01"},
+        {"销售": "测销丙", "客户": "赤峰数科", "交付月份": "202410",
+         "反馈状态": "未反馈", "抽查日期": "2026-06-01"},
+    ])
+    k_done = (R.norm("测销甲"), R.norm("星河科技有限公司"), "202412")
+    k_open = (R.norm("测销丙"), R.norm("赤峰数科"), "202410")
+    check("有过已反馈 → 在 checked", k_done in checked_k)
+    check("有过已反馈 → 不在 unfed_keys", k_done not in unfed_k)
+    check("仅未反馈 → 在 unfed_keys", k_open in unfed_k)
+    check("仅未反馈 → 不在 checked", k_open not in checked_k)
+    # 端到端：多条历史写入文件，清单不得再出现该客户月
+    hist_mixed = os.path.join(tmp, "hist_mixed.csv")
+    make_hist(hist_mixed, [
+        [SALES_BIG, "星河科技有限公司", "202412", "2026-04-01", "未反馈"],
+        [SALES_BIG, "星河科技有限公司", "202412", "2026-05-01", "已反馈"],
+    ])
+    out_m = os.path.join(tmp, "mixed.txt")
+    rc, log = run(["--input", allp, "--history", hist_mixed, "--out", out_m])
+    text_m = open(out_m, encoding="utf-8").read() if os.path.isfile(out_m) else ""
+    still_in = any(
+        SALES_BIG in ln and "星河" in ln and "202412" in ln
+        for ln in text_m.splitlines()[1:]
+    )
+    check("混合历史退出 0", rc == 0)
+    check("先未反馈后已反馈 → 清单排除该月", not still_in)
+
     # 配置五项可读
     print("【6】配置五项待确认默认存在")
     check("weekly_cap 有值", int(cfg["weekly_cap"]) > 0)
