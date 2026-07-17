@@ -170,16 +170,24 @@ def discover_entity_files(input_dir: Path) -> dict[str, Path]:
 
 
 # 整挂规则（config 文字版的可执行子集；冲突项不在此硬写死 5401 整挂）
+# 整挂：科目前缀匹配（长前缀优先）。5401 仅 540101/540103 整挂项目总监及助理，其余 5401* 按人。
 DIRECT_HANG = {
-    "5401": "项目总监及助理",  # 斯佳 20260717 流程反馈：按回填整挂
+    "540101": "项目总监及助理",  # 斯佳标黄 20260717
+    "540103": "项目总监及助理",  # 翻译语言服务等
     "5402": "财务中心",
     "5504": "财务中心",
 }
 
 
 def prefix_rule(code: str) -> str | None:
+    if not code:
+        return None
+    # 5401 大类本身不整挂；仅明确子目
     for pref, dept in sorted(DIRECT_HANG.items(), key=lambda x: -len(x[0])):
-        if code.startswith(pref):
+        if code == pref or code.startswith(pref):
+            # 避免 5402 误匹配到别的；用 startswith 对 540101 安全
+            if pref.startswith("5401") and not (code == pref or code.startswith(pref)):
+                continue
             return dept
     return None
 
@@ -328,8 +336,8 @@ def main():
     report.append("=== 部门费用归集分摊 allocate ===")
     report.append(f"输入目录: {input_dir}")
     report.append(f"模板科目行: {len(structure['account_rows'])} 部门列: {len(structure['departments'])}")
-    report.append("5401 成本：整挂「项目总监及助理」（20260717 流程反馈已拍板）。")
-    report.append("本版：主体列 + 5401/5402/5504 整挂。收入/按人拆待样例。")
+    report.append("5401：仅 540101/540103 整挂项目总监及助理，其余按人（斯佳标黄）。")
+    report.append("本版：主体列 + 540101/540103/5402/5504 整挂。其余按人待样例。")
 
     entity_files = discover_entity_files(input_dir)
     report.append(f"识别到主体文件: { {k: str(v) for k,v in entity_files.items()} }")

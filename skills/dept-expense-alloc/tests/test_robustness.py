@@ -32,7 +32,7 @@ def test_structure_template_complete():
 def test_business_rules_file():
     text = (CONFIG / "业务规则.md").read_text(encoding="utf-8")
     assert "按人拆" in text
-    assert "项目总监及助理" in text
+    assert "540101" in text or "540103" in text or "项目总监" in text
     assert "所有主体合计" in text or "左" in text
     assert "5401" in text
 
@@ -56,9 +56,9 @@ def _make_synthetic_balance(path: Path, entity_tag: str):
     ws["A5"] = "5101"
     ws["B5"] = "主营业务收入"
     ws["F5"] = 1000
-    # 5401 成本 借 200 → 整挂项目总监及助理
-    ws["A6"] = "5401"
-    ws["B6"] = "主营业务成本"
+    # 540103 翻译语言服务 借 200 → 整挂项目总监及助理
+    ws["A6"] = "540103"
+    ws["B6"] = "翻译语言服务"
     ws["E6"] = 200
     # 5402 税金 借 50
     ws["A7"] = "5402"
@@ -113,7 +113,7 @@ def test_allocate_synthetic_direct_hang():
                 assert float(ws.cell(r, fin_col).value or 0) == 50
                 assert float(ws.cell(r, fee_col).value or 0) == 50
                 assert abs(float(ws.cell(r, check_col).value or 0)) < 0.02
-            if code == "5401":
+            if code == "540103":
                 found_5401 = True
                 assert float(ws.cell(r, pm_col).value or 0) == 200
                 assert abs(float(ws.cell(r, check_col).value or 0)) < 0.02
