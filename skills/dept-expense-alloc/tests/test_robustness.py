@@ -31,13 +31,14 @@ def test_structure_template_complete():
 
 def test_business_rules_file():
     text = (CONFIG / "业务规则.md").read_text(encoding="utf-8")
-    assert "按人拆到各部门" in text
-    assert "技能包" in text
+    assert "按人拆" in text
+    assert "项目总监及助理" in text
+    assert "所有主体合计" in text or "左" in text
     assert "5401" in text
 
 
 def _make_synthetic_balance(path: Path, entity_tag: str):
-    """最小 xlsx 余额表：5101 贷、5402 借、5504 借。"""
+    """最小 xlsx 余额表：5101 贷、5401/5402/5504 借。"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws["A1"] = "发生额及余额表"
@@ -55,14 +56,18 @@ def _make_synthetic_balance(path: Path, entity_tag: str):
     ws["A5"] = "5101"
     ws["B5"] = "主营业务收入"
     ws["F5"] = 1000
+    # 5401 成本 借 200 → 整挂项目总监及助理
+    ws["A6"] = "5401"
+    ws["B6"] = "主营业务成本"
+    ws["E6"] = 200
     # 5402 税金 借 50
-    ws["A6"] = "5402"
-    ws["B6"] = "税金及附加"
-    ws["E6"] = 50
+    ws["A7"] = "5402"
+    ws["B7"] = "税金及附加"
+    ws["E7"] = 50
     # 5504 财务费用 借 10
-    ws["A7"] = "5504"
-    ws["B7"] = "财务费用"
-    ws["E7"] = 10
+    ws["A8"] = "5504"
+    ws["B8"] = "财务费用"
+    ws["E8"] = 10
     wb.save(path)
 
 
@@ -95,18 +100,24 @@ def test_allocate_synthetic_direct_hang():
         # find 5402 row and 财务中心 col
         headers = {ws.cell(2, c).value: c for c in range(1, ws.max_column + 1)}
         assert "财务中心" in headers
+        assert "项目总监及助理" in headers
         fee_col = headers.get("费用合计")
         check_col = headers.get("核对")
         fin_col = headers["财务中心"]
-        found_5402 = False
+        pm_col = headers["项目总监及助理"]
+        found_5402 = found_5401 = False
         for r in range(3, ws.max_row + 1):
-            if str(ws.cell(r, 1).value) == "5402":
+            code = str(ws.cell(r, 1).value)
+            if code == "5402":
                 found_5402 = True
-                # should hang 50 to 财务中心
                 assert float(ws.cell(r, fin_col).value or 0) == 50
                 assert float(ws.cell(r, fee_col).value or 0) == 50
                 assert abs(float(ws.cell(r, check_col).value or 0)) < 0.02
-        assert found_5402
+            if code == "5401":
+                found_5401 = True
+                assert float(ws.cell(r, pm_col).value or 0) == 200
+                assert abs(float(ws.cell(r, check_col).value or 0)) < 0.02
+        assert found_5402 and found_5401
 
 
 def test_inspect_runs():

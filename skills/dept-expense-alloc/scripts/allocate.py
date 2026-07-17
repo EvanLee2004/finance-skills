@@ -171,8 +171,9 @@ def discover_entity_files(input_dir: Path) -> dict[str, Path]:
 
 # 整挂规则（config 文字版的可执行子集；冲突项不在此硬写死 5401 整挂）
 DIRECT_HANG = {
-    "5402": "财务中心",  # 暂定
-    "5504": "财务中心",  # 暂定
+    "5401": "项目总监及助理",  # 斯佳 20260717 流程反馈：按回填整挂
+    "5402": "财务中心",
+    "5504": "财务中心",
 }
 
 
@@ -327,8 +328,8 @@ def main():
     report.append("=== 部门费用归集分摊 allocate ===")
     report.append(f"输入目录: {input_dir}")
     report.append(f"模板科目行: {len(structure['account_rows'])} 部门列: {len(structure['departments'])}")
-    report.append("⚠ 5401 成本归集规则与定稿冲突未决：本版不对 5401 做整挂，部门列留空等样例。")
-    report.append("本版仅：主体余额填左列 + 5402/5504 暂定整挂财务中心。收入/按人拆待样例。")
+    report.append("5401 成本：整挂「项目总监及助理」（20260717 流程反馈已拍板）。")
+    report.append("本版：主体列 + 5401/5402/5504 整挂。收入/按人拆待样例。")
 
     entity_files = discover_entity_files(input_dir)
     report.append(f"识别到主体文件: { {k: str(v) for k,v in entity_files.items()} }")
