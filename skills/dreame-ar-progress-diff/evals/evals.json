@@ -1,0 +1,33 @@
+{
+  "skill_name": "dreame-ar-progress-diff",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我对比一下桌面追觅对账文件夹里那几个 Martin list 的应收进度，出个报告，并用人话总结关键变化。",
+      "expectations": [
+        "触发 dreame-ar-progress-diff 技能",
+        "调用 scripts/compare.py 而不是手写临时脚本重造逻辑",
+        "产出含值变化/颜色变化 sheet 的 Excel",
+        "结论提到回款或催促或收PO或6月等业务向信息",
+        "不把公式差异当成预计付款备注变化"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "追觅应收进度 0703 和 0713 差在哪？",
+      "expectations": [
+        "识别为进度多版本对比",
+        "至少使用两份源文件运行对比",
+        "告知输出路径"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "亮晶说子列表头以后可能叫「收到PO时间」，以后对比要认出来。",
+      "expectations": [
+        "改 config/子列识别.json 而不是改 compare.py 业务逻辑",
+        "说明改表不改码"
+      ]
+    }
+  ]
+}

@@ -16,6 +16,7 @@
 | [split-by-sales](skills/split-by-sales/) | **按销售拆分**：把应收 all 按销售人员拆成一人一份带下拉框 Excel（账龄降序排好、坏账桶忽略、GM单独成sheet、对账）——接在合并之后 | ✅ 回归15/15 · 链路通 |
 | [labor-invoice-check](skills/labor-invoice-check/) | **劳务发票核对**：待支付清单(国内个人)×发票台账，按身份证号求和多张发票、实习生/外国人豁免、≤800放行、>800缺票/未开票标黄催票 → 主核对表+不付名单+可付名单 | ✅ 回归26/26 · 真实464人验证 |
 | [withholding-report-rename](skills/withholding-report-rename/) | **代扣代缴申报表重命名**：把一批「代扣代缴、代收代缴税款报告表」PDF 批量改名成`{纳税人名称}{计税依据合计+实缴税额合计}.pdf`；名称取自第2页、金额取自第1页合计行，默认 copy 不动原件、出对照表，抽不到的进待人工 | ✅ 回归5/5 · opencode 实测通过 |
+| [dreame-ar-progress-diff](skills/dreame-ar-progress-diff/) | **追觅应收进度对比**：多版追觅 list「应收进度」按人名对齐、期间并集，出值/底色/列结构 diff（预计付款忽略公式）+ 结论摘要 | ✅ 回归47/47 · 真实金标值29/色12 · 待下版入包 |
 | …更多 | 回单查询 / 销售反馈汇总 / 费用归集 等 | 规划中 |
 
 ### 通用基座（自研通用，处理四类文档；改自 Anthropic 官方 office skills）
