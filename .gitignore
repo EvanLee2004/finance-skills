@@ -29,3 +29,7 @@ __pycache__/
 venv/
 node_modules/
 *.log
+
+# ===== ar-hexiao-daily / 各 skill 整份工作区（运行产物与验收证据）=====
+skills/*/工作区/**
+!skills/*/工作区/**/.gitkeep
