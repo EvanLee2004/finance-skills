@@ -128,7 +128,7 @@ def main():
     lines.append("提示：缺文件时脚本会在对应步骤报错停下，不会猜列。")
     text = "\n".join(lines) + "\n"
     print(text)
-    report = args.report or str(common.OUT_DIR / "运行报告_盘点.txt")
+    report = args.report or str(Path(args.workspace) / "04_产出" / "运行报告_盘点.txt")
     Path(report).parent.mkdir(parents=True, exist_ok=True)
     Path(report).write_text(text, encoding="utf-8")
     print(f"报告已写：{report}")

@@ -111,6 +111,32 @@ def fuzzy_find_col(
     return None
 
 
+def find_header_row(rows, role: str, required, aliases=None, scan: int = 8):
+    """
+    在前 scan 行里找真正的表头行（她的表常有标题行/空行，盲取第一行会全崩）。
+    返回 (行号0基, 表头列表)；找不到则回退第一行，让 resolve_columns 去报错列出实际表头。
+    """
+    aliases = aliases or load_aliases()
+    role_map = aliases.get(role, {})
+    best = (-1, None, -1)
+    for i, row in enumerate(rows[:scan]):
+        headers = [str(x).strip() if x is not None else "" for x in row]
+        if not any(headers):
+            continue
+        hit = 0
+        for key in required:
+            if fuzzy_find_col(headers, role_map.get(key, [key])) is not None:
+                hit += 1
+        if hit > best[2]:
+            best = (i, headers, hit)
+        if hit == len(required):
+            return i, headers
+    if best[1] is not None:
+        return best[0], best[1]
+    first = rows[0] if rows else []
+    return 0, [str(x).strip() if x is not None else "" for x in first]
+
+
 def resolve_columns(
     headers: Sequence[str],
     role: str,
@@ -168,11 +194,13 @@ def mask_customer(name: str) -> str:
     return s[0] + "*" * (len(s) - 2) + s[-1]
 
 
-def ensure_out_dirs() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
-    (WORK / "01_智云导出").mkdir(parents=True, exist_ok=True)
-    (WORK / "02_我的表副本").mkdir(parents=True, exist_ok=True)
+def ensure_out_dirs(workspace=None) -> None:
+    """建齐工作区四个子目录。传 workspace 时跟随它，否则用技能自带工作区。"""
+    from pathlib import Path as _P
+
+    base = _P(workspace) if workspace else WORK
+    for d in ("01_智云导出", "02_我的表副本", "03_台账", "04_产出"):
+        (base / d).mkdir(parents=True, exist_ok=True)
 
 
 def parse_rate_args(rate_items: Optional[Sequence[str]]) -> Dict[str, float]:

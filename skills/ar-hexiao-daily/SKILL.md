@@ -126,7 +126,7 @@ python3 "$SKILL/scripts/verify_sources.py" verify --workspace "$SKILL/工作区"
 2. 按她说的步骤跑对应脚本；**金额结果只从脚本 stdout/产出文件读**。  
 3. 对话只报：笔数、auto/hold/异常计数、E 码、路径、成功失败。  
 4. 轮到她做的步：只讲做什么 + 怎么验，不代做。  
-5. 装依赖：`pip install openpyxl`；测试：`python3 -m pytest tests/ -v`。
+5. 装依赖：`pip install openpyxl xlrd`（**xlrd 必装**——她的银行日记账是老式 `.xls`，缺了第 2 步会直接崩）；测试：`python3 -m pytest tests/ -v`。
 
 ## 5. 验收
 

@@ -91,13 +91,15 @@ class FlowLedger:
             except Exception:
                 continue
             for ws in wb.worksheets:
-                it = ws.iter_rows(values_only=True)
-                try:
-                    headers = [str(c).strip() if c is not None else "" for c in next(it)]
-                except StopIteration:
+                all_rows = list(ws.iter_rows(values_only=True))
+                if not all_rows:
                     continue
+                hrow, headers = common.find_header_row(
+                    all_rows, "到账流转", ["日期", "公司名称", "金额", "单号"], aliases
+                )
                 if not cls._looks_like_flow(headers):
                     continue
+                it = iter(all_rows[hrow + 1:])
                 try:
                     cols = common.resolve_columns(
                         headers, "到账流转", ["日期", "公司名称", "金额", "单号"], aliases
@@ -111,7 +113,7 @@ class FlowLedger:
                     )
                     if idx is not None:
                         opt[k] = idx
-                rno = 1
+                rno = hrow + 1
                 for row in it:
                     rno += 1
                     vals = list(row)

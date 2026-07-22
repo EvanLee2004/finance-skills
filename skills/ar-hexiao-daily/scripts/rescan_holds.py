@@ -310,8 +310,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-reclassify", action="store_true", help="只合并，不拿盈亏表重判")
     args = ap.parse_args(argv)
 
-    common.ensure_out_dirs()
     ws = Path(args.workspace)
+    common.ensure_out_dirs(ws)
     path = ledger_path(ws)
     today = dt.date.today().isoformat()
 

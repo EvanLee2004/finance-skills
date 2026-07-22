@@ -985,8 +985,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    common.ensure_out_dirs()
     ws = Path(args.workspace)
+    common.ensure_out_dirs(ws)
     rates = common.parse_rate_args(args.rate)
     # 夹具 std 默认美元汇率常测 7.0 —— 仅当用户显式传入才用；测试会传
 
@@ -1060,7 +1060,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = classify_records(records, ledger, rates)
     result["flow_sources"] = flow.sources
     today = dt.date.today().strftime("%Y%m%d")
-    out_path = Path(args.out) if args.out else common.OUT_DIR / f"判定结果_{today}.json"
+    # 产出必须跟随 --workspace（此前写死 common.OUT_DIR，换工作区会把结果写回技能自带目录）
+    out_path = Path(args.out) if args.out else (ws / "04_产出" / f"判定结果_{today}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(serialize_result(result), ensure_ascii=False, indent=2),
