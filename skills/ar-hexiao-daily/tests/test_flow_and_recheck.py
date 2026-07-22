@@ -262,3 +262,23 @@ def test_annotate_records_fills_flow_fields():
     FL.annotate_records(recs, flow)
     assert recs[0]["flow_hits"] >= 1
     assert "第" in recs[0]["flow_locate"] and "行" in recs[0]["flow_locate"]
+
+
+# ---------- 收款方式：冲预收双义（回放校准抓到的规则缺口）----------
+
+def test_pay_way_prepaid_type():
+    assert C.common.pay_way("预存已核销", "预存回款") == "冲预收"
+
+
+def test_pay_way_same_month_is_hui():
+    d = dt.date(2026, 7, 8)
+    assert C.common.pay_way("手动核销", "", d, d) == "汇"
+
+
+def test_pay_way_cross_month_is_chongyushou():
+    """晚核销标签：6月到账、7月核销 → 冲预收（实测明妹就是这么填的）。"""
+    assert C.common.pay_way("手动核销", "", dt.date(2026, 6, 26), dt.date(2026, 7, 8)) == "冲预收"
+
+
+def test_pay_way_missing_dates_falls_back():
+    assert C.common.pay_way("手动核销", "") == "汇"

@@ -520,7 +520,12 @@ def classify_one(
 
     settled = (rec.get("status") or "") in common.SETTLED
     r_time = common.receipt_time(rec.get("shoukuan_date"), rec.get("hexiao_date"))
-    way = common.pay_way(rec.get("status") or "", rec.get("huikuan_type") or "")
+    way = common.pay_way(
+        rec.get("status") or "",
+        rec.get("huikuan_type") or "",
+        common.norm_date(rec.get("shoukuan_date")),
+        common.norm_date(rec.get("hexiao_date")),
+    )
     local_f = float(local)
 
     five = {

@@ -267,10 +267,27 @@ def receipt_time(
     return hexiao
 
 
-def pay_way(status: str, huikuan_type: str = "") -> str:
+def pay_way(
+    status: str,
+    huikuan_type: str = "",
+    shoukuan=None,
+    hexiao=None,
+) -> str:
+    """
+    收款方式。她表里实际只用两个值：「汇」和「冲预收」。
+
+    「冲预收」有两种业务外观（v2 §5 / 规则 R6），**都要判成冲预收**：
+      甲 真预收消耗：预存类核销 —— 看核销状态/回款类型；
+      乙 晚核销标签：钱早到账、销售下个月才关联订单 —— **到账月 ≠ 核销月**。
+        乙这条此前漏了，实测对不上她的表：AR26070033 六月到账七月核销，
+        她填「冲预收」我们填「汇」。这标签是给月度提成筛选用的，填错会漏提成。
+    """
     prepaid = {"预存已核销", "预存部分核销", "预存待核销"}
     if status in prepaid or "预存" in _norm(huikuan_type):
         return "冲预收"
+    if shoukuan is not None and hexiao is not None:
+        if (shoukuan.year, shoukuan.month) != (hexiao.year, hexiao.month):
+            return "冲预收"
     return "汇"
 
 
