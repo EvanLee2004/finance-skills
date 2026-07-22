@@ -257,28 +257,24 @@ class LedgerIndex:
             wb.close()
             raise ValueError("找不到盈亏表明细表头（需含新智云单号/计提）")
         aliases = common.load_aliases()
-        try:
-            cols = common.resolve_columns(
-                headers,
-                "盈亏明细",
-                ["SO", "SOD", "计提", "回款明细", "是否结账", "收款时间", "收款方式"],
-                aliases,
-            )
-        except ValueError:
-            # 应收可选
-            cols = common.resolve_columns(
-                headers,
-                "盈亏明细",
-                ["SO", "SOD", "计提", "回款明细", "是否结账", "收款时间", "收款方式"],
-                aliases,
-            )
+        cols = common.resolve_columns(
+            headers,
+            "盈亏明细",
+            ["SO", "SOD", "计提", "回款明细", "是否结账", "收款时间", "收款方式"],
+            aliases,
+        )
+        # 应收可选
+        role = aliases.get("盈亏明细", {})
+        yidx = common.fuzzy_find_col(headers, role.get("应收", ["应收金额", "应收"]))
+        if yidx is not None:
+            cols["应收"] = yidx
         self.cols = cols
         # 重建：read_only 流式
         wb.close()
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
         ws = wb["明细"]
         for r_i, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            if r_i <= header_row_idx:
+            if header_row_idx is not None and r_i <= header_row_idx:
                 continue
             vals = list(row)
             so = vals[cols["SO"]] if cols["SO"] < len(vals) else None
@@ -301,6 +297,9 @@ class LedgerIndex:
                     else None,
                     "shoukuan_way": vals[cols["收款方式"]]
                     if cols["收款方式"] < len(vals)
+                    else None,
+                    "yingshou": vals[cols["应收"]]
+                    if "应收" in cols and cols["应收"] < len(vals)
                     else None,
                 }
                 self.row_snapshot[r_i] = snap
@@ -400,36 +399,101 @@ def classify_one(
         result["reason"] = f"跨年老单（{y}）"
         return result
 
-    # 匹配盈亏
+    # —— 上游/附加信号（流转三键、建档等）；有则优先成码，不瞎填 ——
+    flow_hits = rec.get("flow_hits")  # None=未做三键；0=E0；1=唯一；>1=E12
+    if flow_hits is not None:
+        try:
+            fh = int(flow_hits)
+        except (TypeError, ValueError):
+            fh = -1
+        if fh == 0:
+            result["bucket"] = "exception"
+            result["code"] = "E0"
+            result["reason"] = "流转表三键对不到账（0 行）"
+            return result
+        if fh > 1:
+            result["bucket"] = "exception"
+            result["code"] = "E12"
+            result["reason"] = "同日同额同名命中多行"
+            return result
+    if rec.get("customer_archive_failed"):
+        result["bucket"] = "exception"
+        result["code"] = "E10"
+        result["reason"] = "建档失败/搜不到客户"
+        return result
+    if rec.get("prepaid_system_gt_local"):
+        result["bucket"] = "hold"
+        result["code"] = "E9"
+        result["reason"] = "系统可核金额大于线下预收剩余"
+        return result
+    if rec.get("deliver_changed"):
+        result["bucket"] = "hold"
+        result["code"] = "E11"
+        result["reason"] = "系统交付额与表旧值不一致"
+        return result
+
+    # 匹配盈亏：必须有 ledger；无表或表中无 SO → hold E2，禁止无表 auto 瞎填
     row = None
     how = ""
     cands: List[int] = []
-    if ledger is not None and (ledger.so_index or ledger.sod_index or True):
-        # 即使空索引也走 match，得到 E2
-        row, how, cands = ledger.match(so, sod)
-        if how == "E8":
-            result["bucket"] = "hold"
-            result["code"] = "E8"
-            result["reason"] = "SO/SOD 在盈亏表多行"
-            result["candidates"] = cands
-            result["locate_hint"] = f"按 SO={so} 筛选，候选行号仅供参考勿当定位键：{cands}"
-            return result
-        if how in ("E2", "E7") or row is None:
-            # 无 ledger 路径：测试可只判金额
-            if ledger.path is None and not ledger.so_index and not ledger.sod_index:
-                pass  # 无表：仍可算五列建议（auto 候选）
-            else:
-                result["bucket"] = "hold"
-                result["code"] = "E2" if how != "E7" else "E7"
-                result["reason"] = "盈亏表无此 SO/SOD" if how != "E7" else "无单号"
-                return result
+    if ledger is None:
+        result["bucket"] = "hold"
+        result["code"] = "E2"
+        result["reason"] = "未提供盈亏表，无法确认 SO 是否在明细"
+        return result
+
+    row, how, cands = ledger.match(so, sod)
+    if how == "E8":
+        result["bucket"] = "hold"
+        result["code"] = "E8"
+        result["reason"] = "SO/SOD 在盈亏表多行"
+        result["candidates"] = cands
+        result["locate_hint"] = f"按 SO={so} 筛选，候选行号仅供参考勿当定位键：{cands}"
+        return result
+    if how == "E7" or (not so and not sod):
+        result["bucket"] = "exception"
+        result["code"] = "E7"
+        result["reason"] = "无单号"
+        return result
+    if how == "E2" or row is None:
+        result["bucket"] = "hold"
+        result["code"] = "E2"
+        result["reason"] = "盈亏表无此 SO/SOD"
+        if so:
+            result["locate_hint"] = f"在盈亏『明细』按「新智云单号」筛选：{so}（禁止用行号）"
+        return result
+
+    # 超额：本次本币 > 应收（人民币；容差 0.01）
+    snap = ledger.row_snapshot.get(row, {}) if row is not None else {}
+    yingshou = common.to_number(rec.get("yingshou"))
+    if yingshou is None:
+        yingshou = common.to_number(snap.get("yingshou"))
+    if (
+        local is not None
+        and yingshou is not None
+        and common.is_cny(rec.get("currency") or "")
+        and float(local) > float(yingshou) + 0.01
+    ):
+        result["bucket"] = "exception"
+        result["code"] = "E4"
+        result["reason"] = "超额核销：本次本币大于应收"
+        return result
+    arrival_cap = common.to_number(rec.get("arrival_amount"))
+    if (
+        local is not None
+        and arrival_cap is not None
+        and float(local) > float(arrival_cap) + 0.01
+    ):
+        result["bucket"] = "exception"
+        result["code"] = "E4"
+        result["reason"] = "超额核销：核销额大于到账"
+        return result
 
     # 尾差：交付 vs 核销
     deliver = rec.get("deliver_local")
     if deliver is not None and local is not None and thr is not None:
         if abs(float(deliver) - float(local)) > thr + 1e-9:
             # 完整核销场景下差额；阈值 0 时任何不等都挂
-            # 若是部分核销（未结清状态）不强制交付=核销
             st = rec.get("status") or ""
             if st in common.SETTLED and abs(float(deliver) - float(local)) > thr + 1e-9:
                 # 外币：交付本币是系统汇率，不能与到账本币比——跳过
@@ -439,13 +503,20 @@ def classify_one(
                     result["reason"] = "金额与交付额不一致（尾差阈值=0）"
                     return result
 
+    if local is None:
+        result["bucket"] = "exception"
+        result["code"] = "E6"
+        result["reason"] = "本币金额算不出"
+        return result
+
     settled = (rec.get("status") or "") in common.SETTLED
     r_time = common.receipt_time(rec.get("shoukuan_date"), rec.get("hexiao_date"))
     way = common.pay_way(rec.get("status") or "", rec.get("huikuan_type") or "")
+    local_f = float(local)
 
     five = {
-        "计提": round(local, 2) if settled else None,
-        "回款明细": round(local, 2),
+        "计提": round(local_f, 2) if settled else None,
+        "回款明细": round(local_f, 2),
         "是否结账": "是" if settled else "否",
         "收款时间": r_time.isoformat() if r_time else None,
         "收款方式": way,
@@ -454,11 +525,10 @@ def classify_one(
     result["five_cols"] = five
     result["bucket"] = "auto"
     result["code"] = ""
-    result["reason"] = f"通道={result['channel']} 匹配={how or '无表'}"
+    result["reason"] = f"通道={result['channel']} 匹配={how}"
     if so:
         result["locate_hint"] = f"在盈亏『明细』按「新智云单号」筛选：{so}（禁止用行号）"
-    if row is not None and ledger is not None:
-        snap = ledger.row_snapshot.get(row, {})
+    if row is not None:
         result["current_values"] = {
             "计提": snap.get("jiti"),
             "回款明细": snap.get("huikuan"),
@@ -476,6 +546,7 @@ def classify_records(
     ledger: Optional[LedgerIndex] = None,
     rates: Optional[Dict[str, float]] = None,
 ) -> dict:
+    """ledger 为 None 时每条进 hold E2（禁止无表瞎填五列）。"""
     rates = rates or {}
     thr = common.tail_threshold()
     year_now = common.current_year()
@@ -832,7 +903,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if cand:
             ledger = LedgerIndex(cand[0])
         else:
-            ledger = LedgerIndex()  # empty
+            print(
+                "WARN: 未提供盈亏表（--ledger 或 02_我的表副本/*盈亏*）；"
+                "全部无法匹配的单将 hold E2，不会瞎填五列",
+                file=sys.stderr,
+            )
+            ledger = None  # 明确 None → classify 一律 E2，禁止空索引 auto
 
     records: List[dict] = []
     if args.synthetic:

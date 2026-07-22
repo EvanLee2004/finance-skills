@@ -8,7 +8,47 @@ import pytest
 
 import classify_hexiao as C
 import common
-from conftest import FIXTURE
+from conftest import FIXTURE, LEDGER_FULL
+
+
+def _led(so: str, sod: str = "", yingshou=None, multi=False):
+    """合成非空盈亏索引。"""
+    rows_idx = [1, 2] if multi else [1]
+    so_map = {so: rows_idx} if so else {}
+    sod_map = {sod: rows_idx} if sod else {}
+    rows = {}
+    for i in rows_idx:
+        rows[i] = {
+            "so": so,
+            "sod": sod,
+            "jiti": None,
+            "huikuan": None,
+            "jiezhang": None,
+            "shoukuan_time": None,
+            "shoukuan_way": None,
+            "yingshou": yingshou,
+        }
+    return C.LedgerIndex(synthetic={"so": so_map, "sod": sod_map, "rows": rows})
+
+
+def _base_rec(so="SO26010001", sod="SOD26010001", amount=100.0, extra=None):
+    rec = {
+        "ar": "AR_T",
+        "so": so,
+        "sod": sod,
+        "amount_orig": amount,
+        "currency": "人民币CNY",
+        "status": "手动核销",
+        "channel": "duizhang",
+        "fee": 0,
+        "customer": "测",
+        "hexiao_date": dt.date(2026, 7, 8),
+        "shoukuan_date": dt.date(2026, 7, 8),
+        "deliver_local": amount,
+    }
+    if extra:
+        rec.update(extra)
+    return rec
 
 
 def test_channel_fenbi():
@@ -322,6 +362,112 @@ def test_classify_records_counts():
     assert result["counts"]["exception"] >= 1
 
 
+def test_empty_ledger_never_auto():
+    """空 LedgerIndex / None → 表中无 SO 不得进 auto。"""
+    rec = {
+        "ar": "AR_EMPTY",
+        "so": "SO26019999",
+        "sod": "SOD26019999",
+        "amount_orig": 100.0,
+        "currency": "人民币CNY",
+        "status": "手动核销",
+        "channel": "duizhang",
+        "fee": 0,
+        "customer": "X",
+        "hexiao_date": dt.date(2026, 7, 8),
+        "shoukuan_date": dt.date(2026, 7, 8),
+    }
+    r1 = C.classify_one(rec, C.LedgerIndex(), {}, 0.0, 2026)
+    assert r1["bucket"] == "hold"
+    assert r1["code"] == "E2"
+    assert not r1.get("five_cols") or r1["five_cols"] == {} or r1["bucket"] != "auto"
+    r2 = C.classify_one(rec, None, {}, 0.0, 2026)
+    assert r2["bucket"] == "hold"
+    assert r2["code"] == "E2"
+    r3 = C.classify_records([rec], None, {})
+    assert r3["counts"]["auto"] == 0
+    assert r3["hold"][0]["code"] == "E2"
+
+
+def test_e0_flow_zero_hits():
+    rec = _base_rec(so="SO26011111", sod="SOD26011111", extra={"flow_hits": 0})
+    ledger = _led(so="SO26011111", sod="SOD26011111")
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E0"
+    assert r["bucket"] == "exception"
+
+
+def test_e4_excess_yingshou():
+    rec = _base_rec(
+        so="SO26012222",
+        sod="SOD26012222",
+        amount=500.0,
+        extra={"yingshou": 100.0},
+    )
+    ledger = _led(so="SO26012222", sod="SOD26012222", yingshou=100.0)
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E4"
+    assert r["bucket"] == "exception"
+
+
+def test_e4_excess_arrival():
+    rec = _base_rec(
+        so="SO26013333",
+        sod="SOD26013333",
+        amount=200.0,
+        extra={"arrival_amount": 50.0, "yingshou": 9999.0},
+    )
+    ledger = _led(so="SO26013333", sod="SOD26013333", yingshou=9999.0)
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E4"
+
+
+def test_e9_prepaid_conflict():
+    rec = _base_rec(
+        so="SO26014444",
+        sod="SOD26014444",
+        extra={"prepaid_system_gt_local": True},
+    )
+    ledger = _led(so="SO26014444", sod="SOD26014444")
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E9"
+    assert r["bucket"] == "hold"
+
+
+def test_e10_archive_failed():
+    rec = _base_rec(
+        so="SO26015555",
+        sod="SOD26015555",
+        extra={"customer_archive_failed": True},
+    )
+    ledger = _led(so="SO26015555", sod="SOD26015555")
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E10"
+
+
+def test_e11_deliver_changed():
+    rec = _base_rec(
+        so="SO26016666",
+        sod="SOD26016666",
+        extra={"deliver_changed": True},
+    )
+    ledger = _led(so="SO26016666", sod="SOD26016666")
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E11"
+
+
+def test_e12_flow_multi_hits():
+    rec = _base_rec(
+        so="SO26017770",
+        sod="SOD26017770",
+        extra={"flow_hits": 3},
+    )
+    ledger = _led(so="SO26017770", sod="SOD26017770")
+    r = C.classify_one(rec, ledger, {}, 0.0, 2026)
+    assert r["code"] == "E12"
+    assert r["bucket"] == "exception"
+
+
 @pytest.mark.skipif(not FIXTURE.is_file(), reason="无夹具")
 def test_std_end_to_end_five_cols():
     """标准答案端到端：五列逐格比对（夹具 std）。"""
@@ -368,14 +514,72 @@ def test_std_end_to_end_five_cols():
 
 
 @pytest.mark.skipif(not FIXTURE.is_file(), reason="无夹具")
-def test_day_batch_runs():
+def test_day_batch_with_synthetic_nonempty_ledger():
+    """日批必须绑定非空 ledger：表内 SO→auto/E3，表外 SO→E2。"""
     fix = json.loads(FIXTURE.read_text(encoding="utf-8"))
     recs = C.records_from_fixture(fix, "day")
     assert len(recs) == 53
-    result = C.classify_records(recs, C.LedgerIndex(), {"美元USD": 7.0, "未知外币": 7.0})
+    # 构造：所有 2026 SO 进索引；故意漏掉第一条 2026 的 SO 以验 E2
+    so_map, sod_map, rows = {}, {}, {}
+    rid = 1
+    first_2026 = None
+    for rec in recs:
+        so, sod = rec.get("so") or "", rec.get("sod") or ""
+        y = common.year_from_so(sod or so)
+        if y is not None and y < 2026:
+            continue  # 跨年不进索引 → E3 先于 match
+        if first_2026 is None and so:
+            first_2026 = so  # 故意不入库
+            continue
+        if so:
+            so_map.setdefault(so, []).append(rid)
+        if sod:
+            sod_map.setdefault(sod, []).append(rid)
+        rows[rid] = {"so": so, "sod": sod, "yingshou": 1e12}
+        rid += 1
+    ledger = C.LedgerIndex(synthetic={"so": so_map, "sod": sod_map, "rows": rows})
+    result = C.classify_records(recs, ledger, {"美元USD": 7.0, "未知外币": 7.0})
     assert result["counts"]["total"] == 53
-    # 跨年应进 hold
-    assert result["counts"]["hold"] + result["counts"]["exception"] + result["counts"]["auto"] == 53
+    assert result["counts"]["auto"] + result["counts"]["hold"] + result["counts"]["exception"] == 53
+    codes = result["e_code_dist"]
+    assert codes.get("E3", 0) >= 1  # 跨年
+    assert codes.get("E2", 0) >= 1  # 故意漏的 2026 SO
+    assert result["counts"]["auto"] >= 1
+
+
+@pytest.mark.skipif(not FIXTURE.is_file() or not LEDGER_FULL.is_file(), reason="无夹具或全年盈亏")
+def test_day_batch_with_real_ledger_e2_path():
+    """集成：真实全年盈亏索引；表无 SO → E2 hold，不得进 auto。"""
+    fix = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    recs = C.records_from_fixture(fix, "day")
+    ledger = C.LedgerIndex(LEDGER_FULL)
+    result = C.classify_records(recs, ledger, {"美元USD": 7.0, "未知外币": 7.0})
+    assert result["counts"]["total"] == 53
+    # 分母=53；跨年 E3 + 表无 E2 + 命中 auto
+    assert result["counts"]["auto"] + result["counts"]["hold"] + result["counts"]["exception"] == 53
+    e2 = [h for h in result["hold"] if h.get("code") == "E2"]
+    e3 = [h for h in result["hold"] if h.get("code") == "E3"]
+    assert len(e3) >= 1
+    # 任一 auto 行的 SO 必须在索引内
+    for a in result["auto"]:
+        so, sod = a.get("so") or "", a.get("sod") or ""
+        assert (sod and sod in ledger.sod_index) or (so and so in ledger.so_index)
+    # 构造一条确定不在表的 SO 验 E2
+    ghost = {
+        "ar": "AR_GHOST",
+        "so": "SO26999999",
+        "sod": "SOD26999999",
+        "amount_orig": 10.0,
+        "currency": "人民币CNY",
+        "status": "手动核销",
+        "channel": "duizhang",
+        "fee": 0,
+        "customer": "G",
+        "hexiao_date": dt.date(2026, 7, 8),
+        "shoukuan_date": dt.date(2026, 7, 8),
+    }
+    rg = C.classify_one(ghost, ledger, {}, 0.0, 2026)
+    assert rg["code"] == "E2" and rg["bucket"] == "hold"
 
 
 def test_no_proportion_in_source():
