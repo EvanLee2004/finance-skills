@@ -1019,7 +1019,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
         if not records:
-            print("ERROR: 无输入。请提供 --fixture 或将导出表放入 01_智云导出/", file=sys.stderr)
+            # 兜底：01_智云导出/ 里放的是 .json 取数夹具时也认（测试/演练常这么放）
+            js = sorted((ws / "01_智云导出").glob("*.json")) if (ws / "01_智云导出").is_dir() else []
+            for j in js:
+                try:
+                    fix = load_fixture(j)
+                    if isinstance(fix, dict) and (fix.get("day") or fix.get("std")):
+                        records = records_from_fixture(fix, args.key)
+                        print(f"用取数夹具：{j.name}（key={args.key}）")
+                        break
+                except Exception:
+                    continue
+        if not records:
+            print(
+                "ERROR: 第 6 步跑不了 —— 01_智云导出/ 里没有可用的智云导出。\n"
+                "  需要：文件名含「回款」的回款记录 + 含「对账」的回款核销对账（预存类另需含「明细」的一份）。\n"
+                "  请她导出后放进 01_智云导出/ 再跑；不要改用别的文件凑合。",
+                file=sys.stderr,
+            )
             return 2
 
     # —— 到账流转表三键匹配（R2）：没有它，E0/E12 判不出来，清单也说不出"在流转表哪一行" ——
