@@ -61,17 +61,20 @@ def test_worklist_three_sheets():
     out = tmp / "清单.xlsx"
     W.build_workbook(_sample_result(), out)
     wb = openpyxl.load_workbook(out)
-    assert set(wb.sheetnames) == {"今天能填", "挂账待办", "异常"}
+    # 三个用户页签必在；ar_summary 存在时另有「按到账汇总」
+    assert {"今天能填", "挂账待办", "异常"} <= set(wb.sheetnames)
     ws = wb["今天能填"]
     headers = [c.value for c in ws[1]]
-    assert "怎么找到这行(按SO筛选)" in headers
-    assert "应填_计提" in headers
-    assert "当前_回款明细" in headers
-    # 无「行号」作为定位列名
+    col = {h: i for i, h in enumerate(headers)}
+    assert "怎么找到这行(按SO筛选)" in col
+    assert "应填_计提" in col
+    assert "当前_回款明细" in col
+    assert "这笔到账在流转表哪一行" in col  # 迭代v2：流转表定位
+    # 无「行号」作为定位列名（她的表会插行，行号隔天失效）
     assert not any(h == "行号" for h in headers)
     row2 = [c.value for c in ws[2]]
-    assert row2[1] == "SO2601"
-    assert "禁止用行号" in str(row2[4])
+    assert row2[col["SO"]] == "SO2601"
+    assert "禁止用行号" in str(row2[col["怎么找到这行(按SO筛选)"]])
 
 
 def test_worklist_hold_sheet_has_action():
@@ -81,7 +84,9 @@ def test_worklist_hold_sheet_has_action():
     wb = openpyxl.load_workbook(out)
     wh = wb["挂账待办"]
     assert wh.max_row >= 2
-    assert wh.cell(2, 5).value == "E1"
+    hh = [c.value for c in wh[1]]
+    assert wh.cell(2, hh.index("码") + 1).value == "E1"
+    assert "这笔到账在流转表哪一行" in hh
 
 
 def test_main_from_result_json(tmp_path):

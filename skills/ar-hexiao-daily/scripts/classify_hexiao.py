@@ -119,6 +119,8 @@ def parse_duizhang_rows(
                 rec["shoukuan_date"] = meta.get("arrival_date")
             rec["huikuan_type"] = meta.get("huikuan_type") or ""
             rec["fee"] = meta.get("fee") or 0.0
+            # 到账总额：跨行校验 Σ核销 ≤ 到账 要用（单条判不出超额核销）
+            rec["arrival_total"] = meta.get("amount_orig")
             if meta.get("huikuan_type"):
                 rec["channel"] = _channel_for_type(meta["huikuan_type"])
         # 币种兜底
@@ -335,7 +337,14 @@ def classify_one(
         "ar": rec.get("ar") or "",
         "so": rec.get("so") or "",
         "sod": rec.get("sod") or "",
+        # case_id = AR × SO：一笔到账挂多个 SO 时，每个 SO 是独立案例，
+        # 否则台账会把多 SO 塌成一行、状态互相覆盖（实测 45% 的流转行是多 SO）。
+        "case_id": f"{rec.get('ar') or '-'}|{rec.get('so') or '-'}",
         "customer_masked": common.mask_customer(rec.get("customer") or ""),
+        "flow_hits": rec.get("flow_hits"),
+        "flow_locate": rec.get("flow_locate") or "",
+        "flow_matched_by": rec.get("flow_matched_by") or "",
+        "flow_order_suggest": rec.get("flow_order_suggest") or "",
         "channel": rec.get("channel") or "duizhang",
         "huikuan_type": rec.get("huikuan_type") or "",
         "status": rec.get("status") or "",
@@ -550,15 +559,22 @@ def classify_records(
     rates = rates or {}
     thr = common.tail_threshold()
     year_now = common.current_year()
-    auto, hold, exc = [], [], []
-    for rec in records:
-        r = classify_one(rec, ledger, rates, thr, year_now)
-        if r["bucket"] == "auto":
-            auto.append(r)
-        elif r["bucket"] == "hold":
-            hold.append(r)
-        else:
-            exc.append(r)
+    results = [classify_one(rec, ledger, rates, thr, year_now) for rec in records]
+
+    # —— 跨行校验：同一 AR 的核销合计不得超过到账（明妹明确约束；E4 单条判不出来）——
+    over = check_ar_totals(records, thr)
+    for r in results:
+        info = over.get(r.get("ar") or "")
+        if not info:
+            continue
+        r["bucket"] = "exception"
+        r["code"] = "E4"
+        r["reason"] = info
+        r["five_cols"] = {}
+
+    auto = [r for r in results if r["bucket"] == "auto"]
+    hold = [r for r in results if r["bucket"] == "hold"]
+    exc = [r for r in results if r["bucket"] == "exception"]
     return {
         "auto": auto,
         "hold": hold,
@@ -569,8 +585,80 @@ def classify_records(
             "exception": len(exc),
             "total": len(records),
         },
-        "e_code_dist": _dist(auto + hold + exc),
+        "e_code_dist": _dist(results),
+        "ar_summary": build_ar_summary(results),
     }
+
+
+def check_ar_totals(records: List[dict], thr: float = 0.0) -> Dict[str, str]:
+    """
+    同一 AR 的 Σ本次核销 ≤ 到账金额（含手续费两种口径都比，取宽松的一种）。
+    超出 → 返回 {ar: 原因}，该 AR 全部行进 E4。
+    只有拿得到 arrival_total 的 AR 才校验；拿不到就不判（不猜）。
+    """
+    sums: Dict[str, float] = {}
+    arrival: Dict[str, float] = {}
+    fees: Dict[str, float] = {}
+    for rec in records:
+        ar = rec.get("ar") or ""
+        if not ar:
+            continue
+        amt = rec.get("amount_orig")
+        if amt is not None:
+            sums[ar] = round(sums.get(ar, 0.0) + float(amt), 2)
+        at = rec.get("arrival_total")
+        if at is not None:
+            arrival[ar] = float(at)
+        fee = rec.get("fee")
+        if fee:
+            fees[ar] = float(fee)
+    bad: Dict[str, str] = {}
+    for ar, total in sums.items():
+        base = arrival.get(ar)
+        if base is None:
+            continue
+        gross = base + fees.get(ar, 0.0)
+        cap = max(base, gross) + max(thr, 0.0)
+        if total > cap + 0.005:
+            bad[ar] = (
+                f"同一到账的核销合计 {total:.2f} 超过到账金额 "
+                f"{base:.2f}（含手续费 {gross:.2f}）→ 超额核销，停下找销售核对"
+            )
+    return bad
+
+
+def build_ar_summary(results: List[dict]) -> List[dict]:
+    """
+    按 AR 汇总每个 SO 的状态，并派生到账流转表「是否更新应收款」三态：
+    全部 SO 可填 → 是；部分 → 部分；一个都没有 → 空白。
+    （混合案例正是她表里出现"部分"的原因，实测微信表 2 行、汇款表 1 行。）
+    """
+    try:
+        from flow_ledger import derive_flow_status
+    except Exception:  # pragma: no cover - 仅防御
+        def derive_flow_status(states):
+            done = sum(1 for s in states if s == "auto")
+            if not states or done == 0:
+                return ""
+            return "是" if done == len(states) else "部分"
+
+    by_ar: Dict[str, List[dict]] = {}
+    for r in results:
+        by_ar.setdefault(r.get("ar") or "-", []).append(r)
+    out = []
+    for ar, items in by_ar.items():
+        states = [i["bucket"] for i in items]
+        out.append(
+            {
+                "ar": ar,
+                "so_count": len(items),
+                "buckets": states,
+                "流转表_是否更新应收款_建议": derive_flow_status(states),
+                "flow_locate": next((i.get("flow_locate") for i in items if i.get("flow_locate")), ""),
+                "待处理SO": [i.get("so") for i in items if i["bucket"] != "auto" and i.get("so")],
+            }
+        )
+    return out
 
 
 def _dist(items: List[dict]) -> Dict[str, int]:
@@ -768,6 +856,7 @@ def load_excel_exports(workspace: Path) -> Optional[List[dict]]:
                 rec["huikuan_type"] = meta.get("huikuan_type") or ""
                 rec["channel"] = _channel_for_type(rec["huikuan_type"])
                 rec["fee"] = meta.get("fee") or 0.0
+                rec["arrival_total"] = meta.get("amount_orig")
                 if not rec["currency"]:
                     rec["currency"] = meta.get("currency") or "人民币CNY"
             # 分笔：即使在对账表出现也 hold
@@ -832,6 +921,7 @@ def load_excel_exports(workspace: Path) -> Optional[List[dict]]:
                         "huikuan_type": meta.get("huikuan_type") or "预存回款",
                         "channel": "yucun",
                         "fee": meta.get("fee") or 0.0,
+                        "arrival_total": meta.get("amount_orig"),
                         "deliver_local": None,
                     }
                 )
@@ -887,6 +977,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--rate", action="append", default=[], help="外币汇率 美元USD=7.0")
     ap.add_argument("--out", default="", help="判定结果 json 路径")
     ap.add_argument("--synthetic", default="", help="合成记录 JSON（测试用）")
+    ap.add_argument("--flow", default="", help="到账流转表副本（只读）；不给则扫 02_我的表副本/")
+    ap.add_argument(
+        "--flow-complete",
+        action="store_true",
+        help="声明当天所有渠道的流转表都已给全；只有这时才判 E0（对不到账）",
+    )
     args = ap.parse_args(argv)
 
     common.ensure_out_dirs()
@@ -926,7 +1022,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("ERROR: 无输入。请提供 --fixture 或将导出表放入 01_智云导出/", file=sys.stderr)
             return 2
 
+    # —— 到账流转表三键匹配（R2）：没有它，E0/E12 判不出来，清单也说不出"在流转表哪一行" ——
+    import flow_ledger as FL
+
+    flow = (
+        FL.FlowLedger.from_paths([Path(args.flow)])
+        if args.flow
+        else FL.FlowLedger.from_workspace(ws)
+    )
+    if flow.rows:
+        FL.annotate_records(records, flow, complete=args.flow_complete)
+        print(f"流转表已接入：{len(flow.rows)} 行，来源 {flow.sources}")
+    else:
+        print(
+            "WARN: 未认出到账流转表（02_我的表副本/）→ 本轮不做三键匹配，"
+            "E0/E12 不判、清单不给流转定位",
+            file=sys.stderr,
+        )
+
     result = classify_records(records, ledger, rates)
+    result["flow_sources"] = flow.sources
     today = dt.date.today().strftime("%Y%m%d")
     out_path = Path(args.out) if args.out else common.OUT_DIR / f"判定结果_{today}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)

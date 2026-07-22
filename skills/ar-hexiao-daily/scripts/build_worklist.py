@@ -36,11 +36,15 @@ def _codes() -> dict:
 def row_auto(item: dict) -> List[Any]:
     five = item.get("five_cols") or {}
     cur = item.get("current_values") or {}
+    partial = five.get("是否结账") == "否"
     return [
+        item.get("case_id") or "",
         item.get("ar") or "",
         item.get("so") or "",
         item.get("sod") or five.get("实收SOD") or "",
         item.get("customer_masked") or "",
+        item.get("flow_locate") or "",
+        item.get("flow_order_suggest") or "",
         item.get("locate_hint") or (
             f"在盈亏『明细』按「新智云单号」筛选：{item.get('so') or ''}（禁止用行号）"
         ),
@@ -55,6 +59,9 @@ def row_auto(item: dict) -> List[Any]:
         cur.get("收款时间"),
         cur.get("收款方式"),
         cur.get("实收SOD"),
+        ("这单没回满：填完这几列后，记得在这一单上方插一行、复制原信息、"
+         "把应收金额改成剩余待核销、是否结账填「否」（我们只提醒，不替你插）")
+        if partial else "",
         item.get("reason") or "",
         item.get("channel") or "",
     ]
@@ -65,10 +72,12 @@ def row_hold(item: dict) -> List[Any]:
     code = item.get("code") or ""
     info = codes.get(code) or {}
     return [
+        item.get("case_id") or "",
         item.get("ar") or "",
         item.get("so") or "",
         item.get("sod") or "",
         item.get("customer_masked") or "",
+        item.get("flow_locate") or "",
         code,
         info.get("名称") or code,
         item.get("reason") or info.get("原因") or "",
@@ -91,10 +100,13 @@ def build_workbook(result: dict, out_path: Path) -> Path:
     ws = wb.active
     ws.title = "今天能填"
     headers_auto = [
+        "案例ID",
         "AR",
         "SO",
         "SOD",
         "客户(打码)",
+        "这笔到账在流转表哪一行",
+        "流转表单号列建议填",
         "怎么找到这行(按SO筛选)",
         "应填_计提",
         "应填_回款明细",
@@ -107,6 +119,7 @@ def build_workbook(result: dict, out_path: Path) -> Path:
         "当前_收款时间",
         "当前_收款方式",
         "当前_实收SOD",
+        "部分核销提醒",
         "判定依据",
         "通道",
     ]
@@ -120,10 +133,12 @@ def build_workbook(result: dict, out_path: Path) -> Path:
     # 挂账待办
     wh = wb.create_sheet("挂账待办")
     headers_h = [
+        "案例ID",
         "AR",
         "SO",
         "SOD",
         "客户(打码)",
+        "这笔到账在流转表哪一行",
         "码",
         "原因名",
         "说明",
@@ -146,6 +161,27 @@ def build_workbook(result: dict, out_path: Path) -> Path:
     for item in result.get("exception") or []:
         we.append(row_exc(item))
     we.freeze_panes = "A2"
+
+    # 按到账汇总：告诉她每笔到账在流转表「是否更新应收款」该填什么（是/部分/空白）
+    summary = result.get("ar_summary") or []
+    if summary:
+        wsum = wb.create_sheet("按到账汇总")
+        wsum.append(
+            ["AR", "本笔关联SO数", "流转表『是否更新应收款』建议填", "还没处理完的SO", "流转表定位"]
+        )
+        for cell in wsum[1]:
+            cell.font = Font(bold=True)
+        for s in summary:
+            wsum.append(
+                [
+                    s.get("ar") or "",
+                    s.get("so_count") or 0,
+                    s.get("流转表_是否更新应收款_建议") or "（空白）",
+                    " ".join(s.get("待处理SO") or []),
+                    s.get("flow_locate") or "",
+                ]
+            )
+        wsum.freeze_panes = "A2"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(out_path))

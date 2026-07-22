@@ -50,9 +50,9 @@ description: >-
 | 3 | 誊到流转表 | **她做** | 技能讲：把收入清单 4 列贴进到账流转表 | 「流转表好了」 |
 | 4 | 建智云回款 | **她做** | 技能讲清单该建哪几笔；**绝不代写智云** | 「建档完了」 |
 | 5 | 等销售核销 | **她做** | 技能提醒：第二天再跑 T-1 | 「可以判定了」 |
-| 6 | 核销判定 | **脚本** | `python3 scripts/classify_hexiao.py --workspace 工作区/ …` | 三栏计数 + E 码分布；禁止报客户名金额 |
+| 6 | 核销判定 | **脚本** | `python3 scripts/classify_hexiao.py --workspace 工作区/ …`（自动接入到账流转表做三键匹配） | 三栏计数 + E 码分布；禁止报客户名金额 |
 | 7 | 今日工作清单 | **脚本只算** | `python3 scripts/build_worklist.py …` → 清单 xlsx；**不写她的表** | 打开清单，按「按 SO 筛选」自己填 |
-| 8 | 挂账重扫 | **脚本** | `python3 scripts/rescan_holds.py …` | 可补做几笔 / 仍挂起几笔 |
+| 8 | 挂账重扫 | **脚本** | `python3 scripts/rescan_holds.py --ledger <盈亏副本> …`（**拿当前盈亏表真重判**，不是只合并） | 可补做几笔 / 仍挂起几笔 / 本地判不动几笔 |
 | 9 | 她手填五列 | **她做** | 技能讲：按清单「今天能填」+ 当前值对照；**禁止用行号** | 「填完了」 |
 | 10 | 处理挂账/异常 | **她做** | 技能按大白话讲每个原因怎么办（见使用说明 §4） | 「挂账处理完了」 |
 | 11 | 收尾 | **她做** | 技能提醒：备份、明日再来 | 「今天收工」 |
@@ -61,12 +61,27 @@ description: >-
 
 ```bash
 SKILL="<本skill目录>"
-python3 "$SKILL/scripts/inspect_inputs.py" --workspace "$SKILL/工作区"
-python3 "$SKILL/scripts/extract_income.py" --input <日记账.xlsx> --out "$SKILL/工作区/04_产出"
+# 跑之前：记录源文件指纹（跑完要证明"没动她的表"）
+python3 "$SKILL/scripts/verify_sources.py" snapshot --workspace "$SKILL/工作区"
+
+python3 "$SKILL/scripts/inspect_inputs.py"  --workspace "$SKILL/工作区"
+python3 "$SKILL/scripts/flow_ledger.py"     --workspace "$SKILL/工作区"   # 自检：认出几张流转表
+python3 "$SKILL/scripts/extract_income.py"  --input <日记账.xlsx> --out "$SKILL/工作区/04_产出"
 python3 "$SKILL/scripts/classify_hexiao.py" --workspace "$SKILL/工作区" --fixture <夹具.json> --key day
-python3 "$SKILL/scripts/build_worklist.py" --workspace "$SKILL/工作区"
-python3 "$SKILL/scripts/rescan_holds.py" --workspace "$SKILL/工作区"
+python3 "$SKILL/scripts/build_worklist.py"  --workspace "$SKILL/工作区"
+python3 "$SKILL/scripts/rescan_holds.py"    --workspace "$SKILL/工作区" --ledger <盈亏副本.xlsx>
+
+# 跑完：证明一个字节都没改她的表（非 0 退出 = 出事了）
+python3 "$SKILL/scripts/verify_sources.py" verify --workspace "$SKILL/工作区"
 ```
+
+### 两个必须理解的开关
+
+- **`--flow-complete`**：只有当她把**当天所有渠道**的到账流转表（汇款/微信/支付宝/美元户…）都放进 `02_我的表副本/` 时才加。
+  不加 → 找不到对应到账时**不判 E0**，只标注"未在现有流转表中找到"。
+  原因：她各渠道分表，只给一两张就判 E0 会把整批冤枉成"对不到账"（实测 53 笔会误报 28 笔）。
+- **`--ledger`（rescan）**：给了才会**拿当前盈亏表重判挂起项**。月初她把交付数据贴进盈亏表后，
+  上月因"表里还没这个 SO"挂起的笔就是靠这个自动变「可补做」——不给就只是合并，第 8 步等于白做。
 
 规则细节 → `references/规则_*.md`；参数 → `config/`；给她看的操作 → `references/使用说明_给明妹.md`。
 
@@ -80,4 +95,14 @@ python3 "$SKILL/scripts/rescan_holds.py" --workspace "$SKILL/工作区"
 
 ## 4. 验收
 
-`cd` 到本 skill 目录后：`python3 -m pytest tests/ -v` 应全绿且 ≥35 例。
+`cd` 到本 skill 目录后：`python3 -m pytest tests/ -v` 应全绿且 ≥35 例（当前 93 例）。
+另外每次真实跑完必须补一句证据：`verify_sources.py verify` 退出码为 0。
+
+## 5. 已知边界（不许对她夸大）
+
+- **预存回款（约 29%）拿不到 SO**：智云核销明细子表接口不返回订单号，需要与「下单栏」按金额配对才能还原，
+  而「下单栏」尚未纳入数据契约 → 这类目前进 hold。**不得声称三通道全部打通。**
+- **手续费口径未定**：实测到账净额 298.38 + 手续费 1.62，系统核销记 300.00。
+  匹配时两种口径都试，但**回填金额一律挂起**等她拍板。
+- **尾差阈值未定**：实测见过 0.12 / 0.32。默认阈值 0（不容忍、挂起），不许自己设。
+- **一个 SO 占多行**（实测 14.5%）：一律列候选行让她选，不默认取某一行。
