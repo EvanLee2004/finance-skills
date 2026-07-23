@@ -75,8 +75,27 @@
 
 | 项 | 说明 |
 |----|------|
-| 源码仓 | 本仓库 `skills/`（GitHub 私有） |
-| 同事安装 | 飞书下发的 `财务技能包_vX.Y.Z.zip` +《财务技能使用手册》 |
-| 当前对齐 | **v1.0.16 / 14 技能**（2026-07-23 起含 `ar-hexiao-daily`） |
+| 源码仓（双端） | **GitHub** `EvanLee2004/finance-skills`（fetch 主）+ **Gitee** `Lee157/finance-skills`（国内下包） |
+| 同事安装 | 下 `财务技能包_vX.Y.Z.zip`（Gitee Release 附件 / 飞书）+《财务技能使用手册》 |
+| 当前对齐 | **v1.0.18 / 14 技能**（回填审核闸；含 `ar-hexiao-daily`） |
 
-改 skill 后：本地测绿 → commit/push 本仓 → 按 `发布/` 规程重打 zip 并升手册（zip 与手册不在本仓内）。
+### 双端 push（本机已配好）
+
+```bash
+# origin：fetch 走 GitHub；push 同时推 GitHub + Gitee
+git push origin main          # 一键双端
+git push origin v1.0.xx       # tag 同样一键双端
+
+# 只推某一端时：
+git push github-only  # 若未单独建名，用：
+git push https://github.com/EvanLee2004/finance-skills.git main
+git push gitee main
+```
+
+当前 `git remote -v` 应为：
+
+- `origin` fetch → GitHub  
+- `origin` push → GitHub **和** Gitee  
+- `gitee` → 仅 Gitee（备用）
+
+改 skill 后：本地测绿 → `git push origin main`（双端）→ 按上级 `发布/` 规程重打 zip → 两边 Release 挂附件（GitHub + Gitee）。
