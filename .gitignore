@@ -33,3 +33,8 @@ node_modules/
 # ===== ar-hexiao-daily / 各 skill 整份工作区（运行产物与验收证据）=====
 skills/*/工作区/**
 !skills/*/工作区/**/.gitkeep
+
+# ===== order-daily-summary 凭据与运行产物 =====
+skills/order-daily-summary/config.local.json
+skills/order-daily-summary/工作区/
+**/md_pss_id*

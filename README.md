@@ -4,7 +4,7 @@
 
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
-**当前源码共 14 个技能**（与官方分发包 `财务技能包_v1.0.16` 一致）。装到同事机器请用飞书下发的 zip + 使用手册；本仓是源码与版本真相源。
+**当前源码共 15 个技能**（与官方分发包 `财务技能包_v1.0.22` 一致）。装到同事机器请用飞书下发的 zip + 使用手册；本仓是源码与版本真相源。
 
 ## 技能清单（三层：业务技能 + 行为/环境 + 通用基座）
 
@@ -14,7 +14,7 @@
 - **行为 / 环境**：理清需求、装依赖——不碰业务口径，但所有业务技能都用得上
 - **通用基座**：处理四类文档（Excel/PDF/Word/PPT）的底层能力，给业务技能"打下手"、也兜住够不上独立技能的零散文档活
 
-### 业务技能（财务专有，config 驱动、可复现）· 8 个
+### 业务技能（财务专有，config 驱动、可复现）· 9 个
 
 | skill | 解决什么 | 状态 |
 |-------|----------|------|
@@ -26,8 +26,9 @@
 | [dreame-ar-progress-diff](skills/dreame-ar-progress-diff/) | **追觅应收进度对比**：多版追觅 list「应收进度」按人名对齐、期间并集，出值/底色/列结构 diff（预计付款忽略公式）+ 结论摘要 | ✅ 回归 47/47 · 真实金标 · **已入包 v1.0.15+** |
 | [dept-expense-alloc](skills/dept-expense-alloc/) | **部门费用归集分摊（月度）**：用友余额+收入底稿+人员归属+按人费用 → 部门科目余额表+利润表，主体合计=部门合计核对≈0 | ✅ v1.0.0 可交付 · **已入包** · 待真实月份试用 |
 | [ar-hexiao-daily](skills/ar-hexiao-daily/) | **应收核销日清**：出纳每日 T-1 核销判定 + 今日工作清单 + 挂账重扫（人在环；第一版只判不写用户原表、**永不写智云**） | ✅ 历史回放 135/135 · **已入包 v1.0.16** · 待工位真 T-1 验收 |
+| [order-daily-summary](skills/order-daily-summary/) | **九点下单统计**：登录智云抓下单表 → 组织架构归多语（不含运保）/数据/游戏/其他 →「下单数据(万元)」xlsx | ✅ 单测绿 · **已入包 v1.0.22** · 需内网真测 |
 
-> 链路示意：`receivables-merge` → `split-by-sales`（旁路 `compliance-spot-check`）；出纳核销独立走 `ar-hexiao-daily`。  
+> 链路示意：`receivables-merge` → `split-by-sales`（旁路 `compliance-spot-check`）；出纳核销独立走 `ar-hexiao-daily`；亮晶下单日报走 `order-daily-summary`。  
 > **规划中（未建 skill）**：销售反馈汇总 等。  
 > **已下线 / 迁出**：`payroll-info-match`、`insurance-fund-merge`（不做）；`bank-income-extract` 已改独立 Windows exe（日记账挑收入），不再随本包维护。
 
@@ -47,7 +48,7 @@
 | [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx，批注修订、插图、提正文 | ✅ 已入库 · 已入包 |
 | [pptx](skills/pptx/) | **PPT 演示文稿**：做幻灯片、改模板、抽正文、合并拆分 deck | ✅ 已入库 · 已入包 |
 
-**合计：8 业务 + 2 行为/环境 + 4 基座 = 14。**
+**合计：9 业务 + 2 行为/环境 + 4 基座 = 15。**
 
 > **环境依赖（部署到同事机器时注意）**：① 四类通用基座的"校验"脚本 `office/validate.py` 用了 `match` 语法，**需 Python ≥3.10**（3.9 会报 SyntaxError）——核心读写不受影响，仅可选校验步骤受限。② `xlsx/recalc.py`、`pptx/thumbnail.py`、`docx/accept_changes.py` 依赖 **LibreOffice（soffice）**重算/转图/接受修订；没装 LibreOffice 时这几个功能降级，openpyxl/python-docx/pypdf 的基本读写仍正常。  
 > **以上环境问题统一交给 `env-doctor` 处理**——任何技能缺库/缺工具，agent 查它的清单按国内镜像装齐再重试。  
@@ -77,7 +78,7 @@
 |----|------|
 | 源码仓（双端） | **GitHub** `EvanLee2004/finance-skills`（fetch 主）+ **Gitee** `Lee157/finance-skills`（国内下包） |
 | 同事安装 | 下 `财务技能包_vX.Y.Z.zip`（Gitee Release 附件 / 飞书）+《财务技能使用手册》 |
-| 当前对齐 | **v1.0.18 / 14 技能**（回填审核闸；含 `ar-hexiao-daily`） |
+| 当前对齐 | **v1.0.22 / 15 技能**（含 `order-daily-summary` 九点下单统计） |
 
 ### 双端 push（本机已配好）
 
