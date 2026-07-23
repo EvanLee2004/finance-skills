@@ -11,7 +11,7 @@
 
 用法（任选一种提供账密）：
   export ZHIYUN_USER='你的智云账号'
-  export ZHIYUN_PASS='你的密码'      # 勿写进文件；用完 unset
+  export ZHIYUN_PASS   # 在 shell 里 export，勿写进任何文件；用完 unset
   python3 scripts/fetch_zhiyun.py --date 2026-07-21 --workspace 工作区/
 
   或交互：

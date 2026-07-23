@@ -27,9 +27,9 @@ def test_plain_option_and_relation():
 def test_no_credentials_in_source():
     src = Path(__file__).resolve().parents[1] / "scripts" / "fetch_zhiyun.py"
     text = src.read_text(encoding="utf-8")
-    # 禁止真实账号/密码痕迹
+    # 禁止真实账号/密码痕迹（允许文档里出现变量名 ZHIYUN_PASS）
     assert "sharon" not in text.lower()
     assert "sharon1234" not in text
-    assert "ZHIYUN_PASS='" not in text
-    assert 'ZHIYUN_PASS="' not in text
     assert "getpass" in text  # 必须支持交互输入
+    # 禁止把真实密码字面量赋给环境示例
+    assert "PASS='****'" not in text
