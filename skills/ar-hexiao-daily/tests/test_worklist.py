@@ -77,6 +77,26 @@ def test_worklist_three_sheets():
     assert "禁止用行号" in str(row2[col["怎么找到这行(按SO筛选)"]])
 
 
+def test_worklist_ar_summary_has_formula_policy():
+    res = _sample_result()
+    res["ar_summary"] = [
+        {
+            "ar": "AR1",
+            "so_count": 2,
+            "流转表_是否更新应收款_建议": "部分",
+            "待处理SO": ["SO_X"],
+            "flow_locate": "loc",
+        }
+    ]
+    tmp = Path(tempfile.mkdtemp())
+    out = tmp / "清单.xlsx"
+    W.build_workbook(res, out)
+    wb = openpyxl.load_workbook(out)
+    assert "按到账汇总" in wb.sheetnames
+    h = [c.value for c in wb["按到账汇总"][1]]
+    assert "公式策略" in h and "颜色标注" in h
+
+
 def test_worklist_hold_sheet_has_action():
     tmp = Path(tempfile.mkdtemp())
     out = tmp / "清单.xlsx"

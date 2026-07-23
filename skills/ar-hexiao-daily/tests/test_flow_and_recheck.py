@@ -93,6 +93,14 @@ def test_derive_flow_status_tri_state():
     assert FL.derive_flow_status([]) == ""
 
 
+def test_flow_status_policy_no_formula_when_empty():
+    p = FL.flow_status_policy("")
+    assert p["填法"] == "留空"
+    assert "不要公式" in p["公式策略"]
+    p2 = FL.flow_status_policy("部分")
+    assert "红" in p2["颜色标注"]
+
+
 # ---------- per-AR 核销合计校验 ----------
 
 def test_ar_total_over_arrival_flags_e4():

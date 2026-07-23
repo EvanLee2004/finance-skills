@@ -162,15 +162,20 @@ def build_workbook(result: dict, out_path: Path) -> Path:
         we.append(row_exc(item))
     we.freeze_panes = "A2"
 
-    # 按到账汇总：告诉她每笔到账在流转表「是否更新应收款」该填什么（是/部分/空白）
+    # 按到账汇总：流转表「是否更新应收款」三态 + 公式/颜色策略（明妹 7-23 录音）
     summary = result.get("ar_summary") or []
     if summary:
+        from flow_ledger import flow_status_policy
+
         wsum = wb.create_sheet("按到账汇总")
         wsum.append(
             [
                 "AR",
                 "本笔关联SO数",
                 "流转表『是否更新应收款』建议填",
+                "填法",
+                "公式策略",
+                "颜色标注",
                 "还没处理完的SO",
                 "流转表定位",
                 "说明",
@@ -179,18 +184,21 @@ def build_workbook(result: dict, out_path: Path) -> Path:
         for cell in wsum[1]:
             cell.font = Font(bold=True)
         for s in summary:
-            sug = s.get("流转表_是否更新应收款_建议") or "（空白）"
+            sug_raw = s.get("流转表_是否更新应收款_建议") or ""
+            sug = sug_raw if sug_raw else "（空白）"
+            pol = flow_status_policy(sug_raw)
             # 2026-07-23：空 + 部分 都算还要做；「是」才算完
-            note = (
-                "已完成"
-                if sug == "是"
-                else "还要做（空或部分都要重更；红字=未更新）"
+            note = pol.get("人话") or (
+                "已完成" if sug == "是" else "还要做（空或部分都要重更；红字=未更新）"
             )
             wsum.append(
                 [
                     s.get("ar") or "",
                     s.get("so_count") or 0,
                     sug,
+                    pol.get("填法") or "",
+                    pol.get("公式策略") or "",
+                    pol.get("颜色标注") or "",
                     " ".join(s.get("待处理SO") or []),
                     s.get("flow_locate") or "",
                     note,

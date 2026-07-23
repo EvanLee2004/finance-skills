@@ -139,7 +139,7 @@ def test_in_place_writes_into_copy_and_backs_up(tmp_path):
         encoding="utf-8",
     )
     rc = A.main(["--checked", str(checked), "--ledger", str(led),
-                 "--report", str(tmp_path / "r.xlsx"), "--in-place"])
+                 "--report", str(tmp_path / "r.xlsx"), "--in-place", "--confirmed"])
     assert rc == 0
     # 副本被就地改了
     ws = openpyxl.load_workbook(str(led))["明细"]
@@ -174,6 +174,21 @@ def test_verify_catches_wrong_write(tmp_path):
     assert A.verify_written(out, [_item(2)]) != []
 
 
+def test_main_refuses_without_confirmed(tmp_path):
+    """人工审核闸：没 --confirmed 绝不能写（哪怕计划全绿）。"""
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    checked = tmp_path / "checked.json"
+    checked.write_text(
+        json.dumps({"write": [_item(2)], "skip": [], "conflict": []},
+                   ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    rc = A.main(["--checked", str(checked), "--ledger", str(led),
+                 "--out", str(tmp_path / "o.xlsx"), "--report", str(tmp_path / "r.xlsx")])
+    assert rc == 2
+    assert not (tmp_path / "o.xlsx").exists()
+
+
 def test_main_refuses_when_conflicts(tmp_path):
     """有冲突没处理就想写 → 必须拒绝（除非显式 --force）。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
@@ -181,7 +196,8 @@ def test_main_refuses_when_conflicts(tmp_path):
     checked.write_text(json.dumps({"write": [_item(2)], "skip": [], "conflict": [_item(3)]},
                                   ensure_ascii=False, default=str), encoding="utf-8")
     rc = A.main(["--checked", str(checked), "--ledger", str(led),
-                 "--out", str(tmp_path / "o.xlsx"), "--report", str(tmp_path / "r.xlsx")])
+                 "--out", str(tmp_path / "o.xlsx"), "--report", str(tmp_path / "r.xlsx"),
+                 "--confirmed"])
     assert rc == 2
 
 

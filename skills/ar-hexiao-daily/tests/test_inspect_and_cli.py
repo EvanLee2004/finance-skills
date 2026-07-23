@@ -108,10 +108,22 @@ def test_scripts_exist():
         "extract_income.py",
         "classify_hexiao.py",
         "build_worklist.py",
+        "build_review_sheet.py",
+        "validate_plan.py",
+        "apply_to_copy.py",
         "rescan_holds.py",
         "common.py",
     ]:
         assert (SCRIPTS / name).is_file()
+
+
+def test_skill_md_has_review_gate():
+    """回填必须：审核单 → 确认 → apply --confirmed。"""
+    text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert "build_review_sheet" in text
+    assert "--confirmed" in text
+    assert "回填审核单" in text
+    assert "禁止跳过回填审核单" in text or "禁止未确认就 apply" in text
 
 
 def test_a5_grep_no_hits():

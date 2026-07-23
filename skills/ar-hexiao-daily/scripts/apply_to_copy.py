@@ -226,6 +226,21 @@ def _apply_in_place(src: Path, report: Path, writable: List[dict]) -> int:
     return 0
 
 
+def _mark_review_applied(checked_p: Path) -> None:
+    """写成功后把待确认标记改成已应用（若存在）。"""
+    for folder in (checked_p.parent, checked_p.parent.parent / "04_产出"):
+        stamp = folder / "回填审核_待确认.json"
+        if stamp.is_file():
+            try:
+                data = json.loads(stamp.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            data["status"] = "applied"
+            data["applied_at"] = dt.datetime.now().isoformat(timespec="seconds")
+            stamp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="把校验通过的计划写进盈亏副本的「明细」sheet")
     ap.add_argument("--checked", required=True, help="validate_plan.py 产出的校验后计划")
@@ -238,6 +253,11 @@ def main(argv=None) -> int:
         action="store_true",
         help="就地写这份副本（她要的：一直用同一份）。写前自动备份、写后校验、校验过才替换",
     )
+    ap.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="人工审核闸：明妹看过回填审核单并口头确认后才允许加此开关。无此开关拒绝写入。",
+    )
     args = ap.parse_args(argv)
 
     checked_p, src = Path(args.checked), Path(args.ledger)
@@ -245,6 +265,18 @@ def main(argv=None) -> int:
         if not p.is_file():
             print(f"ERROR: 找不到{name} {p}", file=sys.stderr)
             return 2
+
+    # 硬闸：没人工确认绝不能写（明妹 7-23：回填前先 Excel 说明要回填啥）
+    if not args.confirmed:
+        print(
+            "ERROR: 缺人工确认，拒绝写入。\n"
+            "  1) 先跑 build_review_sheet.py 出《回填审核单》给她看\n"
+            "  2) 她说「确认 / OK / 可以写 / 按这个写」之后\n"
+            "  3) 再跑本命令并加上 --confirmed\n"
+            "  （头几次并排验收也不许跳过审核单）",
+            file=sys.stderr,
+        )
+        return 2
 
     plan = json.loads(checked_p.read_text(encoding="utf-8"))
     writable = plan.get("write") or []
@@ -267,10 +299,14 @@ def main(argv=None) -> int:
     report.parent.mkdir(parents=True, exist_ok=True)
 
     if args.in_place:
-        return _apply_in_place(src, report, writable)
+        rc = _apply_in_place(src, report, writable)
+    else:
+        out = Path(args.out) if args.out else src.parent.parent / "04_产出" / f"盈亏核算表_已回填_{today}.xlsx"
+        rc = _apply_new_file(src, out, report, writable)
 
-    out = Path(args.out) if args.out else src.parent.parent / "04_产出" / f"盈亏核算表_已回填_{today}.xlsx"
-    return _apply_new_file(src, out, report, writable)
+    if rc == 0:
+        _mark_review_applied(checked_p)
+    return rc
 
 
 if __name__ == "__main__":
