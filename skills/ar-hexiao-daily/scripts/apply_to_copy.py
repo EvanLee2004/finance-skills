@@ -158,13 +158,86 @@ def write_change_report(changes: List[dict], path: Path) -> None:
     wb.save(str(path))
 
 
+def _apply_new_file(src: Path, out: Path, report: Path, writable: List[dict]) -> int:
+    """默认模式：写一份新文件，她给的副本一个字节不动（最安全，头几次现场用这个并排验）。"""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        changes = write_plan(src, out, writable)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+
+    problems = verify_written(out, writable)
+    write_change_report(changes, report)
+
+    print(f"已写入 {len(changes)} 笔 → {out}")
+    print(f"变更清单 → {report}")
+    print(f"基线未动（她给的副本）→ {src}")
+    if problems:
+        print("⚠ 写后回读比对不符：", file=sys.stderr)
+        for x in problems[:10]:
+            print(f"  - {x}", file=sys.stderr)
+        return 1
+    print("写后回读逐格比对：全部一致 ✓")
+    return 0
+
+
+def _apply_in_place(src: Path, report: Path, writable: List[dict]) -> int:
+    """
+    就地模式（明妹要的）：她固定用同一份副本，我们直接往这份里回填，省得她天天贴。
+
+    她只要求「直接往回写」，但"直接写她天天用的表"就没有了人工过一眼的安全网，
+    所以这里把安全全做在程序里，让"直接写"和"绝不搞坏她的表"两件事同时成立：
+      1. 写之前先把这份副本整份备份到 `备份/`（真出事，拿备份一还原就回来了）
+      2. 先写一个临时文件、跑无损校验(部件不缺)+逐格回读比对
+      3. **只有全过了才原子替换**原副本；没过就原样保留她的副本、把临时结果留着给人看
+    """
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = src.parent / "备份"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{src.stem}_备份_{ts}{src.suffix}"
+    shutil.copy2(src, backup)
+
+    tmp = src.with_name(f".{src.stem}_写入中_{ts}{src.suffix}")
+    try:
+        changes = write_plan(src, tmp, writable)
+    except ValueError as e:
+        tmp.unlink(missing_ok=True)
+        print(f"ERROR: {e}\n（原副本没动，备份在 {backup}）", file=sys.stderr)
+        return 2
+
+    problems = verify_written(tmp, writable)
+    if problems:
+        print(
+            "⚠ 写后回读比对不符——**没有改动你的副本**（写坏的只是临时文件）：",
+            file=sys.stderr,
+        )
+        for x in problems[:10]:
+            print(f"  - {x}", file=sys.stderr)
+        print(f"临时结果留在 {tmp}（给同事看）；你的副本原样；备份在 {backup}", file=sys.stderr)
+        return 1
+
+    tmp.replace(src)  # 原子替换：要么整份换成新的，要么完全没换，不会写一半
+    write_change_report(changes, report)
+    print(f"已就地回填 {len(changes)} 笔 → {src}")
+    print(f"写前备份 → {backup}")
+    print(f"变更清单 → {report}")
+    print("写后回读逐格比对：全部一致 ✓")
+    return 0
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="把校验通过的计划写进副本（不动原件）")
+    ap = argparse.ArgumentParser(description="把校验通过的计划写进盈亏副本的「明细」sheet")
     ap.add_argument("--checked", required=True, help="validate_plan.py 产出的校验后计划")
-    ap.add_argument("--ledger", required=True, help="她给的盈亏副本（只读，作基线）")
-    ap.add_argument("--out", default="", help="回填后的新文件路径")
+    ap.add_argument("--ledger", required=True, help="她的盈亏副本")
+    ap.add_argument("--out", default="", help="新文件模式的输出路径（默认落 04_产出/）")
     ap.add_argument("--report", default="", help="变更清单 xlsx")
     ap.add_argument("--force", action="store_true", help="即使计划里有 conflict 也照写可写的那部分")
+    ap.add_argument(
+        "--in-place",
+        action="store_true",
+        help="就地写这份副本（她要的：一直用同一份）。写前自动备份、写后校验、校验过才替换",
+    )
     args = ap.parse_args(argv)
 
     checked_p, src = Path(args.checked), Path(args.ledger)
@@ -188,29 +261,16 @@ def main(argv=None) -> int:
         return 0
 
     today = dt.date.today().strftime("%Y%m%d")
+    report = Path(args.report) if args.report else (
+        src.parent.parent / "04_产出" / f"变更清单_{today}.xlsx"
+    )
+    report.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.in_place:
+        return _apply_in_place(src, report, writable)
+
     out = Path(args.out) if args.out else src.parent.parent / "04_产出" / f"盈亏核算表_已回填_{today}.xlsx"
-    report = Path(args.report) if args.report else out.with_name(f"变更清单_{today}.xlsx")
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        changes = write_plan(src, out, writable)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 2
-
-    problems = verify_written(out, writable)
-    write_change_report(changes, report)
-
-    print(f"已写入 {len(changes)} 笔 → {out}")
-    print(f"变更清单 → {report}")
-    print(f"基线未动（她给的副本）→ {src}")
-    if problems:
-        print("⚠ 写后回读比对不符：", file=sys.stderr)
-        for x in problems[:10]:
-            print(f"  - {x}", file=sys.stderr)
-        return 1
-    print("写后回读逐格比对：全部一致 ✓")
-    return 0
+    return _apply_new_file(src, out, report, writable)
 
 
 if __name__ == "__main__":

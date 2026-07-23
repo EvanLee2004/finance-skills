@@ -126,6 +126,33 @@ def test_apply_never_touches_source(tmp_path):
     assert hashlib.sha256(led.read_bytes()).hexdigest() == before
 
 
+def test_in_place_writes_into_copy_and_backs_up(tmp_path):
+    """就地模式（明妹要的）：直接写进她那份副本，并留一份写前备份、不留临时文件。"""
+    import hashlib
+
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    before = hashlib.sha256(led.read_bytes()).hexdigest()
+    checked = tmp_path / "checked.json"
+    checked.write_text(
+        json.dumps({"write": [_item(2)], "skip": [], "conflict": []},
+                   ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    rc = A.main(["--checked", str(checked), "--ledger", str(led),
+                 "--report", str(tmp_path / "r.xlsx"), "--in-place"])
+    assert rc == 0
+    # 副本被就地改了
+    ws = openpyxl.load_workbook(str(led))["明细"]
+    assert ws.cell(2, 7).value == 100.0            # 计提
+    assert ws.cell(2, 9).value == "是"             # 是否结账
+    # 写前备份存在，且等于写前内容（真出事能还原）
+    backups = list((led.parent / "备份").glob("盈亏_备份_*.xlsx"))
+    assert len(backups) == 1
+    assert hashlib.sha256(backups[0].read_bytes()).hexdigest() == before
+    # 成功后不留临时文件
+    assert not list(led.parent.glob(".盈亏_写入中_*"))
+
+
 def test_partial_leaves_jiti_empty(tmp_path):
     """部分核销：计提留空就是留空，不许写成 0（写 0 会被当成已计提）。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])

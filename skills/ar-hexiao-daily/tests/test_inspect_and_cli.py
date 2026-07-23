@@ -70,12 +70,22 @@ def test_classify_missing_col_excel(tmp_path):
     assert "实际表头" in str(ei.value) or "缺列" in str(ei.value)
 
 
-def test_skill_md_has_11_steps():
+def test_skill_md_documents_full_flow():
+    """7-23 口径重写后步骤表把 1–4 合并、突出第 6/8/9 步，不再逐行 | n |。
+    锁的是"完整流程与关键红线仍被明确记录"，而不是某种固定表格排版。"""
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-    for n in range(1, 12):
-        assert f"| {n} " in text or f"| {n}|" in text
-    assert "她做" in text
+    assert "11 步" in text                       # 仍声明覆盖她每天 11 步
+    for anchor in ["第 6 步", "核销判定", "挂账重扫", "明细", "她做"]:
+        assert anchor in text, anchor
     assert "永不写智云" in text
+
+
+def test_skill_md_has_comms_guidance():
+    """跟明妹说话要短、要点、主动要料——这条行为要求必须在 SKILL 里，且有话术模板可依。"""
+    text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert "怎么跟她说话" in text
+    assert "主动要料" in text or "主动要材料" in text
+    assert (ROOT / "references" / "跟明妹沟通.md").is_file()
 
 
 def test_usage_seven_sections():
