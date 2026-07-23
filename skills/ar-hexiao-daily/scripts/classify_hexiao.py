@@ -757,8 +757,20 @@ def classify_one(
     )
     local_f = round(float(local), 2)
 
+    # ── 计提金额的判据（2026-07-23 明妹原话确认）──────────────────────
+    # 「一个订单的金额分成多次回款，**只有回款明细金额加起来等于交付金额之后**，
+    #   才可以填写计提金额」
+    #
+    # 注意基准是**智云的交付金额**，不是她表里的应收金额 —— 实测 SO26040322 行2567：
+    #   她表应收 488.64 / 回款明细 477.61 / 智云交付 477.61 → 她照样填了计提 477.61。
+    # 反例（她留空计提但结账仍填「是」）：SO26020068 回 8729.35 而该 SOD 交付 8946.89；
+    #   SO26030424 回 199.78 而该 SOD 交付 402.26。
+    # 所以「结账」和「计提」是两个判据：结账看这一行的钱到没到，计提看整单回满没有。
+    deliver = common.to_number(rec.get("deliver_local"))
+    paid_full = deliver is not None and abs(local_f - float(deliver)) <= max(thr, TOL)
+
     result["five_cols"] = {
-        "计提": local_f if settled else None,
+        "计提": local_f if (settled and paid_full) else None,
         "回款明细": local_f,
         "是否结账": "是" if settled else "否",
         "收款时间": r_time.isoformat() if r_time else None,

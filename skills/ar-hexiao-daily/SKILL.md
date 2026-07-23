@@ -167,7 +167,7 @@ python3 "$SKILL/scripts/verify_sources.py" verify --workspace "$WS"
 3. 等确认词 → 再 `apply --confirmed`。
 4. 对话只报笔数/路径/成败，不报明细。
 5. 依赖：`pip install openpyxl xlrd`；智云另需 requests/playwright。
-6. 测试：`python3 -m pytest tests/ -v`（应 ≥130 例全绿）。
+6. 测试：`python3 -m pytest tests/ -v`（应 ≥137 例全绿）。
 
 ## 5. 验收
 
@@ -182,5 +182,7 @@ python3 "$SKILL/scripts/verify_sources.py" verify --workspace "$WS"
 - 分笔 / 手续费 / 尾差 / SOD 凑不出唯一组合 / 跨年：未拍板一律 hold。
 - 流转表**不自动写**；红字字体 openpyxl 难稳读。
 - 她公式的具体式子以她表为准，程序给策略不发明公式。
-- **拆行场景**（她把一个 SOD 拆成「已收/未收」两行）程序只提示、不代拆；
-  且她在拆出来的行上**计提留空**的原因尚未问清 → 这类一律 E5 挂起，不猜。
+- **拆行场景**（她把一个 SOD 拆成「已收/未收」两行）程序只提示、不代拆 → 一律 E5 挂起。
+- **计提金额**（明妹 2026-07-23 原话确认）：「一个订单的金额分成多次回款，**只有回款明细金额
+  加起来等于交付金额之后，才可以填写计提金额**」。判据基准是**智云交付额**，不是她表里的应收金额；
+  **「结账」和「计提」是两个判据**，可能出现「结账=是、计提留空」。

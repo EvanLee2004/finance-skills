@@ -284,6 +284,8 @@ def test_positional_alignment_refuses_when_sequence_mismatch():
 # ══════════════════════════════════════════════════════════
 def _rec(so="SO26010001", sod="SOD26010001", amount=100.0, **kw):
     r = {
+        # deliver_local = 该 SOD 的智云交付额；真实 record 一定带（计提口径要用）
+        "deliver_local": amount,
         "ar": "AR_T", "so": so, "sod": sod, "amount_orig": amount,
         "currency": "人民币CNY", "status": "手动核销", "fee": 0,
         "customer": "测试客户甲",
@@ -461,3 +463,33 @@ def test_gold_20260722_end_to_end():
             if v is not None and norm(real[col[k]]) != norm(v):
                 mismatched.append((it["case_id"], k, norm(real[col[k]]), norm(v)))
     assert not mismatched, mismatched[:10]
+
+
+# ══════════════════════════════════════════════════════════
+# 七、计提口径（2026-07-23 明妹原话确认）
+# ══════════════════════════════════════════════════════════
+def test_jiti_only_when_order_fully_paid():
+    """
+    明妹原话：「一个订单的金额分成多次回款，只有回款明细金额加起来等于交付金额之后，
+    才可以填写计提金额」。→ 回满才填计提；没回满**计提留空、但结账仍是「是」**。
+    """
+    led = _led({1: {"so": "SO1", "sod": "", "yingshou": 500.0}})
+    full = C.classify_one(_rec("SO1", "SOD1", 500.0, deliver_local=500.0), led, {}, 0.0, 2026)
+    assert full["five_cols"]["计提"] == 500.0
+    assert full["five_cols"]["是否结账"] == "是"
+
+    part = C.classify_one(_rec("SO1", "SOD1", 200.0, deliver_local=500.0), led, {}, 0.0, 2026)
+    assert part["five_cols"]["计提"] is None
+    assert part["five_cols"]["回款明细"] == 200.0
+    assert part["five_cols"]["是否结账"] == "是"
+
+
+def test_jiti_basis_is_zhiyun_deliver_not_ledger_yingshou():
+    """
+    「回满」的基准是**智云交付额**，不是她表里的应收金额。
+    实测 SO26040322 行2567：她表应收 488.64、回款 477.61、智云交付 477.61 → 她填了计提。
+    """
+    led = _led({1: {"so": "SO1", "sod": "", "yingshou": 488.64}})
+    r = C.classify_one(_rec("SO1", "SOD1", 477.61, deliver_local=477.61), led, {}, 0.0, 2026)
+    assert r["bucket"] == "auto"
+    assert r["five_cols"]["计提"] == 477.61
