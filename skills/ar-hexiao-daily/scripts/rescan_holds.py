@@ -126,14 +126,29 @@ def revisit_condition(code: str) -> str:
     """写清"等什么"——她才知道什么时候该回来看（李尚 business-rules §8 的复查条件）。"""
     return {
         "E1": "该到账后续回满、系统给出逐单核销金额后",
-        "E2": "月初把上月交付数据贴进盈亏表后",
+        "E2": "月初把上月交付数据贴进盈亏表后（并处理流转表空/部分/红字）",
         "E3": "拿到对应年度盈亏表，或确认老单走人工",
         "E4": "销售/财务核对超额核销并修正后",
         "E0": "补登到账流转表、或确认这笔到账在哪张渠道表",
         "E12": "人工指定这笔到账对应流转表的哪一行",
         "E8": "人工指定这个 SO 记在盈亏表的哪一行",
         "E9": "与销售核对预收余额差异后",
+        "E_FEE": "手续费口径拍板后（净额 vs 含费）",
+        "E5": "尾差阈值拍板后，或人工确认可忽略",
     }.get(code, "条件具备后（人工判断）")
+
+
+def flow_needs_update(val) -> bool:
+    """流转「是否更新应收款」：空 + 部分 = 要重做（2026-07-23 明妹）。「是」= 完成。"""
+    s = ("" if val is None else str(val)).strip()
+    if not s:
+        return True
+    if s in ("部分", "部份"):  # 容错
+        return True
+    if s in ("是", "Y", "y", "yes", "YES"):
+        return False
+    # 其它异常取值当待办，宁可多扫
+    return True
 
 
 def merge_from_classify(rows: List[dict], result: dict, today: str) -> List[dict]:

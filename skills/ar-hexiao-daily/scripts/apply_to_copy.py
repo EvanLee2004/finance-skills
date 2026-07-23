@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-第 7 步 b：**把校验通过的计划写进副本**（plan → validate → **execute**）。
+把校验通过的计划写进盈亏**工作副本**（plan → validate → **execute**）。
 
-安全设计（她的原件全程不参与）：
-  输入 = 她给的盈亏副本（只读）+ 校验后的计划
-  输出 = 04_产出/盈亏核算表_已回填_日期.xlsx（**新文件**）+ 变更清单
-  → 输入副本本身就是天然基线，出事随时能对照；她的原件从头到尾没被打开过写模式。
+2026-07-23 明妹口径：
+  - **只改「明细」sheet**，其它 sheet 一个字节不许动
+  - 可以长期用同一份副本；输出仍写**新文件**（她对照原版其它 sheet 总数验收）
+  - 回填内容来自第 6 步智云判定结果，不是流转表
 
-写完立刻回读逐格比对（feedback loop）。对不上就是写错了，非 0 退出，别让人以为写成了。
+安全设计：
+  输入 = 她给的盈亏副本（只读打开）+ 校验后的计划
+  输出 = 04_产出/盈亏核算表_已回填_日期.xlsx（新文件）+ 变更清单
+  用 OOXML 补丁只改明细格，避免 openpyxl 毁图/透视
+
+写完立刻回读逐格比对；对不上非 0 退出。
 """
 
 from __future__ import annotations
@@ -62,9 +67,14 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
     # 先用只读模式拿列位置与改前值（不保存，纯读）
     wb = openpyxl.load_workbook(str(src), read_only=True, data_only=True)
     if "明细" not in wb.sheetnames:
+        names = list(wb.sheetnames)
         wb.close()
-        raise ValueError(f"盈亏表无『明细』sheet：{wb.sheetnames}")
-    cols = locate_columns(wb["明细"], common.load_aliases())
+        raise ValueError(
+            f"盈亏表无『明细』sheet（明妹规定只许改明细）：现有={names}"
+        )
+    # 铁律：后续 patch 目标名写死「明细」，禁止调用方改成别的 sheet
+    target_sheet = "明细"
+    cols = locate_columns(wb[target_sheet], common.load_aliases())
     wb.close()
 
     before_rows = read_ledger_rows(src)
@@ -96,7 +106,7 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
                 "改后": {k: _norm(five.get(k)) for k in FIVE},
             }
         )
-    xlsx_patch.patch_cells(src, out, "明细", edits)
+    xlsx_patch.patch_cells(src, out, target_sheet, edits)
 
     # 写完立刻自证没搞坏她的表：少一个部件都算失败
     lost = xlsx_patch.parts_diff(src, out)

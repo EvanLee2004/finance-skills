@@ -881,13 +881,23 @@ def load_excel_exports(workspace: Path) -> Optional[List[dict]]:
         )
         role = aliases.get("核销明细", {})
         opt = {}
-        for k in ["币种", "汇率"]:
+        for k in ["币种", "汇率", "SO"]:
             idx = common.fuzzy_find_col(headers, role.get(k, [k]))
             if idx is not None:
                 opt[k] = idx
         all_details = []
         for row in rows_iter:
             vals = list(row)
+            so_raw = str(vals[opt["SO"]] or "").strip() if "SO" in opt else ""
+            # 单元格里可能是「ZG SO2606…」或纯 SO 号
+            so_val = ""
+            for token in so_raw.replace("\n", " ").replace("、", " ").split():
+                t = token.strip()
+                if t.upper().startswith("SO") and len(t) >= 6:
+                    so_val = t
+                    break
+            if not so_val and so_raw.upper().startswith("SO"):
+                so_val = so_raw.split()[0]
             all_details.append(
                 {
                     "ar": str(vals[cols["回款记录NUM"]] or "").strip(),
@@ -895,7 +905,7 @@ def load_excel_exports(workspace: Path) -> Optional[List[dict]]:
                     "amount": common.to_number(vals[cols["本次核销金额"]]),
                     "currency": str(vals[opt["币种"]] or "").strip() if "币种" in opt else "人民币CNY",
                     "rate": common.to_number(vals[opt["汇率"]]) if "汇率" in opt else None,
-                    "so": "",
+                    "so": so_val,
                 }
             )
         wb.close()

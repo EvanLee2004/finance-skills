@@ -10,8 +10,8 @@
   - 分笔在系统无逐单金额 → 只出现在回款记录里，留给 classify hold
 
 用法（任选一种提供账密）：
-  export ZHIYUN_USER='xxx@besteasy.com'
-  export ZHIYUN_PASS='****'          # 勿写进文件
+  export ZHIYUN_USER='你的智云账号'
+  export ZHIYUN_PASS='你的密码'      # 勿写进文件；用完 unset
   python3 scripts/fetch_zhiyun.py --date 2026-07-21 --workspace 工作区/
 
   或交互：
