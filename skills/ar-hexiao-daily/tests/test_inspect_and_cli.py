@@ -55,18 +55,21 @@ def test_missing_column_raises():
 
 
 def test_classify_missing_col_excel(tmp_path):
-    """删掉回款类型列 → 读导出时报错。"""
+    """表头缺关键列 → 读导出时报错退出，不带病继续。"""
     export = tmp_path / "01_智云导出"
     export.mkdir()
-    # 只有对账表，故意缺关键列
-    p = export / "回款核销对账_坏.xlsx"
+    # 四件齐了，但回款记录表头故意缺 AR / 核销日期
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.append(["日期", "备注"])  # 缺 SO / 回款额
+    ws.append(["日期", "备注"])
     ws.append(["2026-07-01", "x"])
-    wb.save(p)
-    with pytest.raises(ValueError) as ei:
-        C.load_excel_exports(tmp_path)
+    wb.save(export / "回款记录_坏.xlsx")
+    wb2 = openpyxl.Workbook()
+    ws2 = wb2.active
+    ws2.append(["回款记录ID", "SO", "交付额/原币"])
+    wb2.save(export / "订单交付_坏.xlsx")
+    with pytest.raises(C.InputError) as ei:
+        C.load_exports(tmp_path)
     assert "实际表头" in str(ei.value) or "缺列" in str(ei.value)
 
 
@@ -93,8 +96,8 @@ def test_usage_seven_sections():
     for title in [
         "## 1. 一次性准备",
         "## 2. 每天怎么做",
-        "## 3. 清单怎么看",
-        "## 4. 每个异常原因怎么办",
+        "## 3. 《核销日清》怎么看",
+        "## 4. 挂账 / 异常怎么办",
         "## 5. 哪些它不会做",
         "## 6. 出错了怎么办",
         "## 7. 常见问题",
@@ -108,7 +111,7 @@ def test_scripts_exist():
         "extract_income.py",
         "classify_hexiao.py",
         "build_worklist.py",
-        "build_review_sheet.py",
+        "fetch_zhiyun.py",
         "validate_plan.py",
         "apply_to_copy.py",
         "rescan_holds.py",
@@ -120,9 +123,9 @@ def test_scripts_exist():
 def test_skill_md_has_review_gate():
     """回填必须：审核单 → 确认 → apply --confirmed。"""
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-    assert "build_review_sheet" in text
+    assert "--confirmed" in text and "确认" in text
     assert "--confirmed" in text
-    assert "回填审核单" in text
+    assert "核销日清" in text
     assert "禁止跳过回填审核单" in text or "禁止未确认就 apply" in text
 
 

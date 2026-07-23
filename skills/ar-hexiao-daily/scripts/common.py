@@ -267,24 +267,19 @@ def receipt_time(
     return hexiao
 
 
-def pay_way(
-    status: str,
-    huikuan_type: str = "",
-    shoukuan=None,
-    hexiao=None,
-) -> str:
+def pay_way(status: str, shoukuan=None, hexiao=None) -> str:
     """
     收款方式。她表里实际只用两个值：「汇」和「冲预收」。
 
-    「冲预收」有两种业务外观（v2 §5 / 规则 R6），**都要判成冲预收**：
-      甲 真预收消耗：预存类核销 —— 看核销状态/回款类型；
-      乙 晚核销标签：钱早到账、销售下个月才关联订单 —— **到账月 ≠ 核销月**。
-        乙这条此前漏了，实测对不上她的表：AR26070033 六月到账七月核销，
-        她填「冲预收」我们填「汇」。这标签是给月度提成筛选用的，填错会漏提成。
+    判据只有一条 —— **到账月 ≠ 核销月 → 冲预收**（钱早到账、销售下个月才关联订单）。
+    这标签是给月度提成筛选用的，填错会漏提成。证据：AR26070033 六月到账七月核销，
+    她填「冲预收」。
+
+    ⚠ 2026-07-23 删掉了旧的"规则甲：预存/预收类 → 冲预收"。
+      实测证伪：7-22 那天 AR26070089/107/112 全是预存回款，她 15 行**全部填「汇」**；
+      她整张 2026 盈亏表 2921 行里「冲预收」只有 175 行（6%），不可能等于预存类占比。
+      旧规则会把这 15 行全填错 —— 这是当时 15 笔冲突里 15 笔的共同原因。
     """
-    prepaid = {"预存已核销", "预存部分核销", "预存待核销"}
-    if status in prepaid or "预存" in _norm(huikuan_type):
-        return "冲预收"
     if shoukuan is not None and hexiao is not None:
         if (shoukuan.year, shoukuan.month) != (hexiao.year, hexiao.month):
             return "冲预收"

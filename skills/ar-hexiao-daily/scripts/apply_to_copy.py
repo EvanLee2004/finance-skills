@@ -219,11 +219,30 @@ def _apply_in_place(src: Path, report: Path, writable: List[dict]) -> int:
 
     tmp.replace(src)  # 原子替换：要么整份换成新的，要么完全没换，不会写一半
     write_change_report(changes, report)
+    _resnapshot_sources(src)
     print(f"已就地回填 {len(changes)} 笔 → {src}")
     print(f"写前备份 → {backup}")
     print(f"变更清单 → {report}")
     print("写后回读逐格比对：全部一致 ✓")
     return 0
+
+
+def _resnapshot_sources(ledger: Path) -> None:
+    """
+    就地回填成功后重新打指纹。
+
+    否则下一次 `verify_sources verify` 必然报「盈亏表被改动」——**那是我们自己
+    经她确认后合法写的**，却长得跟"程序偷偷改了她的表"一模一样。
+    2026-07-23 opencode 实测就踩到：AI 照 SKILL 在 apply 后跑 verify，
+    当场甩出一句吓人的「校验未通过」。新指纹＝新基线，之后再变才是真异常。
+    """
+    ws = ledger.parent.parent
+    try:
+        import verify_sources
+
+        verify_sources.do_snapshot(ws)
+    except Exception as e:  # 快照失败不该让已成功的写入变成失败
+        print(f"WARN: 重打源文件指纹失败（不影响已写入的数据）：{type(e).__name__}", file=sys.stderr)
 
 
 def _mark_review_applied(checked_p: Path) -> None:
@@ -270,10 +289,10 @@ def main(argv=None) -> int:
     if not args.confirmed:
         print(
             "ERROR: 缺人工确认，拒绝写入。\n"
-            "  1) 先跑 build_review_sheet.py 出《回填审核单》给她看\n"
+            "  1) 先跑 build_worklist.py 出《核销日清》给她看（含要填/跳过/冲突三态）\n"
             "  2) 她说「确认 / OK / 可以写 / 按这个写」之后\n"
             "  3) 再跑本命令并加上 --confirmed\n"
-            "  （头几次并排验收也不许跳过审核单）",
+            "  （头几次并排验收也不许跳过这一眼）",
             file=sys.stderr,
         )
         return 2

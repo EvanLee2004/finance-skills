@@ -78,8 +78,14 @@ def test_compute_local_fx_with_rate():
 
 
 def test_pay_way():
+    """2026-07-23：只按「到账月 vs 核销月」判；回款类型不再参与（旧规则甲已证伪）。"""
+    import datetime as _dt
+
     assert common.pay_way("手动核销") == "汇"
-    assert common.pay_way("预存已核销") == "冲预收"
+    assert common.pay_way("预存已核销") == "汇"  # 旧版这里错判冲预收，15 笔全错
+    d = _dt.date(2026, 7, 22)
+    assert common.pay_way("核销成功", _dt.date(2026, 7, 17), d) == "汇"
+    assert common.pay_way("手动核销", _dt.date(2026, 6, 26), d) == "冲预收"
 
 
 def test_mask_customer():

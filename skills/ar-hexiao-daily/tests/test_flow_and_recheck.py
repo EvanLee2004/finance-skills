@@ -102,34 +102,8 @@ def test_flow_status_policy_no_formula_when_empty():
 
 
 # ---------- per-AR 核销合计校验 ----------
-
-def test_ar_total_over_arrival_flags_e4():
-    recs = [
-        {"ar": "AR1", "so": "SO1", "amount_orig": 600.0, "arrival_total": 1000.0},
-        {"ar": "AR1", "so": "SO2", "amount_orig": 600.0, "arrival_total": 1000.0},
-    ]
-    bad = C.check_ar_totals(recs)
-    assert "AR1" in bad and "超过到账金额" in bad["AR1"]
-
-
-def test_ar_total_within_arrival_is_clean():
-    recs = [
-        {"ar": "AR1", "so": "SO1", "amount_orig": 400.0, "arrival_total": 1000.0},
-        {"ar": "AR1", "so": "SO2", "amount_orig": 600.0, "arrival_total": 1000.0},
-    ]
-    assert C.check_ar_totals(recs) == {}
-
-
-def test_ar_total_allows_gross_with_fee():
-    """核销额按含手续费的总额记（实测 298.38+1.62=300 核销 300）→ 不得误判超额。"""
-    recs = [{"ar": "AR1", "so": "SO1", "amount_orig": 300.0, "arrival_total": 298.38, "fee": 1.62}]
-    assert C.check_ar_totals(recs) == {}
-
-
-def test_ar_total_unknown_arrival_not_judged():
-    """拿不到到账总额就不判，不猜。"""
-    recs = [{"ar": "AR1", "so": "SO1", "amount_orig": 9999.0}]
-    assert C.check_ar_totals(recs) == {}
+# 2026-07-23：check_ar_totals 已并入 classify_hexiao.expand_payment（ΣH ≤ 到账 → E4/E5），
+# 对应用例见 test_classify.py::test_writeoff_over_arrival_is_e4 / test_deliver_over_arrival_is_e5_split_row
 
 
 # ---------- 案例ID ----------
@@ -274,19 +248,19 @@ def test_annotate_records_fills_flow_fields():
 
 # ---------- 收款方式：冲预收双义（回放校准抓到的规则缺口）----------
 
-def test_pay_way_prepaid_type():
-    assert C.common.pay_way("预存已核销", "预存回款") == "冲预收"
+def test_pay_way_prepaid_type_is_hui_now():
+    assert C.common.pay_way("预存已核销") == "汇"  # 口径修正：类型不再判冲预收
 
 
 def test_pay_way_same_month_is_hui():
     d = dt.date(2026, 7, 8)
-    assert C.common.pay_way("手动核销", "", d, d) == "汇"
+    assert C.common.pay_way("手动核销", d, d) == "汇"
 
 
 def test_pay_way_cross_month_is_chongyushou():
     """晚核销标签：6月到账、7月核销 → 冲预收（实测明妹就是这么填的）。"""
-    assert C.common.pay_way("手动核销", "", dt.date(2026, 6, 26), dt.date(2026, 7, 8)) == "冲预收"
+    assert C.common.pay_way("手动核销", dt.date(2026, 6, 26), dt.date(2026, 7, 8)) == "冲预收"
 
 
 def test_pay_way_missing_dates_falls_back():
-    assert C.common.pay_way("手动核销", "") == "汇"
+    assert C.common.pay_way("手动核销") == "汇"

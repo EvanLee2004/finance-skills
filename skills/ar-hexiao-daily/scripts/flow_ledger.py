@@ -295,16 +295,22 @@ def annotate_records(
     dmin, dmax = (min(dates), max(dates)) if dates else (None, None)
     cache: Dict[tuple, dict] = {}
     for rec in records:
+        # 三键里的「金额」必须是**这笔到账的总额**，不是单个 SO/SOD 的金额。
+        # 流转表一行 = 银行一笔到账；一笔到账挂 N 个订单时拿分项金额去比，永远对不上。
+        # （旧版就是拿 amount_orig 比的 → 多 SO 的到账全都匹配不到流转行。）
+        amount = rec.get("arrival_total")
+        if amount is None:
+            amount = rec.get("amount_orig")
         key = (
             str(rec.get("shoukuan_date")),
-            rec.get("amount_orig"),
+            amount,
             rec.get("customer") or "",
             rec.get("fee") or 0.0,
         )
         if key not in cache:
             cache[key] = flow.match(
                 rec.get("shoukuan_date"),
-                rec.get("amount_orig"),
+                amount,
                 rec.get("customer") or "",
                 rec.get("fee") or 0.0,
             )

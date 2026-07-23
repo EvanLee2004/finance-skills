@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-第6步：核销判定（三通道取数 + 三键/单号匹配 + 三栏分流）。
+第6步：核销判定（单入口 · SOD 级 · 三栏分流）v2
 
-输入：
-  - 智云导出 Excel（回款记录 / 对账 / 核销明细）或 离线夹具 JSON
-  - 可选：盈亏核算表副本（用于 SO/SOD 是否在表、多行歧义）
-输出：
-  - 工作区/04_产出/判定结果_YYYYMMDD.json
-  - 运行报告（只计数与 E 码，无客户名金额明细进 stdout 时可关）
+2026-07-23 重写。旧版按「回款类型」把每笔到账路由到三条取数通道（对账表 / 预存明细 /
+分笔），实测出了两个硬伤，都在这一版根除：
 
-红线：分笔一律 hold；预存明细按核销日期过滤；永不写智云；不写用户表。
+  1. **静默丢单**：预收类既被踢出对账通道、又在明细子表拿不到行，两头落空还不报错
+     —— 2026-07-22 真跑丢了 3 笔到账 6.5 万，产出里一个字都没有。
+     → 本版取消通道路由；每笔到账都走同一条路，且**强制 AR 覆盖率校验**，
+       一笔产不出任何判定就整体报错退出，绝不静默。
+  2. **把 SOD 拆行误判成"歧义"**：一个 SO 在她盈亏表占 N 行，其实是 N 个 SOD、
+     每行一个金额，合计 = 本次核销额。旧版判 E8「同SO多行歧义」挂起（27 笔里 26 笔是误判）。
+     → 本版引入「订单明细」表拿到逐 SOD 交付额，按 SOD 精确落行。
+
+判定口径（明妹 2026-07-23 当面确认 + 接口实调验证）：
+  · 逐 SO 本次核销额 H：有「同币种核销明细」就用它（按核销日期过滤本次）；
+    **该表 0 行 = 全额核销** → H[so] = 该 SO 交付额。
+  · ΣH ≤ 到账额（她的铁律：销的钱不能比到的钱多）。
+  · 每个 SO 展开到 SOD：H[so] == Σ该SO的SOD交付额 → 全部 SOD 入选；
+    否则在 SOD 里凑唯一子集；凑不出唯一解才挂起。
+  · 盈亏表定位：(新智云单号=SO, 应收金额=该SOD交付额) → 唯一行。
+
+红线：分笔一律 hold（禁止比例分摊）；永不写智云；本脚本不写用户任何表。
 """
 from __future__ import annotations
 
@@ -31,284 +43,542 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 
-# 逻辑字段 → 夹具/字段定义里可能的中文名（按中文解析，不写死 controlId）
-DUIZHANG_NAMES = {
-    "so": ["SO", "销售订单编号", "新智云单号"],
-    "sod": ["SOD", "结算订单编号", "结算编号"],
-    "ar": ["回款记录ID", "回款记录"],
-    "customer": ["客户名称", "开票客户"],
-    "amount_orig": ["回款额/原币", "回款额原币"],
-    "amount_local": ["回款额/本币", "回款额本币"],
-    "deliver_local": ["交付额/本币", "交付额本币"],
-    "deliver_orig": ["交付额/原币", "交付额原币"],
-    "currency": ["下单币种", "币种", "原币币种"],
-    "hexiao_date": ["核销日期"],
-    "shoukuan_date": ["回款日期", "到账日期"],
-    "status": ["核销状态"],
-    "order_name": ["订单名称"],
-}
+TOL = 0.005  # 金额比较容差（分以下）
+SUBSET_MAX_LINES = 22  # 超过这么多 SOD 就不硬凑子集，直接交人
+
 HUIKUAN_NAMES = {
     "ar": ["回款记录ID", "回款记录编号"],
     "currency": ["原币币种", "币种"],
     "arrival_date": ["到账日期", "回款日期"],
     "amount_orig": ["到账金额/原币", "到账金额原币"],
+    "amount_local": ["到账金额/本币", "到账金额本币"],
     "fee": ["手续费/原币", "手续费"],
     "huikuan_type": ["回款类型"],
     "status": ["核销状态"],
     "customer": ["开票客户", "客户名称", "客户"],
     "hexiao_date": ["核销日期"],
 }
-DETAIL_NAMES = {
-    "ar": ["回款记录NUM", "回款记录ID", "回款记录"],
-    "hexiao_date": ["核销日期"],
-    "amount": ["本次核销金额", "核销金额", "金额"],
-    "currency": ["币种", "原币币种"],
-    "rate": ["汇率"],
-    "so": ["SO", "销售订单编号", "新智云单号"],
-}
 
 
-def _channel_for_type(huikuan_type: str) -> str:
-    t = (huikuan_type or "").strip()
-    if "分笔" in t:
-        return "fenbi"
-    if "预存" in t or "预收" in t:
-        return "yucun"
-    # 整笔 / 自动 / 空
-    return "duizhang"
+class InputError(Exception):
+    """输入缺件/结构不对 —— 脚本非 0 退出，绝不带病继续。"""
 
 
-def load_fixture(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+class CoverageError(Exception):
+    """AR 覆盖率校验没过 —— 有到账没产出任何判定，说明逻辑漏了单。"""
 
 
-def parse_duizhang_rows(
-    rows: List[dict],
-    fields: List[dict],
-    ar_meta: Optional[Dict[str, dict]] = None,
-) -> List[dict]:
-    """对账表原始行 → 规范化记录列表。字段按中文名解析。"""
-    idx = common.build_field_index(fields)
-    ar_meta = ar_meta or {}
-    out = []
-    for row in rows:
-        rec = {}
-        for key, names in DUIZHANG_NAMES.items():
-            rec[key] = common.get_by_names(row, idx, names)
-        # 数值
-        rec["amount_orig"] = common.to_number(rec.get("amount_orig"))
-        rec["amount_local"] = common.to_number(rec.get("amount_local"))
-        rec["deliver_local"] = common.to_number(rec.get("deliver_local"))
-        rec["deliver_orig"] = common.to_number(rec.get("deliver_orig"))
-        rec["hexiao_date"] = common.norm_date(rec.get("hexiao_date"))
-        rec["shoukuan_date"] = common.norm_date(rec.get("shoukuan_date"))
-        rec["so"] = (rec.get("so") or "").strip()
-        rec["sod"] = (rec.get("sod") or "").strip()
-        rec["ar"] = (rec.get("ar") or "").strip()
-        rec["customer"] = (rec.get("customer") or "").strip()
-        rec["status"] = (rec.get("status") or "").strip()
-        rec["currency"] = (rec.get("currency") or "").strip()
-        rec["huikuan_type"] = ""
-        rec["fee"] = 0.0
-        rec["channel"] = "duizhang"
-        if rec["ar"] and rec["ar"] in ar_meta:
-            meta = ar_meta[rec["ar"]]
-            if not rec["currency"]:
-                rec["currency"] = meta.get("currency") or ""
-            if not rec["shoukuan_date"]:
-                rec["shoukuan_date"] = meta.get("arrival_date")
-            rec["huikuan_type"] = meta.get("huikuan_type") or ""
-            rec["fee"] = meta.get("fee") or 0.0
-            # 到账总额：跨行校验 Σ核销 ≤ 到账 要用（单条判不出超额核销）
-            rec["arrival_total"] = meta.get("amount_orig")
-            if meta.get("huikuan_type"):
-                rec["channel"] = _channel_for_type(meta["huikuan_type"])
-        # 币种兜底
-        if not rec["currency"]:
-            o, loc = rec["amount_orig"], rec["amount_local"]
-            if o is not None and loc is not None and abs(o - loc) > 0.01:
-                rec["currency"] = "未知外币"
-            else:
-                rec["currency"] = "人民币CNY"
-        rec["source"] = "duizhang"
-        out.append(rec)
-    return out
+# ══════════════════════════════════════════════════════════════
+# 一、读取 01_智云导出 的四张表 → payments
+# ══════════════════════════════════════════════════════════════
+def _sheet_rows(path: Path) -> Tuple[List[str], List[list]]:
+    import openpyxl
+
+    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return [], []
+    headers = [str(c).strip() if c is not None else "" for c in rows[0]]
+    body = [list(r) for r in rows[1:] if any(x is not None and str(x).strip() for x in r)]
+    return headers, body
 
 
-def parse_huikuan_meta(rows: List[dict], fields: List[dict]) -> Dict[str, dict]:
-    idx = common.build_field_index(fields)
-    m: Dict[str, dict] = {}
-    for row in rows:
-        ar = common.get_by_names(row, idx, HUIKUAN_NAMES["ar"]).strip()
-        if not ar:
-            continue
-        fee = common.to_number(common.get_by_names(row, idx, HUIKUAN_NAMES["fee"])) or 0.0
-        m[ar] = {
-            "currency": common.get_by_names(row, idx, HUIKUAN_NAMES["currency"]),
-            "arrival_date": common.norm_date(
-                common.get_by_names(row, idx, HUIKUAN_NAMES["arrival_date"])
-            ),
-            "huikuan_type": common.get_by_names(row, idx, HUIKUAN_NAMES["huikuan_type"]),
-            "fee": fee,
-            "amount_orig": common.to_number(
-                common.get_by_names(row, idx, HUIKUAN_NAMES["amount_orig"])
-            ),
-            "status": common.get_by_names(row, idx, HUIKUAN_NAMES["status"]),
-            "customer": common.get_by_names(row, idx, HUIKUAN_NAMES["customer"]),
-            "hexiao_date": common.norm_date(
-                common.get_by_names(row, idx, HUIKUAN_NAMES["hexiao_date"])
-            ),
-        }
-    return m
+def _col(headers: Sequence[str], role: str, key: str, aliases: dict) -> Optional[int]:
+    cands = (aliases.get(role) or {}).get(key, [key])
+    return common.fuzzy_find_col(headers, cands)
 
 
-def filter_yucun_details_by_date(
-    details: List[dict],
-    target_date: Optional[dt.date],
-) -> List[dict]:
-    """
-    预存明细子表是累积的：必须按核销日期过滤本次，否则会重复回填。
-    target_date 为 None 时不过滤（调用方应避免）。
-    """
-    if target_date is None:
-        return list(details)
-    out = []
-    for d in details:
-        hd = d.get("hexiao_date")
-        if isinstance(hd, str):
-            hd = common.norm_date(hd)
-        if hd == target_date:
-            out.append(d)
-    return out
-
-
-def parse_detail_rows(rows: List[dict], fields: Optional[List[dict]] = None) -> List[dict]:
-    """核销明细（预存）→ 规范化。支持已是 plain dict 的合成数据。"""
-    if fields:
-        idx = common.build_field_index(fields)
-        out = []
-        for row in rows:
-            out.append(
-                {
-                    "ar": common.get_by_names(row, idx, DETAIL_NAMES["ar"]).strip(),
-                    "hexiao_date": common.norm_date(
-                        common.get_by_names(row, idx, DETAIL_NAMES["hexiao_date"])
-                    ),
-                    "amount": common.to_number(
-                        common.get_by_names(row, idx, DETAIL_NAMES["amount"])
-                    ),
-                    "currency": common.get_by_names(row, idx, DETAIL_NAMES["currency"]),
-                    "rate": common.to_number(common.get_by_names(row, idx, DETAIL_NAMES["rate"])),
-                    "so": common.get_by_names(row, idx, DETAIL_NAMES["so"]).strip(),
-                }
-            )
-        return out
-    # 合成 plain
-    out = []
-    for row in rows:
-        out.append(
-            {
-                "ar": (row.get("ar") or row.get("回款记录NUM") or "").strip(),
-                "hexiao_date": common.norm_date(row.get("hexiao_date") or row.get("核销日期")),
-                "amount": common.to_number(row.get("amount") or row.get("本次核销金额")),
-                "currency": (row.get("currency") or row.get("币种") or "人民币CNY"),
-                "rate": common.to_number(row.get("rate") or row.get("汇率")),
-                "so": (row.get("so") or row.get("SO") or "").strip(),
-            }
+def _need(headers: Sequence[str], role: str, keys: Sequence[str], aliases: dict) -> Dict[str, int]:
+    out = {}
+    missing = []
+    for k in keys:
+        i = _col(headers, role, k, aliases)
+        if i is None:
+            missing.append(k)
+        else:
+            out[k] = i
+    if missing:
+        raise InputError(
+            f"「{role}」缺列 {missing}。实际表头：{[h for h in headers if h]}"
         )
     return out
 
 
+def _get(vals: list, idx: Optional[int]) -> Any:
+    if idx is None or idx >= len(vals):
+        return None
+    return vals[idx]
+
+
+def load_exports(workspace: Path) -> List[dict]:
+    """
+    01_智云导出/ 四张表 → payments。缺件直接 InputError（不凑合、不猜）。
+
+    文件按名字认：含「回款记录」/「订单交付」/「核销明细」/「订单明细」。
+    """
+    d = workspace / "01_智云导出"
+    if not d.is_dir():
+        raise InputError(f"没有 {d}")
+    aliases = common.load_aliases()
+
+    def pick(*keys: str) -> Optional[Path]:
+        for p in sorted(d.glob("*.xlsx")):
+            if p.name.startswith("~$"):
+                continue
+            if any(k in p.name for k in keys):
+                return p
+        return None
+
+    p_hk = pick("回款记录")
+    p_xd = pick("订单交付", "下单")
+    p_mx = pick("核销明细")
+    p_sod = pick("订单明细")
+
+    if not p_hk:
+        raise InputError(
+            "01_智云导出/ 里没有「回款记录」表。\n"
+            "  这一版取数只认单入口：先跑 fetch_zhiyun.py（回款记录按核销日期=T-1 + 关联子表），\n"
+            "  它会一次产出 回款记录 / 订单交付 / 核销明细 / 订单明细 四份。"
+        )
+    if not p_xd:
+        raise InputError(
+            "01_智云导出/ 里没有「订单交付」表（每笔到账关联了哪几个 SO + 交付额）。\n"
+            "  旧版的「回款核销对账」已废弃且不兼容——它拿不到 SOD、还会漏掉预收类。\n"
+            "  请重新跑 fetch_zhiyun.py 取一次数。"
+        )
+
+    # ① 回款记录
+    h, body = _sheet_rows(p_hk)
+    c = _need(h, "回款记录", ["AR", "核销日期"], aliases)
+    for k in ["到账日期", "到账金额原币", "到账金额本币", "手续费", "原币币种",
+              "回款类型", "核销状态", "开票客户"]:
+        i = _col(h, "回款记录", k, aliases)
+        if i is not None:
+            c[k] = i
+    payments: List[dict] = []
+    for vals in body:
+        ar = str(_get(vals, c["AR"]) or "").strip()
+        if not ar:
+            continue
+        payments.append({
+            "ar": ar,
+            "hexiao_date": common.norm_date(_get(vals, c["核销日期"])),
+            "arrival_date": common.norm_date(_get(vals, c.get("到账日期"))),
+            "amount_orig": common.to_number(_get(vals, c.get("到账金额原币"))),
+            "amount_local": common.to_number(_get(vals, c.get("到账金额本币"))),
+            "fee": common.to_number(_get(vals, c.get("手续费"))) or 0.0,
+            "currency": str(_get(vals, c.get("原币币种")) or "").strip() or "人民币CNY",
+            "huikuan_type": str(_get(vals, c.get("回款类型")) or "").strip(),
+            "status": str(_get(vals, c.get("核销状态")) or "").strip(),
+            "customer": str(_get(vals, c.get("开票客户")) or "").strip(),
+            "orders": [],
+            "writeoffs": {},
+        })
+    if not payments:
+        raise InputError(f"「回款记录」里一行数据都没有：{p_hk.name}")
+    by_ar = {p["ar"]: p for p in payments}
+
+    # ② 订单交付（下单栏）
+    h, body = _sheet_rows(p_xd)
+    c = _need(h, "订单交付", ["AR", "SO", "交付额原币"], aliases)
+    i_rate = _col(h, "订单交付", "汇率", aliases)
+    i_cur = _col(h, "订单交付", "币种", aliases)
+    i_name = _col(h, "订单交付", "订单名称", aliases)
+    for vals in body:
+        ar = str(_get(vals, c["AR"]) or "").strip()
+        so = str(_get(vals, c["SO"]) or "").strip()
+        if not ar or not so or ar not in by_ar:
+            continue
+        by_ar[ar]["orders"].append({
+            "so": so,
+            "deliver": common.to_number(_get(vals, c["交付额原币"])),
+            "rate": common.to_number(_get(vals, i_rate)),
+            "currency": str(_get(vals, i_cur) or "").strip(),
+            "name": str(_get(vals, i_name) or "").strip(),
+        })
+
+    # ③ 同币种核销明细（累积表：**必须按本次核销日期过滤**）
+    if p_mx:
+        h, body = _sheet_rows(p_mx)
+        c = _need(h, "核销明细", ["回款记录NUM", "核销日期", "本次核销金额"], aliases)
+        i_so = _col(h, "核销明细", "SO", aliases)
+        for vals in body:
+            ar = str(_get(vals, c["回款记录NUM"]) or "").strip()
+            if ar not in by_ar:
+                continue
+            hd = common.norm_date(_get(vals, c["核销日期"]))
+            if hd is not None and by_ar[ar]["hexiao_date"] is not None and hd != by_ar[ar]["hexiao_date"]:
+                continue  # 上几次的核销，不能重复回填
+            so = str(_get(vals, i_so) or "").strip()
+            amt = common.to_number(_get(vals, c["本次核销金额"]))
+            if not so or amt is None:
+                continue
+            w = by_ar[ar]["writeoffs"]
+            w[so] = round(w.get(so, 0.0) + float(amt), 2)
+
+    # ④ 订单明细（SO → SOD + 逐 SOD 交付额）
+    sod_lines: Dict[str, List[dict]] = {}
+    if p_sod:
+        h, body = _sheet_rows(p_sod)
+        c = _need(h, "订单明细", ["SO", "SOD", "交付额原币"], aliases)
+        seen = set()
+        for vals in body:
+            so = str(_get(vals, c["SO"]) or "").strip()
+            sod = str(_get(vals, c["SOD"]) or "").strip()
+            amt = common.to_number(_get(vals, c["交付额原币"]))
+            if not so or not sod or (so, sod) in seen:
+                continue
+            seen.add((so, sod))
+            sod_lines.setdefault(so, []).append({"sod": sod, "deliver": amt})
+    for p in payments:
+        p["sod_lines"] = sod_lines
+    return payments
+
+
+# ══════════════════════════════════════════════════════════════
+# 二、payments → SOD 级 records（核心展开）
+# ══════════════════════════════════════════════════════════════
+def subset_sum_unique(
+    lines: List[dict], target: float, max_lines: int = SUBSET_MAX_LINES
+) -> Optional[List[dict]]:
+    """
+    在 SOD 行里凑出金额恰好 = target 的**唯一**子集。
+    多解 / 无解 / 行太多 → None（交给人，绝不随便挑一个）。
+    """
+    usable = [x for x in lines if x.get("deliver") is not None]
+    if not usable or len(usable) > max_lines:
+        return None
+    cents = [int(round(float(x["deliver"]) * 100)) for x in usable]
+    tgt = int(round(target * 100))
+    if tgt <= 0:
+        return None
+    # ways[sum] = (方案数(封顶2), 一个见证掩码)
+    ways: Dict[int, Tuple[int, int]] = {0: (1, 0)}
+    for i, v in enumerate(cents):
+        if v <= 0:
+            continue
+        nxt = dict(ways)
+        for s, (n, mask) in ways.items():
+            s2 = s + v
+            if s2 > tgt:
+                continue
+            n0, m0 = nxt.get(s2, (0, 0))
+            nxt[s2] = (min(n0 + n, 2), m0 if n0 else (mask | (1 << i)))
+        ways = nxt
+    n, mask = ways.get(tgt, (0, 0))
+    if n != 1:
+        return None
+    return [usable[i] for i in range(len(usable)) if mask & (1 << i)]
+
+
+def _payment_local(p: dict, rates: Dict[str, float]) -> Tuple[Optional[float], Optional[str]]:
+    """到账本币：系统给了就用系统的，没给才按汇率算。"""
+    if p.get("amount_local") is not None:
+        return float(p["amount_local"]), None
+    return common.compute_local_amount(p.get("amount_orig"), p.get("currency") or "", rates)
+
+
+def _hold(p: dict, code: str, reason: str, so: str = "", sod: str = "", **extra) -> dict:
+    rec = {
+        "ar": p["ar"], "so": so, "sod": sod,
+        "customer": p.get("customer") or "",
+        "amount_orig": None,
+        "currency": p.get("currency") or "人民币CNY",
+        "hexiao_date": p.get("hexiao_date"),
+        "shoukuan_date": p.get("arrival_date"),
+        "status": p.get("status") or "",
+        "huikuan_type": p.get("huikuan_type") or "",
+        "fee": p.get("fee") or 0.0,
+        "arrival_total": p.get("amount_orig"),
+        "forced_code": code,
+        "forced_reason": reason,
+    }
+    rec.update(extra)
+    return rec
+
+
+def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
+    """一笔到账 → 若干 SOD 级 record。**任何情况下至少产出一条**（不许静默丢）。"""
+    sod_lines: Dict[str, List[dict]] = p.get("sod_lines") or {}
+    orders = p.get("orders") or []
+    arrival, err = _payment_local(p, rates)
+
+    # 分笔回款：系统没有逐单金额，铁律一律 hold（禁止比例分摊）
+    if "分笔" in (p.get("huikuan_type") or ""):
+        return [_hold(p, "E1", "分笔回款：系统无逐单金额，禁止比例分摊")]
+
+    # 手续费口径未拍板
+    if float(p.get("fee") or 0.0) > TOL:
+        return [_hold(p, "E_FEE", "有手续费，净额/含费口径未拍板")]
+
+    if err == "E6" or arrival is None:
+        return [_hold(p, "E6", f"外币缺汇率（{p.get('currency')}），到账本币算不出")]
+
+    if not orders:
+        return [_hold(
+            p, "E7",
+            "这笔到账在智云没关联任何下单（下单栏为空）——先去智云看看这笔回款建对了没",
+        )]
+
+    # 逐 SO 本次核销额：核销明细优先；该表无行 = 全额核销
+    writeoffs = dict(p.get("writeoffs") or {})
+    if writeoffs:
+        H = writeoffs
+        basis = "核销明细"
+    else:
+        H = {}
+        for o in orders:
+            if o.get("deliver") is None:
+                return [_hold(p, "E7", f"下单 {o.get('so')} 没有交付额，判不了")]
+            H[o["so"]] = round(H.get(o["so"], 0.0) + float(o["deliver"]), 2)
+        basis = "全额核销(无核销明细)"
+
+    total_h = round(sum(H.values()), 2)
+    cap = arrival + max(float(p.get("fee") or 0.0), 0.0)
+
+    if total_h > cap + TOL:
+        if basis == "核销明细":
+            return [_hold(
+                p, "E4",
+                f"超额核销：本次核销合计 {total_h:.2f} > 到账 {arrival:.2f}，"
+                "智云数据可能有问题，先找销售核对",
+            )]
+        return [_hold(
+            p, "E5",
+            f"这单没回满：交付合计 {total_h:.2f}，实际只到账 {arrival:.2f}，"
+            f"差 {total_h - arrival:.2f}。按你的做法要在这单上方插一行、"
+            "把应收金额拆成「已收」和「未收」两行，未收那行结账填「否」。"
+            "拆完再说「重扫挂账」。",
+        )]
+
+    out: List[dict] = []
+    deliver_by_so = {}
+    for o in orders:
+        if o.get("deliver") is not None:
+            deliver_by_so[o["so"]] = round(deliver_by_so.get(o["so"], 0.0) + float(o["deliver"]), 2)
+
+    for so, h in H.items():
+        lines = sod_lines.get(so) or []
+        chosen: Optional[List[dict]] = None
+        how = ""
+        if lines and all(x.get("deliver") is not None for x in lines):
+            total_lines = round(sum(float(x["deliver"]) for x in lines), 2)
+            if abs(total_lines - h) <= TOL:
+                chosen, how = lines, "全部SOD"
+            else:
+                chosen = subset_sum_unique(lines, h)
+                how = "SOD子集" if chosen else ""
+        if chosen is None:
+            if lines:
+                cand = "、".join(
+                    f"{x['sod']}={x['deliver']}" for x in lines[:12]
+                ) + ("…" if len(lines) > 12 else "")
+                out.append(_hold(
+                    p, "E5",
+                    f"{so} 本次核销 {h:.2f}，但它下面的 SOD 金额凑不出唯一组合"
+                    f"（SOD 合计 {round(sum(float(x['deliver']) for x in lines), 2)}）。"
+                    f"候选：{cand}。你指一下这次核的是哪几个 SOD。",
+                    so=so,
+                ))
+            else:
+                # 订单明细查不到 SOD → 退化成按 SO 匹配盈亏表（老路，仍可判）
+                out.append({
+                    "ar": p["ar"], "so": so, "sod": "",
+                    "customer": p.get("customer") or "",
+                    "amount_orig": h,
+                    "currency": p.get("currency") or "人民币CNY",
+                    "hexiao_date": p.get("hexiao_date"),
+                    "shoukuan_date": p.get("arrival_date"),
+                    "status": p.get("status") or "",
+                    "huikuan_type": p.get("huikuan_type") or "",
+                    "fee": p.get("fee") or 0.0,
+                    "arrival_total": p.get("amount_orig"),
+                    "deliver_local": deliver_by_so.get(so),
+                    "match_basis": f"{basis}/无SOD(按SO匹配)",
+                })
+            continue
+        for line in chosen:
+            out.append({
+                "so_all_lines": lines,  # 整段对齐消歧要用（见 LedgerIndex.positional_row）
+                "ar": p["ar"], "so": so, "sod": line["sod"],
+                "customer": p.get("customer") or "",
+                "amount_orig": float(line["deliver"]),
+                "currency": p.get("currency") or "人民币CNY",
+                "hexiao_date": p.get("hexiao_date"),
+                "shoukuan_date": p.get("arrival_date"),
+                "status": p.get("status") or "",
+                "huikuan_type": p.get("huikuan_type") or "",
+                "fee": p.get("fee") or 0.0,
+                "arrival_total": p.get("amount_orig"),
+                "deliver_local": float(line["deliver"]),
+                "match_basis": f"{basis}/{how}",
+            })
+
+    if not out:  # 兜底：绝不静默丢单
+        out.append(_hold(p, "E7", "这笔到账展开不出任何订单行（请把这条截图发给明昊）"))
+    return out
+
+
+def expand_payments(payments: List[dict], rates: Optional[Dict[str, float]] = None) -> List[dict]:
+    """全部到账 → records，并做 **AR 覆盖率硬校验**。"""
+    rates = rates or {}
+    records: List[dict] = []
+    for p in payments:
+        records.extend(expand_payment(p, rates))
+    want = {p["ar"] for p in payments if p.get("ar")}
+    got = {r.get("ar") for r in records if r.get("ar")}
+    missing = sorted(want - got)
+    if missing:
+        raise CoverageError(
+            "有到账没产出任何判定（这就是 2026-07-22 静默丢 3 笔的那类 bug，绝不放行）："
+            f"{missing}"
+        )
+    return records
+
+
+# ══════════════════════════════════════════════════════════════
+# 三、盈亏表索引
+# ══════════════════════════════════════════════════════════════
 class LedgerIndex:
-    """盈亏表 SO/SOD 索引（只读）。"""
+    """盈亏表『明细』只读索引。她表里**一行 = 一个 SOD**。"""
 
     def __init__(self, path: Optional[Path] = None, synthetic: Optional[dict] = None):
         self.path = path
         self.so_index: Dict[str, List[int]] = {}
         self.sod_index: Dict[str, List[int]] = {}
+        self.so_amount_index: Dict[Tuple[str, int], List[int]] = {}
         self.row_snapshot: Dict[int, dict] = {}
         self.cols: dict = {}
         if synthetic is not None:
             self.so_index = {k: list(v) for k, v in synthetic.get("so", {}).items()}
             self.sod_index = {k: list(v) for k, v in synthetic.get("sod", {}).items()}
             self.row_snapshot = synthetic.get("rows", {})
+            for r, snap in self.row_snapshot.items():
+                y = common.to_number(snap.get("yingshou"))
+                so = snap.get("so") or ""
+                if so and y is not None:
+                    self.so_amount_index.setdefault((so, int(round(y * 100))), []).append(int(r))
             return
-        if path is None:
-            return
-        self._load(path)
+        if path is not None:
+            self._load(path)
 
     def _load(self, path: Path):
         import openpyxl
 
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
         if "明细" not in wb.sheetnames:
+            names = list(wb.sheetnames)
             wb.close()
-            raise ValueError(f"盈亏表无『明细』sheet：{wb.sheetnames}")
-        ws = wb["明细"]
-        headers = None
-        header_row_idx = None
-        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=5, values_only=True), start=1):
-            names = [str(c).strip() if c is not None else "" for c in row]
-            if any(n.startswith("新智云单号") for n in names) and any(
-                "计提" in n for n in names
-            ):
-                headers = names
-                header_row_idx = i
-                break
-        if headers is None:
-            wb.close()
-            raise ValueError("找不到盈亏表明细表头（需含新智云单号/计提）")
+            raise ValueError(f"盈亏表无『明细』sheet：{names}")
+        all_rows = list(wb["明细"].iter_rows(values_only=True))
+        wb.close()
+
         aliases = common.load_aliases()
+        hrow, headers = common.find_header_row(
+            all_rows, "盈亏明细", ["SO", "SOD", "计提", "回款明细", "是否结账"], aliases
+        )
         cols = common.resolve_columns(
-            headers,
-            "盈亏明细",
+            headers, "盈亏明细",
             ["SO", "SOD", "计提", "回款明细", "是否结账", "收款时间", "收款方式"],
             aliases,
         )
-        # 应收可选
         role = aliases.get("盈亏明细", {})
         yidx = common.fuzzy_find_col(headers, role.get("应收", ["应收金额", "应收"]))
         if yidx is not None:
             cols["应收"] = yidx
         self.cols = cols
-        # 重建：read_only 流式
-        wb.close()
-        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-        ws = wb["明细"]
-        for r_i, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            if header_row_idx is not None and r_i <= header_row_idx:
+
+        for r_i, row in enumerate(all_rows, start=1):
+            if r_i <= hrow + 1:
                 continue
             vals = list(row)
-            so = vals[cols["SO"]] if cols["SO"] < len(vals) else None
-            sod = vals[cols["SOD"]] if cols["SOD"] < len(vals) else None
-            so_s = str(so).strip() if so is not None else ""
-            sod_s = str(sod).strip() if sod is not None else ""
+
+            def cell(key):
+                i = cols.get(key)
+                return vals[i] if i is not None and i < len(vals) else None
+
+            so_s = str(cell("SO") or "").strip()
+            sod_s = str(cell("SOD") or "").strip()
+            if not so_s.startswith("SO") and not sod_s.startswith("SOD"):
+                continue
             if so_s.startswith("SO"):
                 self.so_index.setdefault(so_s, []).append(r_i)
             if sod_s.startswith("SOD"):
                 self.sod_index.setdefault(sod_s, []).append(r_i)
-            if so_s.startswith("SO") or sod_s.startswith("SOD"):
-                snap = {
-                    "so": so_s,
-                    "sod": sod_s,
-                    "jiti": vals[cols["计提"]] if cols["计提"] < len(vals) else None,
-                    "huikuan": vals[cols["回款明细"]] if cols["回款明细"] < len(vals) else None,
-                    "jiezhang": vals[cols["是否结账"]] if cols["是否结账"] < len(vals) else None,
-                    "shoukuan_time": vals[cols["收款时间"]]
-                    if cols["收款时间"] < len(vals)
-                    else None,
-                    "shoukuan_way": vals[cols["收款方式"]]
-                    if cols["收款方式"] < len(vals)
-                    else None,
-                    "yingshou": vals[cols["应收"]]
-                    if "应收" in cols and cols["应收"] < len(vals)
-                    else None,
-                }
-                self.row_snapshot[r_i] = snap
-        wb.close()
+            yingshou = common.to_number(cell("应收"))
+            if so_s.startswith("SO") and yingshou is not None:
+                self.so_amount_index.setdefault(
+                    (so_s, int(round(yingshou * 100))), []
+                ).append(r_i)
+            self.row_snapshot[r_i] = {
+                "so": so_s, "sod": sod_s,
+                "jiti": cell("计提"), "huikuan": cell("回款明细"),
+                "jiezhang": cell("是否结账"), "shoukuan_time": cell("收款时间"),
+                "shoukuan_way": cell("收款方式"), "yingshou": yingshou,
+            }
 
-    def match(self, so: str, sod: str) -> Tuple[Optional[int], str, List[int]]:
-        """返回 (row, how, candidates)。"""
+    def positional_row(
+        self, so: str, sod: str, lines: List[dict]
+    ) -> Optional[Tuple[int, str, Optional[float]]]:
+        """
+        (SO+应收金额) 定位不到唯一行时的严格消歧：验证**整段能不能对齐**。
+
+          她表里这个 SO 的全部行（行号升序） vs 智云该 SO 的全部 SOD（编号降序）
+
+        为什么按这个序：两边都源自月初同一份「交付数据」导出，天然同序。
+
+        返回 (行号, 依据, 比例)；对不齐返回 None（老老实实挂起）。依据两种：
+
+        · `exact`  —— 金额序列逐位完全相等。实测 SO26040297（12 行）、SO26040481（10 行）。
+        · `ratio`  —— 有几位不等，但**所有不等的位比值完全一致**（系统性口径差，不是行错位）。
+                      实测 SO26040322：智云 477.61/661.31 vs 她表 488.64/676.58，
+                      两处比值都是 0.977433，她当天就是按智云金额填的。
+                      行错位不可能凑出同一个比值，所以这条判据是可证的，不是猜。
+
+        只要行数对不上（比如她把某个 SOD 拆成了两行）→ 直接 None。
+        """
+        rows = sorted(self.so_index.get(so, []))
+        if not rows or not lines or len(rows) != len(lines):
+            return None
+        ordered = sorted(lines, key=lambda x: str(x.get("sod") or ""), reverse=True)
+        ratios: List[float] = []
+        for r, ln in zip(rows, ordered):
+            y = common.to_number((self.row_snapshot.get(r) or {}).get("yingshou"))
+            d = ln.get("deliver")
+            if y is None or d is None or float(y) == 0.0:
+                return None
+            if abs(float(y) - float(d)) > TOL:
+                ratios.append(float(d) / float(y))
+        kind, ratio = "exact", None
+        if ratios:
+            ratio = sum(ratios) / len(ratios)
+            if not (0.5 < ratio < 1.5):
+                return None
+            if any(abs(x - ratio) > 5e-4 for x in ratios):
+                return None  # 比值不一致 → 更像行错位，不敢认
+            kind = "ratio"
+        for r, ln in zip(rows, ordered):
+            if (ln.get("sod") or "") == sod:
+                return r, kind, ratio
+        return None
+
+    def match(
+        self, so: str, sod: str, amount: Optional[float] = None
+    ) -> Tuple[Optional[int], str, List[int]]:
+        """
+        返回 (行号, 依据, 候选)。依据优先级：
+          ① SO + 应收金额  ← 主键：回填前后都成立（她一行 = 一个 SOD，应收金额=该SOD交付额）
+          ② SOD           ← 她已回填过「实收金额」列时可用（幂等重跑走这条）
+          ③ SO 唯一行
+        """
+        if so and amount is not None:
+            rows = self.so_amount_index.get((so, int(round(float(amount) * 100))), [])
+            if len(rows) == 1:
+                return rows[0], "SO+应收金额", rows
+            if len(rows) > 1:
+                return None, "E8", rows
         if sod:
             rows = self.sod_index.get(sod, [])
             if len(rows) == 1:
@@ -325,6 +595,9 @@ class LedgerIndex:
         return None, "E7", []
 
 
+# ══════════════════════════════════════════════════════════════
+# 四、单条判定
+# ══════════════════════════════════════════════════════════════
 def classify_one(
     rec: dict,
     ledger: Optional[LedgerIndex],
@@ -332,22 +605,22 @@ def classify_one(
     thr: float,
     year_now: int,
 ) -> dict:
-    """单条判定 → {bucket, code, five_cols, ...}。"""
     result = {
         "ar": rec.get("ar") or "",
         "so": rec.get("so") or "",
         "sod": rec.get("sod") or "",
-        # case_id = AR × SO：一笔到账挂多个 SO 时，每个 SO 是独立案例，
-        # 否则台账会把多 SO 塌成一行、状态互相覆盖（实测 45% 的流转行是多 SO）。
-        "case_id": f"{rec.get('ar') or '-'}|{rec.get('so') or '-'}",
+        # case_id = AR × SO × SOD：她表里一行一个 SOD，粒度必须到 SOD 否则台账互相覆盖
+        "case_id": "|".join(
+            x for x in (rec.get("ar") or "-", rec.get("so") or "-", rec.get("sod") or "") if x
+        ),
         "customer_masked": common.mask_customer(rec.get("customer") or ""),
         "flow_hits": rec.get("flow_hits"),
         "flow_locate": rec.get("flow_locate") or "",
         "flow_matched_by": rec.get("flow_matched_by") or "",
         "flow_order_suggest": rec.get("flow_order_suggest") or "",
-        "channel": rec.get("channel") or "duizhang",
         "huikuan_type": rec.get("huikuan_type") or "",
         "status": rec.get("status") or "",
+        "match_basis": rec.get("match_basis") or "",
         "bucket": "exception",
         "code": "",
         "reason": "",
@@ -356,34 +629,24 @@ def classify_one(
         "current_values": {},
         "candidates": [],
     }
+    if rec.get("so"):
+        result["locate_hint"] = (
+            f"在盈亏『明细』按「新智云单号」筛选：{rec['so']}"
+            + (f"，找应收金额={rec.get('amount_orig')} 那行" if rec.get("amount_orig") is not None else "")
+            + "（禁止用行号）"
+        )
 
-    # 分笔 → 永远 hold
-    if result["channel"] == "fenbi" or "分笔" in (rec.get("huikuan_type") or ""):
-        result["bucket"] = "hold"
-        result["code"] = "E1"
-        result["reason"] = "分笔回款：系统无逐单金额，禁止比例分摊"
+    # 展开阶段已定性的（分笔/手续费/超额/没回满/无下单…）直接落地
+    forced = rec.get("forced_code")
+    if forced:
+        result["code"] = forced
+        result["reason"] = rec.get("forced_reason") or ""
+        result["bucket"] = "exception" if forced in ("E4", "E7", "E10", "E12", "E0") else "hold"
         return result
 
     if (rec.get("status") or "") == "已作废":
         result["code"] = "E7"
         result["reason"] = "核销已作废"
-        return result
-
-    if not rec.get("so") and not rec.get("sod"):
-        result["code"] = "E7"
-        result["reason"] = "无 SO/SOD 单号"
-        return result
-
-    # 手续费待拍板
-    fee = rec.get("fee") or 0.0
-    try:
-        fee = float(fee)
-    except (TypeError, ValueError):
-        fee = 0.0
-    if fee > 0.005:
-        result["bucket"] = "hold"
-        result["code"] = "E_FEE"
-        result["reason"] = "有手续费，净额/含费口径未拍板"
         return result
 
     amount_orig = rec.get("amount_orig")
@@ -393,165 +656,129 @@ def classify_one(
         return result
 
     local, err = common.compute_local_amount(amount_orig, rec.get("currency") or "", rates)
-    if err == "E6":
+    if err == "E6" or local is None:
         result["code"] = "E6"
         result["reason"] = f"外币缺汇率（{rec.get('currency')}）"
         return result
 
-    # 跨年
-    so = rec.get("so") or ""
-    sod = rec.get("sod") or ""
-    y = common.year_from_so(sod or so)
-    if y is not None and y < year_now:
-        result["bucket"] = "hold"
-        result["code"] = "E3"
-        result["reason"] = f"跨年老单（{y}）"
-        return result
-
-    # —— 上游/附加信号（流转三键、建档等）；有则优先成码，不瞎填 ——
-    flow_hits = rec.get("flow_hits")  # None=未做三键；0=E0；1=唯一；>1=E12
+    # 流转表三键信号（有做才判）
+    flow_hits = rec.get("flow_hits")
     if flow_hits is not None:
         try:
             fh = int(flow_hits)
         except (TypeError, ValueError):
             fh = -1
         if fh == 0:
-            result["bucket"] = "exception"
             result["code"] = "E0"
             result["reason"] = "流转表三键对不到账（0 行）"
             return result
         if fh > 1:
-            result["bucket"] = "exception"
             result["code"] = "E12"
             result["reason"] = "同日同额同名命中多行"
             return result
     if rec.get("customer_archive_failed"):
-        result["bucket"] = "exception"
         result["code"] = "E10"
         result["reason"] = "建档失败/搜不到客户"
         return result
-    if rec.get("prepaid_system_gt_local"):
-        result["bucket"] = "hold"
-        result["code"] = "E9"
-        result["reason"] = "系统可核金额大于线下预收剩余"
-        return result
-    if rec.get("deliver_changed"):
-        result["bucket"] = "hold"
-        result["code"] = "E11"
-        result["reason"] = "系统交付额与表旧值不一致"
-        return result
 
-    # 匹配盈亏：必须有 ledger；无表或表中无 SO → hold E2，禁止无表 auto 瞎填
-    row = None
-    how = ""
-    cands: List[int] = []
     if ledger is None:
         result["bucket"] = "hold"
         result["code"] = "E2"
         result["reason"] = "未提供盈亏表，无法确认 SO 是否在明细"
         return result
 
-    row, how, cands = ledger.match(so, sod)
+    so, sod = rec.get("so") or "", rec.get("sod") or ""
+    row, how, cands = ledger.match(so, sod, amount_orig)
+
+    # 定位不到唯一行 → 用「整段逐位对齐」严格消歧（对不齐就继续挂起）
+    align_note = ""
+    if how in ("E8", "E2") and sod and rec.get("so_all_lines"):
+        aligned = ledger.positional_row(so, sod, rec["so_all_lines"])
+        if aligned is not None:
+            row, kind, ratio = aligned
+            how, cands = "SO整段按SOD序对齐", []
+            if kind == "ratio":
+                snap0 = ledger.row_snapshot.get(row) or {}
+                align_note = (
+                    f"⚠ 智云交付额 {amount_orig} 与你表里应收 {snap0.get('yingshou')} 不一致"
+                    f"（这个 SO 每一行都差同一个比例 {ratio:.6f}），已按**智云金额**填；"
+                    "口径待确认，填之前扫一眼"
+                )
+
     if how == "E8":
         result["bucket"] = "hold"
         result["code"] = "E8"
-        result["reason"] = "SO/SOD 在盈亏表多行"
+        result["reason"] = (
+            f"盈亏表里有 {len(cands)} 行同时满足 SO={so}"
+            + (f" 且应收金额={amount_orig}" if amount_orig is not None else "")
+            + "，分不清记哪行，你指一下"
+        )
         result["candidates"] = cands
-        result["locate_hint"] = f"按 SO={so} 筛选，候选行号仅供参考勿当定位键：{cands}"
         return result
-    if how == "E7" or (not so and not sod):
-        result["bucket"] = "exception"
+    if how == "E7":
         result["code"] = "E7"
         result["reason"] = "无单号"
         return result
     if how == "E2" or row is None:
+        # 表里真找不到这单，这时才区分「跨年老单」还是「还没交付」
+        y = common.year_from_so(sod or so)
         result["bucket"] = "hold"
-        result["code"] = "E2"
-        result["reason"] = "盈亏表无此 SO/SOD"
-        if so:
-            result["locate_hint"] = f"在盈亏『明细』按「新智云单号」筛选：{so}（禁止用行号）"
+        if y is not None and y < year_now:
+            result["code"] = "E3"
+            result["reason"] = f"{y} 年的老单，今年盈亏表里没有这行"
+        else:
+            result["code"] = "E2"
+            result["reason"] = "盈亏表里还没有这张单（多半还没交付进表）"
         return result
 
-    # 超额：本次本币 > 应收（人民币；容差 0.01）
-    snap = ledger.row_snapshot.get(row, {}) if row is not None else {}
-    yingshou = common.to_number(rec.get("yingshou"))
-    if yingshou is None:
-        yingshou = common.to_number(snap.get("yingshou"))
+    snap = ledger.row_snapshot.get(row, {})
+
+    # 超额：本次本币 > 该行应收（人民币）
+    yingshou = common.to_number(snap.get("yingshou"))
     if (
-        local is not None
-        and yingshou is not None
+        yingshou is not None
         and common.is_cny(rec.get("currency") or "")
-        and float(local) > float(yingshou) + 0.01
+        and float(local) > float(yingshou) + max(thr, TOL)
     ):
-        result["bucket"] = "exception"
         result["code"] = "E4"
-        result["reason"] = "超额核销：本次本币大于应收"
-        return result
-    arrival_cap = common.to_number(rec.get("arrival_amount"))
-    if (
-        local is not None
-        and arrival_cap is not None
-        and float(local) > float(arrival_cap) + 0.01
-    ):
-        result["bucket"] = "exception"
-        result["code"] = "E4"
-        result["reason"] = "超额核销：核销额大于到账"
-        return result
-
-    # 尾差：交付 vs 核销
-    deliver = rec.get("deliver_local")
-    if deliver is not None and local is not None and thr is not None:
-        if abs(float(deliver) - float(local)) > thr + 1e-9:
-            # 完整核销场景下差额；阈值 0 时任何不等都挂
-            st = rec.get("status") or ""
-            if st in common.SETTLED and abs(float(deliver) - float(local)) > thr + 1e-9:
-                # 外币：交付本币是系统汇率，不能与到账本币比——跳过
-                if common.is_cny(rec.get("currency") or ""):
-                    result["bucket"] = "hold"
-                    result["code"] = "E5"
-                    result["reason"] = "金额与交付额不一致（尾差阈值=0）"
-                    return result
-
-    if local is None:
-        result["bucket"] = "exception"
-        result["code"] = "E6"
-        result["reason"] = "本币金额算不出"
+        result["reason"] = (
+            f"这行应收 {yingshou}，本次要记 {local}，比应收还多，不正常"
+        )
         return result
 
     settled = (rec.get("status") or "") in common.SETTLED
-    r_time = common.receipt_time(rec.get("shoukuan_date"), rec.get("hexiao_date"))
+    r_time = common.receipt_time(
+        common.norm_date(rec.get("shoukuan_date")), common.norm_date(rec.get("hexiao_date"))
+    )
     way = common.pay_way(
         rec.get("status") or "",
-        rec.get("huikuan_type") or "",
         common.norm_date(rec.get("shoukuan_date")),
         common.norm_date(rec.get("hexiao_date")),
     )
-    local_f = float(local)
+    local_f = round(float(local), 2)
 
-    five = {
-        "计提": round(local_f, 2) if settled else None,
-        "回款明细": round(local_f, 2),
+    result["five_cols"] = {
+        "计提": local_f if settled else None,
+        "回款明细": local_f,
         "是否结账": "是" if settled else "否",
         "收款时间": r_time.isoformat() if r_time else None,
         "收款方式": way,
-        "实收SOD": sod or None,
+        "实收SOD": sod or snap.get("sod") or None,
     }
-    result["five_cols"] = five
     result["bucket"] = "auto"
     result["code"] = ""
-    result["reason"] = f"通道={result['channel']} 匹配={how}"
-    if so:
-        result["locate_hint"] = f"在盈亏『明细』按「新智云单号」筛选：{so}（禁止用行号）"
-    if row is not None:
-        result["current_values"] = {
-            "计提": snap.get("jiti"),
-            "回款明细": snap.get("huikuan"),
-            "是否结账": str(snap.get("jiezhang") or "").strip() if snap.get("jiezhang") is not None else "",
-            "收款时间": str(snap.get("shoukuan_time") or "")[:10],
-            "收款方式": snap.get("shoukuan_way"),
-            "实收SOD": snap.get("sod"),
-        }
-        result["ledger_row_ref"] = row  # 仅内部；清单不展示为定位键
+    result["reason"] = f"{rec.get('match_basis') or '判定'} · 定位={how}" + (
+        f"；{align_note}" if align_note else ""
+    )
+    result["current_values"] = {
+        "计提": snap.get("jiti"),
+        "回款明细": snap.get("huikuan"),
+        "是否结账": str(snap.get("jiezhang") or "").strip() if snap.get("jiezhang") is not None else "",
+        "收款时间": str(snap.get("shoukuan_time") or "")[:10],
+        "收款方式": snap.get("shoukuan_way"),
+        "实收SOD": snap.get("sod"),
+    }
+    result["ledger_row_ref"] = row
     return result
 
 
@@ -560,22 +787,28 @@ def classify_records(
     ledger: Optional[LedgerIndex] = None,
     rates: Optional[Dict[str, float]] = None,
 ) -> dict:
-    """ledger 为 None 时每条进 hold E2（禁止无表瞎填五列）。"""
     rates = rates or {}
     thr = common.tail_threshold()
     year_now = common.current_year()
     results = [classify_one(rec, ledger, rates, thr, year_now) for rec in records]
 
-    # —— 跨行校验：同一 AR 的核销合计不得超过到账（明妹明确约束；E4 单条判不出来）——
-    over = check_ar_totals(records, thr)
+    # 同一行被两条计划命中 → 两条都别自动写（谁对谁错要人定）
+    seen: Dict[int, str] = {}
+    dup: Dict[int, bool] = {}
     for r in results:
-        info = over.get(r.get("ar") or "")
-        if not info:
+        ref = r.get("ledger_row_ref")
+        if r["bucket"] != "auto" or ref is None:
             continue
-        r["bucket"] = "exception"
-        r["code"] = "E4"
-        r["reason"] = info
-        r["five_cols"] = {}
+        if ref in seen:
+            dup[ref] = True
+        seen[ref] = r.get("case_id") or ""
+    for r in results:
+        ref = r.get("ledger_row_ref")
+        if ref is not None and dup.get(ref):
+            r["bucket"] = "hold"
+            r["code"] = "E8"
+            r["reason"] = f"盈亏表第 {ref} 行被本次两笔同时命中，你指一下各记哪行"
+            r["five_cols"] = {}
 
     auto = [r for r in results if r["bucket"] == "auto"]
     hold = [r for r in results if r["bucket"] == "hold"]
@@ -585,62 +818,19 @@ def classify_records(
         "hold": hold,
         "exception": exc,
         "counts": {
-            "auto": len(auto),
-            "hold": len(hold),
-            "exception": len(exc),
-            "total": len(records),
+            "auto": len(auto), "hold": len(hold),
+            "exception": len(exc), "total": len(results),
         },
         "e_code_dist": _dist(results),
         "ar_summary": build_ar_summary(results),
     }
 
 
-def check_ar_totals(records: List[dict], thr: float = 0.0) -> Dict[str, str]:
-    """
-    同一 AR 的 Σ本次核销 ≤ 到账金额（含手续费两种口径都比，取宽松的一种）。
-    超出 → 返回 {ar: 原因}，该 AR 全部行进 E4。
-    只有拿得到 arrival_total 的 AR 才校验；拿不到就不判（不猜）。
-    """
-    sums: Dict[str, float] = {}
-    arrival: Dict[str, float] = {}
-    fees: Dict[str, float] = {}
-    for rec in records:
-        ar = rec.get("ar") or ""
-        if not ar:
-            continue
-        amt = rec.get("amount_orig")
-        if amt is not None:
-            sums[ar] = round(sums.get(ar, 0.0) + float(amt), 2)
-        at = rec.get("arrival_total")
-        if at is not None:
-            arrival[ar] = float(at)
-        fee = rec.get("fee")
-        if fee:
-            fees[ar] = float(fee)
-    bad: Dict[str, str] = {}
-    for ar, total in sums.items():
-        base = arrival.get(ar)
-        if base is None:
-            continue
-        gross = base + fees.get(ar, 0.0)
-        cap = max(base, gross) + max(thr, 0.0)
-        if total > cap + 0.005:
-            bad[ar] = (
-                f"同一到账的核销合计 {total:.2f} 超过到账金额 "
-                f"{base:.2f}（含手续费 {gross:.2f}）→ 超额核销，停下找销售核对"
-            )
-    return bad
-
-
 def build_ar_summary(results: List[dict]) -> List[dict]:
-    """
-    按 AR 汇总每个 SO 的状态，并派生到账流转表「是否更新应收款」三态：
-    全部 SO 可填 → 是；部分 → 部分；一个都没有 → 空白。
-    （混合案例正是她表里出现"部分"的原因，实测微信表 2 行、汇款表 1 行。）
-    """
+    """按 AR 汇总，派生到账流转表「是否更新应收款」三态（是 / 部分 / 空白）。"""
     try:
         from flow_ledger import derive_flow_status
-    except Exception:  # pragma: no cover - 仅防御
+    except Exception:  # pragma: no cover
         def derive_flow_status(states):
             done = sum(1 for s in states if s == "auto")
             if not states or done == 0:
@@ -653,16 +843,15 @@ def build_ar_summary(results: List[dict]) -> List[dict]:
     out = []
     for ar, items in by_ar.items():
         states = [i["bucket"] for i in items]
-        out.append(
-            {
-                "ar": ar,
-                "so_count": len(items),
-                "buckets": states,
-                "流转表_是否更新应收款_建议": derive_flow_status(states),
-                "flow_locate": next((i.get("flow_locate") for i in items if i.get("flow_locate")), ""),
-                "待处理SO": [i.get("so") for i in items if i["bucket"] != "auto" and i.get("so")],
-            }
-        )
+        out.append({
+            "ar": ar,
+            "so_count": len({i.get("so") for i in items if i.get("so")}),
+            "行数": len(items),
+            "buckets": states,
+            "流转表_是否更新应收款_建议": derive_flow_status(states),
+            "flow_locate": next((i.get("flow_locate") for i in items if i.get("flow_locate")), ""),
+            "待处理SO": sorted({i.get("so") for i in items if i["bucket"] != "auto" and i.get("so")}),
+        })
     return out
 
 
@@ -674,303 +863,36 @@ def _dist(items: List[dict]) -> Dict[str, int]:
     return d
 
 
-def records_from_fixture(
-    fixture: dict,
-    key: str = "day",
-    yucun_details: Optional[List[dict]] = None,
-) -> List[dict]:
-    """从夹具构造规范化记录。day/std 走对账通道。"""
-    fields = fixture.get("fields_duizhang") or []
-    fields_hk = fixture.get("fields_huikuan") or []
-    ar_rows = fixture.get("ar") or []
-    ar_meta = parse_huikuan_meta(ar_rows, fields_hk) if ar_rows and fields_hk else {}
-
-    raw = fixture.get(key)
-    if raw is None:
-        raise KeyError(f"夹具无键 {key}")
-    if not isinstance(raw, list):
-        raw = [raw]
-
-    # 若 key 是预存合成
-    if key == "yucun" or (raw and isinstance(raw[0], dict) and raw[0].get("channel") == "yucun"):
-        return _records_yucun_synthetic(raw, yucun_details)
-
-    recs = parse_duizhang_rows(raw, fields, ar_meta)
-    return recs
-
-
-def _records_yucun_synthetic(
-    ar_list: List[dict],
-    details: Optional[List[dict]],
-) -> List[dict]:
-    """合成预存：AR + 明细（已按日期过滤的由调用方保证）。"""
-    details = details or []
+# ══════════════════════════════════════════════════════════════
+# 五、夹具（单测/离线演练用）
+# ══════════════════════════════════════════════════════════════
+def payments_from_fixture(fixture: dict) -> List[dict]:
+    """
+    夹具格式（v2）：
+      {"payments": [{ar, hexiao_date, arrival_date, amount_orig, ...,
+                     orders:[{so, deliver}], writeoffs:{so: amt}}],
+       "sod_lines": {"SO…": [{"sod": "SOD…", "deliver": 1.0}]}}
+    """
+    if "payments" not in fixture:
+        raise InputError("夹具不是 v2 格式（需要 payments 键）")
+    sod_lines = fixture.get("sod_lines") or {}
     out = []
-    for ar in ar_list:
-        target = common.norm_date(ar.get("hexiao_date") or ar.get("核销日期"))
-        filtered = filter_yucun_details_by_date(details, target) if details else []
-        # 若 ar 自带 detail 列表
-        if ar.get("details"):
-            filtered = filter_yucun_details_by_date(
-                parse_detail_rows(ar["details"]), target
-            )
-        if not filtered:
-            # 无明细 → hold 类异常
-            out.append(
-                {
-                    "ar": ar.get("ar") or "",
-                    "so": ar.get("so") or "",
-                    "sod": ar.get("sod") or "",
-                    "customer": ar.get("customer") or "",
-                    "amount_orig": None,
-                    "currency": ar.get("currency") or "人民币CNY",
-                    "hexiao_date": target,
-                    "shoukuan_date": common.norm_date(ar.get("shoukuan_date")),
-                    "status": ar.get("status") or "预存已核销",
-                    "huikuan_type": "预存回款",
-                    "channel": "yucun",
-                    "fee": ar.get("fee") or 0,
-                    "deliver_local": ar.get("deliver_local"),
-                }
-            )
-            continue
-        for d in filtered:
-            out.append(
-                {
-                    "ar": ar.get("ar") or d.get("ar") or "",
-                    "so": d.get("so") or ar.get("so") or "",
-                    "sod": ar.get("sod") or "",
-                    "customer": ar.get("customer") or "",
-                    "amount_orig": d.get("amount"),
-                    "currency": d.get("currency") or ar.get("currency") or "人民币CNY",
-                    "hexiao_date": d.get("hexiao_date") or target,
-                    "shoukuan_date": common.norm_date(ar.get("shoukuan_date")),
-                    "status": ar.get("status") or "预存已核销",
-                    "huikuan_type": "预存回款",
-                    "channel": "yucun",
-                    "fee": ar.get("fee") or 0,
-                    "deliver_local": ar.get("deliver_local"),
-                    "rate_arrival": d.get("rate"),
-                }
-            )
+    for p in fixture["payments"]:
+        q = dict(p)
+        q["hexiao_date"] = common.norm_date(p.get("hexiao_date"))
+        q["arrival_date"] = common.norm_date(p.get("arrival_date"))
+        q["amount_orig"] = common.to_number(p.get("amount_orig"))
+        q["amount_local"] = common.to_number(p.get("amount_local"))
+        q["fee"] = common.to_number(p.get("fee")) or 0.0
+        q.setdefault("currency", "人民币CNY")
+        q.setdefault("orders", [])
+        q.setdefault("writeoffs", {})
+        q["sod_lines"] = sod_lines
+        out.append(q)
     return out
 
 
-def load_excel_exports(workspace: Path) -> Optional[List[dict]]:
-    """尝试从 01_智云导出 读 Excel（列名模糊匹配）。缺关键列则 raise。"""
-    export_dir = workspace / "01_智云导出"
-    if not export_dir.is_dir():
-        return None
-    import openpyxl
-
-    aliases = common.load_aliases()
-    # 优先对账表
-    candidates = sorted(export_dir.glob("*.xlsx"))
-    duizhang_path = None
-    huikuan_path = None
-    detail_path = None
-    for p in candidates:
-        n = p.name
-        if "对账" in n:
-            duizhang_path = p
-        elif "明细" in n or "核销明细" in n:
-            detail_path = p
-        elif "回款记录" in n or "回款" in n:
-            huikuan_path = p
-
-    if not duizhang_path and not huikuan_path:
-        return None
-
-    ar_meta: Dict[str, dict] = {}
-    if huikuan_path:
-        wb = openpyxl.load_workbook(str(huikuan_path), read_only=True, data_only=True)
-        ws = wb.active
-        rows_iter = ws.iter_rows(values_only=True)
-        headers = [str(c).strip() if c is not None else "" for c in next(rows_iter)]
-        cols = common.resolve_columns(
-            headers,
-            "回款记录",
-            ["AR", "回款类型"],
-            aliases,
-        )
-        # optional cols
-        opt_keys = ["核销日期", "到账日期", "到账金额原币", "手续费", "原币币种", "核销状态", "开票客户"]
-        opt = {}
-        role = aliases.get("回款记录", {})
-        for k in opt_keys:
-            idx = common.fuzzy_find_col(headers, role.get(k, [k]))
-            if idx is not None:
-                opt[k] = idx
-        for row in rows_iter:
-            vals = list(row)
-            ar = str(vals[cols["AR"]] or "").strip()
-            if not ar:
-                continue
-            ar_meta[ar] = {
-                "huikuan_type": str(vals[cols["回款类型"]] or "").strip(),
-                "currency": str(vals[opt["原币币种"]] or "").strip() if "原币币种" in opt else "",
-                "arrival_date": common.norm_date(vals[opt["到账日期"]]) if "到账日期" in opt else None,
-                "fee": common.to_number(vals[opt["手续费"]]) if "手续费" in opt else 0.0,
-                "amount_orig": common.to_number(vals[opt["到账金额原币"]])
-                if "到账金额原币" in opt
-                else None,
-                "status": str(vals[opt["核销状态"]] or "").strip() if "核销状态" in opt else "",
-                "customer": str(vals[opt["开票客户"]] or "").strip() if "开票客户" in opt else "",
-                "hexiao_date": common.norm_date(vals[opt["核销日期"]]) if "核销日期" in opt else None,
-            }
-        wb.close()
-
-    records: List[dict] = []
-    if duizhang_path:
-        wb = openpyxl.load_workbook(str(duizhang_path), read_only=True, data_only=True)
-        ws = wb.active
-        rows_iter = ws.iter_rows(values_only=True)
-        headers = [str(c).strip() if c is not None else "" for c in next(rows_iter)]
-        cols = common.resolve_columns(
-            headers,
-            "回款核销对账",
-            ["SO", "回款额原币", "核销日期"],
-            aliases,
-        )
-        role = aliases.get("回款核销对账", {})
-        opt = {}
-        for k in ["SOD", "AR", "客户名称", "回款额本币", "交付额本币", "到账日期", "核销状态", "下单币种"]:
-            idx = common.fuzzy_find_col(headers, role.get(k, [k]))
-            if idx is not None:
-                opt[k] = idx
-        for row in rows_iter:
-            vals = list(row)
-            rec = {
-                "so": str(vals[cols["SO"]] or "").strip(),
-                "sod": str(vals[opt["SOD"]] or "").strip() if "SOD" in opt else "",
-                "ar": str(vals[opt["AR"]] or "").strip() if "AR" in opt else "",
-                "customer": str(vals[opt["客户名称"]] or "").strip() if "客户名称" in opt else "",
-                "amount_orig": common.to_number(vals[cols["回款额原币"]]),
-                "amount_local": common.to_number(vals[opt["回款额本币"]]) if "回款额本币" in opt else None,
-                "deliver_local": common.to_number(vals[opt["交付额本币"]]) if "交付额本币" in opt else None,
-                "hexiao_date": common.norm_date(vals[cols["核销日期"]]),
-                "shoukuan_date": common.norm_date(vals[opt["到账日期"]]) if "到账日期" in opt else None,
-                "status": str(vals[opt["核销状态"]] or "").strip() if "核销状态" in opt else "手动核销",
-                "currency": str(vals[opt["下单币种"]] or "").strip() if "下单币种" in opt else "人民币CNY",
-                "huikuan_type": "",
-                "channel": "duizhang",
-                "fee": 0.0,
-            }
-            if rec["ar"] and rec["ar"] in ar_meta:
-                meta = ar_meta[rec["ar"]]
-                rec["huikuan_type"] = meta.get("huikuan_type") or ""
-                rec["channel"] = _channel_for_type(rec["huikuan_type"])
-                rec["fee"] = meta.get("fee") or 0.0
-                rec["arrival_total"] = meta.get("amount_orig")
-                if not rec["currency"]:
-                    rec["currency"] = meta.get("currency") or "人民币CNY"
-            # 分笔：即使在对账表出现也 hold
-            if rec["channel"] == "fenbi":
-                pass
-            records.append(rec)
-        wb.close()
-
-    # 预存：仅在回款记录有类型且有明细时展开
-    if ar_meta and detail_path:
-        wb = openpyxl.load_workbook(str(detail_path), read_only=True, data_only=True)
-        ws = wb.active
-        rows_iter = ws.iter_rows(values_only=True)
-        headers = [str(c).strip() if c is not None else "" for c in next(rows_iter)]
-        cols = common.resolve_columns(
-            headers, "核销明细", ["回款记录NUM", "核销日期", "本次核销金额"], aliases
-        )
-        role = aliases.get("核销明细", {})
-        opt = {}
-        for k in ["币种", "汇率", "SO"]:
-            idx = common.fuzzy_find_col(headers, role.get(k, [k]))
-            if idx is not None:
-                opt[k] = idx
-        all_details = []
-        for row in rows_iter:
-            vals = list(row)
-            so_raw = str(vals[opt["SO"]] or "").strip() if "SO" in opt else ""
-            # 单元格里可能是「ZG SO2606…」或纯 SO 号
-            so_val = ""
-            for token in so_raw.replace("\n", " ").replace("、", " ").split():
-                t = token.strip()
-                if t.upper().startswith("SO") and len(t) >= 6:
-                    so_val = t
-                    break
-            if not so_val and so_raw.upper().startswith("SO"):
-                so_val = so_raw.split()[0]
-            all_details.append(
-                {
-                    "ar": str(vals[cols["回款记录NUM"]] or "").strip(),
-                    "hexiao_date": common.norm_date(vals[cols["核销日期"]]),
-                    "amount": common.to_number(vals[cols["本次核销金额"]]),
-                    "currency": str(vals[opt["币种"]] or "").strip() if "币种" in opt else "人民币CNY",
-                    "rate": common.to_number(vals[opt["汇率"]]) if "汇率" in opt else None,
-                    "so": so_val,
-                }
-            )
-        wb.close()
-        # 对预存 AR：展开过滤后的明细
-        existing_ars = {r.get("ar") for r in records}
-        for ar, meta in ar_meta.items():
-            if _channel_for_type(meta.get("huikuan_type") or "") != "yucun":
-                continue
-            if ar in existing_ars:
-                # 对账表不应有预存，若有也忽略对账行
-                records = [r for r in records if r.get("ar") != ar]
-            filtered = filter_yucun_details_by_date(
-                [d for d in all_details if d["ar"] == ar],
-                meta.get("hexiao_date") or meta.get("arrival_date"),
-            )
-            for d in filtered:
-                records.append(
-                    {
-                        "ar": ar,
-                        "so": d.get("so") or "",
-                        "sod": "",
-                        "customer": meta.get("customer") or "",
-                        "amount_orig": d.get("amount"),
-                        "currency": d.get("currency") or meta.get("currency") or "人民币CNY",
-                        "hexiao_date": d.get("hexiao_date"),
-                        "shoukuan_date": meta.get("arrival_date"),
-                        "status": meta.get("status") or "预存已核销",
-                        "huikuan_type": meta.get("huikuan_type") or "预存回款",
-                        "channel": "yucun",
-                        "fee": meta.get("fee") or 0.0,
-                        "arrival_total": meta.get("amount_orig"),
-                        "deliver_local": None,
-                    }
-                )
-
-    # 纯分笔：对账无行时从 AR 直接 hold
-    if ar_meta:
-        covered = {r.get("ar") for r in records}
-        for ar, meta in ar_meta.items():
-            if ar in covered:
-                continue
-            ch = _channel_for_type(meta.get("huikuan_type") or "")
-            if ch == "fenbi":
-                records.append(
-                    {
-                        "ar": ar,
-                        "so": "",
-                        "sod": "",
-                        "customer": meta.get("customer") or "",
-                        "amount_orig": meta.get("amount_orig"),
-                        "currency": meta.get("currency") or "人民币CNY",
-                        "hexiao_date": meta.get("hexiao_date"),
-                        "shoukuan_date": meta.get("arrival_date"),
-                        "status": meta.get("status") or "",
-                        "huikuan_type": meta.get("huikuan_type"),
-                        "channel": "fenbi",
-                        "fee": meta.get("fee") or 0.0,
-                    }
-                )
-    return records
-
-
 def serialize_result(result: dict) -> dict:
-    """JSON 友好。"""
-
     def fix(obj):
         if isinstance(obj, dt.date):
             return obj.isoformat()
@@ -984,18 +906,15 @@ def serialize_result(result: dict) -> dict:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="核销判定（三通道·三栏）")
+    ap = argparse.ArgumentParser(description="核销判定（单入口 · SOD 级 · 三栏）")
     ap.add_argument("--workspace", default=str(common.WORK))
-    ap.add_argument("--fixture", default="", help="离线夹具 JSON")
-    ap.add_argument("--key", default="day", help="夹具键 day/std")
+    ap.add_argument("--fixture", default="", help="离线夹具 JSON（v2: payments/sod_lines）")
     ap.add_argument("--ledger", default="", help="盈亏核算表副本（只读）")
     ap.add_argument("--rate", action="append", default=[], help="外币汇率 美元USD=7.0")
     ap.add_argument("--out", default="", help="判定结果 json 路径")
-    ap.add_argument("--synthetic", default="", help="合成记录 JSON（测试用）")
     ap.add_argument("--flow", default="", help="到账流转表副本（只读）；不给则扫 02_我的表副本/")
     ap.add_argument(
-        "--flow-complete",
-        action="store_true",
+        "--flow-complete", action="store_true",
         help="声明当天所有渠道的流转表都已给全；只有这时才判 E0（对不到账）",
     )
     args = ap.parse_args(argv)
@@ -1003,58 +922,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ws = Path(args.workspace)
     common.ensure_out_dirs(ws)
     rates = common.parse_rate_args(args.rate)
-    # 夹具 std 默认美元汇率常测 7.0 —— 仅当用户显式传入才用；测试会传
 
     ledger = None
     if args.ledger:
         ledger = LedgerIndex(Path(args.ledger))
     else:
-        # 工作区 02
-        cand = list((ws / "02_我的表副本").glob("*盈亏*")) if (ws / "02_我的表副本").is_dir() else []
+        cand = sorted((ws / "02_我的表副本").glob("*盈亏*")) if (ws / "02_我的表副本").is_dir() else []
+        cand = [p for p in cand if not p.name.startswith("~$")]
         if cand:
             ledger = LedgerIndex(cand[0])
         else:
             print(
                 "WARN: 未提供盈亏表（--ledger 或 02_我的表副本/*盈亏*）；"
-                "全部无法匹配的单将 hold E2，不会瞎填五列",
+                "全部单将 hold E2，不会瞎填五列",
                 file=sys.stderr,
             )
-            ledger = None  # 明确 None → classify 一律 E2，禁止空索引 auto
 
-    records: List[dict] = []
-    if args.synthetic:
-        records = json.loads(Path(args.synthetic).read_text(encoding="utf-8"))
-    elif args.fixture:
-        fix = load_fixture(Path(args.fixture))
-        records = records_from_fixture(fix, args.key)
-    else:
-        try:
-            records = load_excel_exports(ws) or []
-        except ValueError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 2
-        if not records:
-            # 兜底：01_智云导出/ 里放的是 .json 取数夹具时也认（测试/演练常这么放）
-            js = sorted((ws / "01_智云导出").glob("*.json")) if (ws / "01_智云导出").is_dir() else []
-            for j in js:
-                try:
-                    fix = load_fixture(j)
-                    if isinstance(fix, dict) and (fix.get("day") or fix.get("std")):
-                        records = records_from_fixture(fix, args.key)
-                        print(f"用取数夹具：{j.name}（key={args.key}）")
-                        break
-                except Exception:
-                    continue
-        if not records:
-            print(
-                "ERROR: 第 6 步跑不了 —— 01_智云导出/ 里没有可用的智云导出。\n"
-                "  需要：文件名含「回款」的回款记录 + 含「对账」的回款核销对账（预存类另需含「明细」的一份）。\n"
-                "  请她导出后放进 01_智云导出/ 再跑；不要改用别的文件凑合。",
-                file=sys.stderr,
-            )
-            return 2
+    try:
+        if args.fixture:
+            payments = payments_from_fixture(json.loads(Path(args.fixture).read_text(encoding="utf-8")))
+        else:
+            payments = load_exports(ws)
+        records = expand_payments(payments, rates)
+    except (InputError, ValueError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    except CoverageError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 3
 
-    # —— 到账流转表三键匹配（R2）：没有它，E0/E12 判不出来，清单也说不出"在流转表哪一行" ——
     import flow_ledger as FL
 
     flow = (
@@ -1074,17 +970,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     result = classify_records(records, ledger, rates)
     result["flow_sources"] = flow.sources
+    result["payment_count"] = len(payments)
     today = dt.date.today().strftime("%Y%m%d")
-    # 产出必须跟随 --workspace（此前写死 common.OUT_DIR，换工作区会把结果写回技能自带目录）
     out_path = Path(args.out) if args.out else (ws / "04_产出" / f"判定结果_{today}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        json.dumps(serialize_result(result), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        json.dumps(serialize_result(result), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     c = result["counts"]
-    print(f"判定完成 total={c['total']} auto={c['auto']} hold={c['hold']} exception={c['exception']}")
+    print(
+        f"判定完成 到账 {len(payments)} 笔 → 订单行 {c['total']} 条："
+        f"可填={c['auto']} 挂账={c['hold']} 异常={c['exception']}"
+    )
     print(f"E码分布: {result['e_code_dist']}")
     print(f"结果: {out_path}")
     return 0

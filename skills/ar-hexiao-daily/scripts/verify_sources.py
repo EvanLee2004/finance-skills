@@ -45,6 +45,10 @@ def collect(workspace: Path) -> List[dict]:
         if not base.is_dir():
             continue
         for p in sorted(base.rglob("*")):
+            # `备份/` 是 apply --in-place 写前自动存的，属于我们的产物不是她的源文件；
+            # 纳进来会让 apply 之后的 verify 必然报「新出现」→ 一句吓人的假警报。
+            if "备份" in p.parts:
+                continue
             if p.is_file() and not p.name.startswith("~$"):
                 out.append(
                     {
