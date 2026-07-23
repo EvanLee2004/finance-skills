@@ -160,11 +160,19 @@ def test_writeoff_over_arrival_is_e4():
 
 
 def test_deliver_over_arrival_is_e5_split_row():
-    """AR26070105 那类：整单关联但钱没到齐 → 提示拆行，不是超额核销。"""
+    """AR26070105 那类：整单关联但钱没到齐 → E5，给出**带数字的两行拆分方案**。
+
+    2026-07-24 明妹口述那笔（8729.35/8946.89/差 217.54）：已收行结账「是」、计提留空；
+    未收行填差额、结账「否」。程序要把这两行的具体金额算给她，别只给一句"插一行"。
+    """
     p = _pay(amount=8729.35, orders=[{"so": "SO1", "deliver": 8946.89}])
     recs = C.expand_payment(p, {})
     assert recs[0]["forced_code"] == "E5"
-    assert "插一行" in recs[0]["forced_reason"]
+    reason = recs[0]["forced_reason"]
+    assert "8729.35" in reason          # 已收额算给她
+    assert "217.54" in reason           # 未收额算给她
+    assert "结账填「是」" in reason and "结账填「否」" in reason
+    assert "计提留空" in reason          # 没回满不填计提
 
 
 def test_fx_missing_rate_e6():
@@ -356,13 +364,38 @@ def test_void_status_e7():
     assert r["code"] == "E7" and r["bucket"] == "exception"
 
 
-def test_excess_over_yingshou_e4():
+def test_excess_over_deliver_is_e4_not_over_yingshou():
+    """超额核销的上限用**智云交付额**，不是她表应收（2026-07-24 明妹口径）。
+
+    · 本次核销 500 > 智云交付 300 → 真超额 E4。
+    · 本次核销 500 == 智云交付 500、但她表应收才 50（旧值）→ **不是超额**，
+      是「交付额变大了」→ 照样按智云额填、顶个 ⚠（见下一条），绝不误报 E4。
+    """
     led = _led({1: {"so": "SO1", "sod": "", "yingshou": 100.0}})
     r = C.classify_one(_rec("SO1", "SOD1", 100.0), led, {}, 0.0, 2026)
     assert r["bucket"] == "auto"
-    led2 = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 50.0}})
-    r2 = C.classify_one(_rec("SO1", "SOD1", 500.0), led2, {}, 0.0, 2026)
-    assert r2["code"] == "E4"
+
+    over = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 50.0}})
+    r_over = C.classify_one(_rec("SO1", "SOD1", 500.0, deliver_local=300.0), over, {}, 0.0, 2026)
+    assert r_over["code"] == "E4"
+
+    stale = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 50.0}})
+    r_stale = C.classify_one(_rec("SO1", "SOD1", 500.0, deliver_local=500.0), stale, {}, 0.0, 2026)
+    assert r_stale["bucket"] == "auto"        # 核销==交付，正常
+    assert r_stale["five_cols"]["回款明细"] == 500.0
+
+
+def test_delivery_amount_changed_flags_warning():
+    """2026-07-24 明妹口述 107/422：交付额中途变过，她表里应收还是旧值。
+    程序靠 SOD 命中那行后，要按**智云额**填、并顶个 ⚠ 让她扫一眼，不能闷声填。
+    这是「让他动脑子检查交付额、别以我表里为准」的落码。"""
+    # 她表：SO1 那行应收=3242（旧值），智云这次交付/核销都是 408
+    led = _led({5: {"so": "SO1", "sod": "SOD1", "yingshou": 3242.0}})
+    r = C.classify_one(_rec("SO1", "SOD1", 408.0, deliver_local=408.0), led, {}, 0.0, 2026)
+    assert r["bucket"] == "auto"
+    assert r["five_cols"]["回款明细"] == 408.0     # 按智云额填，不是她表 3242
+    assert "⚠" in r["reason"]
+    assert "3242" in r["reason"] and "408" in r["reason"]
 
 
 def test_flow_signals():

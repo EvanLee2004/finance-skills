@@ -345,12 +345,15 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 f"超额核销：本次核销合计 {total_h:.2f} > 到账 {arrival:.2f}，"
                 "智云数据可能有问题，先找销售核对",
             )]
+        received = round(arrival, 2)
+        unpaid = round(total_h - arrival, 2)
         return [_hold(
             p, "E5",
-            f"这单没回满：交付合计 {total_h:.2f}，实际只到账 {arrival:.2f}，"
-            f"差 {total_h - arrival:.2f}。按你的做法要在这单上方插一行、"
-            "把应收金额拆成「已收」和「未收」两行，未收那行结账填「否」。"
-            "拆完再说「重扫挂账」。",
+            f"这单没回满：这次到账 {received:.2f}，这些单一共该收 {total_h:.2f}，"
+            f"还差 {unpaid:.2f} 没到。把没收全的那单拆成两行——"
+            f"①【已收行】回款明细填 {received:.2f}、是否结账填「是」、计提留空（没回满先别填计提）；"
+            f"②【未收行】在它上方新增一行，应收填 {unpaid:.2f}、是否结账填「否」、其余留空。"
+            "拆完说「重扫挂账」。",
         )]
 
     out: List[dict] = []
@@ -379,7 +382,10 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     p, "E5",
                     f"{so} 本次核销 {h:.2f}，但它下面的 SOD 金额凑不出唯一组合"
                     f"（SOD 合计 {round(sum(float(x['deliver']) for x in lines), 2)}）。"
-                    f"候选：{cand}。你指一下这次核的是哪几个 SOD。",
+                    f"候选：{cand}。你指一下这次核的是哪几个 SOD；"
+                    f"若你指的那个 SOD 交付额比 {h:.2f} 大，就是只回了一部分——"
+                    "把它拆成两行：已收行回款明细填本次核销额、结账「是」、计提留空，"
+                    "上方新增未收行填差额、结账「否」。",
                     so=so,
                 ))
             else:
@@ -732,17 +738,23 @@ def classify_one(
         return result
 
     snap = ledger.row_snapshot.get(row, {})
-
-    # 超额：本次本币 > 该行应收（人民币）
     yingshou = common.to_number(snap.get("yingshou"))
+    deliver = common.to_number(rec.get("deliver_local"))
+
+    # 超额核销：本次本币 > **智云这单交付额**（不是她表应收）。
+    # 2026-07-24 明妹口径：判超额的上限是智云交付额，别以她表应收为准 —— 应收可能是旧值，
+    # 交付额中途变大时（初始 1 → 结算 2），拿旧应收当上限会把「本该填的 2」误报成超额。
+    # 只有拿不到智云交付额时，才退回用应收当兜底上限。
+    ceiling = deliver if deliver is not None else yingshou
     if (
-        yingshou is not None
+        ceiling is not None
         and common.is_cny(rec.get("currency") or "")
-        and float(local) > float(yingshou) + max(thr, TOL)
+        and float(local) > float(ceiling) + max(thr, TOL)
     ):
         result["code"] = "E4"
+        src = "智云这单交付额" if deliver is not None else "你表里应收"
         result["reason"] = (
-            f"这行应收 {yingshou}，本次要记 {local}，比应收还多，不正常"
+            f"本次核销 {local} 比{src} {round(float(ceiling), 2)} 还多，不正常，先找销售核对"
         )
         return result
 
@@ -766,7 +778,7 @@ def classify_one(
     # 反例（她留空计提但结账仍填「是」）：SO26020068 回 8729.35 而该 SOD 交付 8946.89；
     #   SO26030424 回 199.78 而该 SOD 交付 402.26。
     # 所以「结账」和「计提」是两个判据：结账看这一行的钱到没到，计提看整单回满没有。
-    deliver = common.to_number(rec.get("deliver_local"))
+    # deliver = 智云该 SOD 交付额，已在上面（超额判据）取过。
     paid_full = deliver is not None and abs(local_f - float(deliver)) <= max(thr, TOL)
 
     result["five_cols"] = {
@@ -777,10 +789,25 @@ def classify_one(
         "收款方式": way,
         "实收SOD": sod or snap.get("sod") or None,
     }
+    # ── 交付额变化提醒（2026-07-24 明妹原话："要让他动脑子检查交付额，别以我表里的为准")──
+    # 命中行后，若**智云结算额**（本次核销/交付，= amount_orig）和她表里那行的**应收金额**
+    # 对不上，一律顶一个 ⚠ 到「怎么办」。以前只有 ratio 消歧路径会提醒，靠 SOD / SO 唯一行
+    # 命中的（她已手动改过应收、或压根没写 SOD）就闷声按智云额填、不吭声——她要的是**每一笔
+    # 都被明确检查一次**。写进去的仍是智云额（回款明细/计提都用 local，见上），只是多一句让她扫。
+    # align_note 已经说过（比例差）就不重复。
+    disc_note = ""
+    if not align_note and yingshou is not None and amount_orig is not None:
+        if abs(float(amount_orig) - float(yingshou)) > max(thr, TOL):
+            disc_note = (
+                f"⚠ 这单智云交付/核销额 {round(float(amount_orig), 2)} 与你表里应收 "
+                f"{round(float(yingshou), 2)} 对不上（交付额中途可能变过），已按**智云额**填，填前扫一眼"
+            )
+
     result["bucket"] = "auto"
     result["code"] = ""
+    tail = align_note or disc_note
     result["reason"] = f"{rec.get('match_basis') or '判定'} · 定位={how}" + (
-        f"；{align_note}" if align_note else ""
+        f"；{tail}" if tail else ""
     )
     result["current_values"] = {
         "计提": snap.get("jiti"),
@@ -838,29 +865,43 @@ def classify_records(
     }
 
 
+# 「没交付进表」的挂起码：只有这些才让一笔到账的流转状态掉到「部分」。
+# E5（部分核销）不在内 —— 钱已全核落地、她拆行即算更新（2026-07-24 明妹口径）。
+_FLOW_WAIT_CODES = {"E2", "E3"}
+
+
+def _flow_ready(item: dict) -> str:
+    """这笔 SOD 今天能不能在盈亏表里更新：ready=能（auto/拆行/指认）；wait=不能（没交付/异常）。"""
+    if item.get("bucket") == "auto":
+        return "ready"
+    if item.get("bucket") == "hold" and (item.get("code") or "") not in _FLOW_WAIT_CODES:
+        return "ready"  # E5 拆行 / E8 指认：行在表里，她更得动
+    return "wait"       # E2/E3 没交付进表；exception 数据问题 → 今天都更新不了
+
+
 def build_ar_summary(results: List[dict]) -> List[dict]:
     """按 AR 汇总，派生到账流转表「是否更新应收款」三态（是 / 部分 / 空白）。"""
     try:
         from flow_ledger import derive_flow_status
     except Exception:  # pragma: no cover
         def derive_flow_status(states):
-            done = sum(1 for s in states if s == "auto")
-            if not states or done == 0:
+            ready = sum(1 for s in states if s in ("ready", "auto"))
+            if not states or ready == 0:
                 return ""
-            return "是" if done == len(states) else "部分"
+            return "是" if ready == len(states) else "部分"
 
     by_ar: Dict[str, List[dict]] = {}
     for r in results:
         by_ar.setdefault(r.get("ar") or "-", []).append(r)
     out = []
     for ar, items in by_ar.items():
-        states = [i["bucket"] for i in items]
+        flow_states = [_flow_ready(i) for i in items]
         out.append({
             "ar": ar,
             "so_count": len({i.get("so") for i in items if i.get("so")}),
             "行数": len(items),
-            "buckets": states,
-            "流转表_是否更新应收款_建议": derive_flow_status(states),
+            "buckets": [i["bucket"] for i in items],
+            "流转表_是否更新应收款_建议": derive_flow_status(flow_states),
             "flow_locate": next((i.get("flow_locate") for i in items if i.get("flow_locate")), ""),
             "待处理SO": sorted({i.get("so") for i in items if i["bucket"] != "auto" and i.get("so")}),
         })

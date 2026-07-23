@@ -87,10 +87,14 @@ def test_suggest_order_cell_appends_without_dup():
 # ---------- 流转表三态派生 ----------
 
 def test_derive_flow_status_tri_state():
+    # 新词表：ready=行在表里她更得动；wait=没交付进表/异常，今天更不了
+    assert FL.derive_flow_status(["ready", "ready"]) == "是"
+    assert FL.derive_flow_status(["ready", "wait"]) == "部分"
+    assert FL.derive_flow_status(["wait", "wait"]) == ""
+    assert FL.derive_flow_status([]) == ""
+    # 兼容旧入参：历史上传 bucket，"auto" 仍按 ready 计
     assert FL.derive_flow_status(["auto", "auto"]) == "是"
     assert FL.derive_flow_status(["auto", "hold"]) == "部分"
-    assert FL.derive_flow_status(["hold", "exception"]) == ""
-    assert FL.derive_flow_status([]) == ""
 
 
 def test_flow_status_policy_no_formula_when_empty():
@@ -119,13 +123,36 @@ def test_case_id_is_ar_times_so():
 
 
 def test_ar_summary_marks_partial():
+    # 有的能填(auto)、有的**没交付进表**(E2) → 部分
     results = [
         {"ar": "AR1", "so": "SO1", "bucket": "auto"},
-        {"ar": "AR1", "so": "SO2", "bucket": "hold"},
+        {"ar": "AR1", "so": "SO2", "bucket": "hold", "code": "E2"},
     ]
     s = C.build_ar_summary(results)[0]
     assert s["流转表_是否更新应收款_建议"] == "部分"
     assert s["待处理SO"] == ["SO2"]
+
+
+def test_ar_summary_e5_partial_writeoff_is_yes():
+    """2026-07-24 明妹口径 + 实测 AR26070112：一笔到账里有「部分核销」(E5) 的单，
+    钱已全核落地、她拆行即算更新 → 流转表应是「是」，不能因 E5 掉成「部分」。
+    这是 E5 被当成"没更新"的老 bug 的防回归。"""
+    results = [
+        {"ar": "AR1", "so": "SO1", "bucket": "auto"},
+        {"ar": "AR1", "so": "SO2", "bucket": "hold", "code": "E5"},
+    ]
+    s = C.build_ar_summary(results)[0]
+    assert s["流转表_是否更新应收款_建议"] == "是"
+
+
+def test_ar_summary_all_not_delivered_is_blank():
+    """整笔到账全是没交付进表(E2/E3) → 一个都更不了 → 空白。"""
+    results = [
+        {"ar": "AR1", "so": "SO1", "bucket": "hold", "code": "E3"},
+        {"ar": "AR1", "so": "SO2", "bucket": "hold", "code": "E2"},
+    ]
+    s = C.build_ar_summary(results)[0]
+    assert s["流转表_是否更新应收款_建议"] == ""
 
 
 # ---------- 台账：多 SO 不再被吞 ----------

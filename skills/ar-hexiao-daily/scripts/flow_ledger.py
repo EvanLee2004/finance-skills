@@ -222,16 +222,31 @@ class FlowLedger:
 
 def derive_flow_status(so_states: Sequence[str]) -> str:
     """
-    到账流转表「是否更新应收款」三态（李尚 business-rules §9 + 明妹 7-23 录音）：
-    全部 SO 已同步 → 是；部分 → 部分；一个都没有 → 空白（空字符串）。
+    到账流转表「是否更新应收款」三态（李尚 business-rules §9 + 明妹 7-23 录音）。
+
+    传进来每个 state 是这笔到账下某个 SOD 今天**能不能在她盈亏表里更新**：
+      · "ready" —— 订单已在她表里，这次能填（auto），或只是要拆行/指认（E5/E8）——她照样更得动
+      · "wait"  —— 订单还没交付进表（E2/E3），或数据有问题（异常），今天更新不了
+
+    规则：全部 ready → 是；一个 ready 都没有 → 空白；有的 ready 有的 wait → 部分。
+
+    ⚠ 2026-07-24 关键修正（明妹 7-23 录音原话："部分是指某些订单没交付、我没法更新"）：
+      **「部分核销」(E5) 不再算 wait**。她那笔到账的钱已经全部核销落地，只是要在表里
+      把一个订单拆成「已收/未收」两行——这算她**更新了**。以前把 E5 也算成"没更新"，
+      导致一笔明明全核掉的到账被误标「部分」（实测 AR26070112）。
+      只有「订单没交付进表」(E2/E3) 才让这笔到账变「部分」。
+      兼容旧入参：历史上传的是 bucket("auto"/"hold")，"auto" 仍按 ready 计。
     """
+    def _ready(s: str) -> bool:
+        return s in ("ready", "auto")
+
     states = [s for s in so_states if s]
     if not states:
         return ""
-    done = sum(1 for s in states if s == "auto")
-    if done == 0:
+    ready = sum(1 for s in states if _ready(s))
+    if ready == 0:
         return ""
-    if done == len(states):
+    if ready == len(states):
         return "是"
     return "部分"
 
