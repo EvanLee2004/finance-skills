@@ -344,6 +344,34 @@ def test_prepaid_type_no_longer_forces_chongyushou():
     assert r["five_cols"]["收款方式"] == "汇"
 
 
+def test_prepaid_partial_status_still_settles_each_sod():
+    """2026-07-24 明妹「核销状态判断逻辑澄清会」：回款记录整笔「预存部分核销」= 那笔预存
+    余额没花完（6300 核 6090 剩 210），跟每个小单收没收满**无关**。每个已核销+已交付的单
+    → 结账「是」、计提按本单是否收满判。旧版拿 status∈SETTLED 判结账，把 6 个已收满的
+    预存视频单全误判「否」（对明妹真答案实测 146/152，修后 152/152）。"""
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 420.0}})
+    r = C.classify_one(
+        _rec("SO1", "SOD1", 420.0, huikuan_type="预存回款", status="预存部分核销"),  # 本次核销=交付420=收满
+        led, {}, 0.0, 2026,
+    )
+    assert r["bucket"] == "auto"
+    assert r["five_cols"]["是否结账"] == "是"
+    assert r["five_cols"]["计提"] == 420.0
+
+
+def test_settle_yes_but_jiti_empty_when_not_full():
+    """8块/10块 例（明妹澄清会原话）：本次核销 8 < 交付 10 → 这笔到账的任务做完=结账「是」，
+    但整单没回满 → 计提留空（2 块挂应收）。结账与计提是两个独立判据。"""
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 10.0}})
+    r = C.classify_one(
+        _rec("SO1", "SOD1", 8.0, deliver_local=10.0),  # 本次核销 8、交付 10 → 没回满
+        led, {}, 0.0, 2026,
+    )
+    assert r["bucket"] == "auto"
+    assert r["five_cols"]["是否结账"] == "是"
+    assert r["five_cols"]["计提"] is None
+
+
 def test_cross_year_only_after_ledger_miss():
     """2025 的单**在表里有行**就正常填；只有表里找不到才判 E3。"""
     led = _led({1: {"so": "SO25120734", "sod": "", "yingshou": 52200.0}})

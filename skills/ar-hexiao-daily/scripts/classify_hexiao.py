@@ -624,6 +624,10 @@ def classify_one(
         "flow_locate": rec.get("flow_locate") or "",
         "flow_matched_by": rec.get("flow_matched_by") or "",
         "flow_order_suggest": rec.get("flow_order_suggest") or "",
+        "flow_file": rec.get("flow_file") or "",
+        "flow_sheet": rec.get("flow_sheet") or "",
+        "flow_row_no": rec.get("flow_row_no"),
+        "flow_order_existing": rec.get("flow_order_existing") or "",
         "huikuan_type": rec.get("huikuan_type") or "",
         "status": rec.get("status") or "",
         "match_basis": rec.get("match_basis") or "",
@@ -758,7 +762,6 @@ def classify_one(
         )
         return result
 
-    settled = (rec.get("status") or "") in common.SETTLED
     r_time = common.receipt_time(
         common.norm_date(rec.get("shoukuan_date")), common.norm_date(rec.get("hexiao_date"))
     )
@@ -769,22 +772,24 @@ def classify_one(
     )
     local_f = round(float(local), 2)
 
-    # ── 计提金额的判据（2026-07-23 明妹原话确认）──────────────────────
-    # 「一个订单的金额分成多次回款，**只有回款明细金额加起来等于交付金额之后**，
-    #   才可以填写计提金额」
-    #
-    # 注意基准是**智云的交付金额**，不是她表里的应收金额 —— 实测 SO26040322 行2567：
-    #   她表应收 488.64 / 回款明细 477.61 / 智云交付 477.61 → 她照样填了计提 477.61。
-    # 反例（她留空计提但结账仍填「是」）：SO26020068 回 8729.35 而该 SOD 交付 8946.89；
-    #   SO26030424 回 199.78 而该 SOD 交付 402.26。
-    # 所以「结账」和「计提」是两个判据：结账看这一行的钱到没到，计提看整单回满没有。
+    # ── 结账 / 计提（2026-07-24 明妹「核销状态判断逻辑澄清会」定稿，任何 AI 不得回退）─────
+    # 【结账】= 这笔到账给这个 SOD 下发的「任务」做完没有。任务 = 智云本次核销这个单的金额。
+    #   能走到这里（bucket=auto）的行 = 核销命中 + 已交付进表 → 任务能做且已做 → 一律「是」。
+    #   ⚠ **绝不能拿「回款记录整笔」的核销状态判每个小单**：
+    #     “预存部分核销”只是说那笔预存余额没花完（实测 6300 核 6090、剩 210 挂预收），
+    #     跟这个单本身收没收满、任务做没做完**毫无关系**。旧版拿 status∈SETTLED 判结账，
+    #     把 6 个已收满的预存视频单全误判成「否」（2026-07-24 对明妹真答案实测：146/152→修后应全对）。
+    #   （结账=否 只属于“没交付/没做任务”的行，那是 E2/E3，早已挂起、根本走不到这里。）
+    # 【计提】= 只看这个 SOD 整单回满没有：本次核销 == 智云交付额 → 填，否则留空。
+    #   基准是**智云交付额**不是她表应收（SO26040322 实证）。结账与计提是两个独立判据：
+    #   本次核销 8 / 交付 10 → 结账「是」、计提留空、2 块挂应收（8块/10块 例，明妹澄清会原话）。
     # deliver = 智云该 SOD 交付额，已在上面（超额判据）取过。
     paid_full = deliver is not None and abs(local_f - float(deliver)) <= max(thr, TOL)
 
     result["five_cols"] = {
-        "计提": local_f if (settled and paid_full) else None,
+        "计提": local_f if paid_full else None,
         "回款明细": local_f,
-        "是否结账": "是" if settled else "否",
+        "是否结账": "是",
         "收款时间": r_time.isoformat() if r_time else None,
         "收款方式": way,
         "实收SOD": sod or snap.get("sod") or None,

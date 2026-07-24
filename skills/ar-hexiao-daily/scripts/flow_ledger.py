@@ -13,7 +13,7 @@
   2. 到账日期 + （净额 + 手续费）+ 公司名  ← 微信/支付宝把客户支付额拆成净额与手续费
   3. 到账日期 + 金额（任一口径），公司名对不上 → **弱命中**，仍要人确认
 - 命中 0 → E0；命中 >1 → E12；命中 1 → 给出行号与建议单号。
-- **只读**：本模块从不写流转表。
+- 匹配只读；**写入**见 `apply_flow.py`（确认后、仅强三键唯一命中）。
 """
 
 from __future__ import annotations
@@ -257,7 +257,7 @@ def flow_status_policy(status: str) -> dict:
     - 全部订单没检索到 → 「是否更新」**留空**，**不要公式**
     - 全部订单检索到并更新 → 填「是」；表若有惯用公式可套公式（本程序建议字面「是」）
     - 部分更新 → 填「部分」，**颜色标出**哪些 SO 更了 / 没更
-    程序第一版只给建议，不自动写她的流转表。
+    日清展示建议；确认后安全子集可由 apply_flow 写入。
     """
     s = (status or "").strip()
     if s in ("", "（空白）", "空白", "空"):
@@ -341,14 +341,28 @@ def annotate_records(
             rec["flow_hits"] = None  # 不判 E0：可能只是这个渠道的表没给
             rec["flow_matched_by"] = "未在现有流转表中找到(可能缺该渠道的表)"
             rec["flow_locate"] = ""
+            rec["flow_file"] = ""
+            rec["flow_sheet"] = ""
+            rec["flow_row_no"] = None
             continue
         rec["flow_hits"] = hit["hits"]
         rec["flow_matched_by"] = hit["matched_by"]
         rec["flow_locate"] = FlowLedger.locate_text(hit)
-        if hit["hits"] == 1 and rec.get("so"):
-            rec["flow_order_suggest"] = FlowLedger.suggest_order_cell(
-                [rec.get("so")], hit["rows"][0].get("order_cell", "")
-            )
+        if hit["hits"] == 1 and hit.get("rows"):
+            r0 = hit["rows"][0]
+            rec["flow_file"] = r0.get("file") or ""
+            rec["flow_sheet"] = r0.get("sheet") or ""
+            rec["flow_row_no"] = r0.get("row_no")
+            rec["flow_order_existing"] = r0.get("order_cell") or ""
+            so = str(rec.get("so") or "").strip()
+            if so:
+                rec["flow_order_suggest"] = FlowLedger.suggest_order_cell(
+                    [so], rec["flow_order_existing"]
+                )
+        else:
+            rec["flow_file"] = ""
+            rec["flow_sheet"] = ""
+            rec["flow_row_no"] = None
     return records
 
 

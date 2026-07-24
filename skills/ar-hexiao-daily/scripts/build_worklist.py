@@ -151,7 +151,12 @@ def collect_rows(result: dict, checked: Optional[dict]) -> List[List[Any]]:
     return rows
 
 
-def build_workbook(result: dict, checked: Optional[dict], out_path: Path) -> Path:
+def build_workbook(
+    result: dict,
+    checked: Optional[dict],
+    out_path: Path,
+    flow_plan: Optional[dict] = None,
+) -> Path:
     import openpyxl
     from openpyxl.styles import Alignment, Font, PatternFill
 
@@ -164,23 +169,31 @@ def build_workbook(result: dict, checked: Optional[dict], out_path: Path) -> Pat
     n = {k: 0 for k in STATUS}
     for r in collect_rows(result, checked):
         n[r[1]] = n.get(r[1], 0) + 1
+    fc = (flow_plan or {}).get("counts") or {}
+    m_write = int(fc.get("write") or 0)
+    m_hand = int(fc.get("hand") or 0)
     lines = [
         ["《核销日清》—— 一份就够，别的表都不用开"],
         [""],
         [f"这次一共 {result.get('payment_count', '?')} 笔到账，拆成 {counts.get('total', 0)} 个订单行。"],
         [""],
-        [f"① 今天要填     {n.get('今天要填', 0):>4} 行  ← 只有这些要动手"],
+        ["【盈亏明细】"],
+        [f"① 今天要填     {n.get('今天要填', 0):>4} 行  ← 确认后程序可写"],
         [f"② 已填过·跳过  {n.get('已填过·跳过', 0):>4} 行  ← 不用管"],
         [f"③ 冲突·需你定  {n.get('冲突·需你定', 0):>4} 行  ← 你看一眼定个方向"],
         [f"④ 挂账待办     {n.get('挂账待办', 0):>4} 行  ← 今天填不了，看「怎么办」"],
         [f"⑤ 异常         {n.get('异常', 0):>4} 行  ← 数据不对劲，先别填"],
         [""],
+        ["【到账流转】"],
+        [f"⑥ 确认后将自动写  {m_write:>4} 笔  ← 强三键唯一命中（单号+是否更新）"],
+        [f"⑦ 须你手填      {m_hand:>4} 笔  ← 弱命中/对不上/多命中，见「流转表怎么填」"],
+        [""],
         ["怎么用："],
         ["  1. 翻到《今日清单》，按「状态」列筛「今天要填」。"],
         ["  2. 一行一个单号。拿「怎么找到这行」去盈亏『明细』筛出那一行。"],
-        ["  3. 照「应填_xxx」几列填进去；「当前_xxx」是你表里现在的值，可对照。"],
-        ["  4. 「冲突·需你定」那几行看「差异(一眼扫)」，决定按哪个来。"],
-        ["  5. 都看完了跟我说「确认」，我再把「今天要填」的写进你的副本。"],
+        ["  3. 照「应填_xxx」几列对照；冲突行看「差异」。"],
+        ["  4. 翻《流转表怎么填》：写入方式=自动 的确认后程序写；=手填 的你自己填。"],
+        ["  5. 都看完了跟我说「确认」，我再统一写：先盈亏明细，再流转可写笔。"],
         [""],
         ["※ 这份只是清单，程序还没动你的任何表。"],
         ["※ 智云永远不写。"],
@@ -209,9 +222,12 @@ def build_workbook(result: dict, checked: Optional[dict], out_path: Path) -> Pat
     for col, w in (("A", 16), ("B", 14), ("C", 46), ("D", 14), ("E", 14), ("F", 16), ("T", 52), ("U", 40)):
         ws.column_dimensions[col].width = w
 
-    # ── 按到账汇总（流转表「是否更新应收款」建议）──────────
+    # ── 按到账汇总（流转表建议 + 写入方式）──────────
     summary = result.get("ar_summary") or []
-    if summary:
+    flow_by_ar = {
+        (it.get("ar") or ""): it for it in ((flow_plan or {}).get("items") or [])
+    }
+    if summary or flow_by_ar:
         try:
             from flow_ledger import flow_status_policy
         except Exception:  # pragma: no cover
@@ -220,21 +236,34 @@ def build_workbook(result: dict, checked: Optional[dict], out_path: Path) -> Pat
 
         wsum = wb.create_sheet("流转表怎么填")
         wsum.append([
-            "到账号(AR)", "本笔关联SO数", "订单行数", "『是否更新应收款』建议填",
-            "填法", "公式策略", "颜色标注", "还没处理完的SO", "流转表定位", "说明",
+            "到账号(AR)", "写入方式", "本笔关联SO数", "订单行数", "『是否更新应收款』建议填",
+            "单号建议", "填法", "公式策略", "颜色标注", "还没处理完的SO", "流转表定位", "说明",
         ])
         for c in wsum[1]:
             c.font = Font(bold=True)
-        for s in summary:
-            raw = s.get("流转表_是否更新应收款_建议") or ""
+        rows_src = summary if summary else [
+            {"ar": ar, "so_count": len(it.get("so_list") or []), "行数": 0,
+             "流转表_是否更新应收款_建议": it.get("updated_suggest"),
+             "flow_locate": it.get("flow_locate"), "待处理SO": []}
+            for ar, it in flow_by_ar.items()
+        ]
+        for s in rows_src:
+            ar = s.get("ar") or ""
+            fp = flow_by_ar.get(ar) or {}
+            verdict = fp.get("verdict") or ""
+            mode = "自动" if verdict == "write" else ("手填" if verdict == "hand" else (verdict or "手填"))
+            raw = s.get("流转表_是否更新应收款_建议")
+            if raw is None:
+                raw = fp.get("updated_suggest") or ""
             pol = flow_status_policy(raw)
             wsum.append([
-                s.get("ar") or "", s.get("so_count") or 0, s.get("行数") or 0,
-                raw if raw else "（空白）",
+                ar, mode, s.get("so_count") or 0, s.get("行数") or 0,
+                (raw if raw else "（空白）"),
+                fp.get("order_suggest") or "",
                 pol.get("填法") or "", pol.get("公式策略") or "", pol.get("颜色标注") or "",
                 " ".join(s.get("待处理SO") or []),
-                s.get("flow_locate") or "",
-                pol.get("人话") or ("已完成" if raw == "是" else "还要做（空或部分都要重更）"),
+                s.get("flow_locate") or fp.get("flow_locate") or "",
+                fp.get("reason") or pol.get("人话") or ("确认后自动写" if mode == "自动" else "须手填"),
             ])
         wsum.freeze_panes = "A2"
 
@@ -258,6 +287,7 @@ def main(argv=None) -> int:
              "给了才分得出「今天要填 / 已填过跳过 / 冲突」",
     )
     ap.add_argument("--out", default="", help="清单 xlsx 路径")
+    ap.add_argument("--flow-plan", default="", help="流转写入计划_校验后.json；默认取 04_产出 最新")
     args = ap.parse_args(argv)
 
     ws = Path(args.workspace)
@@ -281,24 +311,45 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
 
+    flow_plan = None
+    fp_path = Path(args.flow_plan) if args.flow_plan else _latest(out_dir, "流转写入计划*.json")
+    if fp_path and Path(fp_path).is_file():
+        flow_plan = json.loads(Path(fp_path).read_text(encoding="utf-8"))
+    else:
+        # 无计划时现场生成一次（不写用户表）
+        try:
+            import build_flow_plan as BFP
+            flow_plan = BFP.build_plan(result)
+            auto_out = out_dir / "流转写入计划_校验后.json"
+            auto_out.write_text(json.dumps(flow_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            fp_path = auto_out
+        except Exception as e:
+            print(f"WARN: 无法生成流转计划：{e}", file=sys.stderr)
+
     today = dt.date.today().strftime("%Y%m%d")
     out_path = Path(args.out) if args.out else out_dir / f"核销日清_{today}.xlsx"
-    build_workbook(result, checked, out_path)
+    build_workbook(result, checked, out_path, flow_plan=flow_plan)
 
     rows = collect_rows(result, checked)
     tally: Dict[str, int] = {}
     for r in rows:
         tally[r[1]] = tally.get(r[1], 0) + 1
+    fc = (flow_plan or {}).get("counts") or {}
     print("《核销日清》已生成：" + " / ".join(f"{k} {v}" for k, v in tally.items()))
+    print(
+        f"流转：确认后自动写 {fc.get('write', 0)} · 须手填 {fc.get('hand', 0)} · 跳过 {fc.get('skip', 0)}"
+    )
     print(f"结果: {out_path}")
 
     (out_dir / f"运行报告_{today}.txt").write_text(
         f"清单 {out_path.name}\n"
         f"判定 {result_path.name}\n"
         f"校验 {checked_path.name if checked else '(未跑 validate_plan)'}\n"
+        f"流转计划 {Path(fp_path).name if fp_path else '(无)'}\n"
         f"到账笔数 {result.get('payment_count')}\n"
         f"计数 {result.get('counts')}\nE码 {result.get('e_code_dist')}\n"
-        f"清单分布 {tally}\n",
+        f"清单分布 {tally}\n"
+        f"流转 counts {fc}\n",
         encoding="utf-8",
     )
     return 0
