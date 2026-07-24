@@ -6,6 +6,12 @@
   按身份证号把同一人多张发票的「合计金额」求和 → 与应付金额比 →
   实习生/外国人豁免、≤800放行、>800缺票或未开票标黄 → 出三表（主核对表/不付名单/可付名单）。
 
+v1.1（2026-07 亮晶真实验收补洞）：
+  - 外国人三信号：供应商英文名（去括号昵称）/ 开户名英文 / 证件为护照号
+  - 匹配：身份证主 + 姓名兜底（个体户税号≠身份证，如张佳音）
+  - 公司名启发式：供应商含「有限公司」等 → 标黄-待人工（疑对公）
+  - 输出增加：开户名、匹配方式，便于人眼复核
+
 用法：
   python3 check.py --inspect [--input-dir DIR]      # 只认文件、看表头，不跑
   python3 check.py --list 清单.xlsx --invoice 发票.xlsx [--out 结果.xlsx]
@@ -42,8 +48,14 @@ CONFIG = {
     "THRESHOLD": 800.0,        # 开票门槛：应付 > 此值才要求开票
     "TOLERANCE": 1.0,          # 容差：|开票总额-应付| <= 此值 视为票款一致
     "INTERN_KEYWORDS": ["Intern", "实习"],
+    "COMPANY_KEYWORDS": ["有限公司", "有限责任", "股份公司", "股份有限"],
 }
-HIDE_DEFAULT = ["开户名", "账号", "开户行", "开户支行", "电话", "支付渠道", "支付日期", "身份证号"]
+
+# 输出主表展示列（开户名展示便于判外籍/代收；证件号/银行账号等仍隐藏）
+OUT_COLS = [
+    "供应商姓名", "开户名", "应付金额", "备注",
+    "开票总额", "差额", "状态", "匹配方式", "核对提示",
+]
 
 
 def log(msg):
@@ -67,6 +79,8 @@ _LIST_ALIAS_DEFAULT = {
     "应付金额": ["应付金额", "应付", "金额", "应付款"],
     "备注": ["备注", "类型", "身份", "说明"],
     "身份证号": ["身份证号/护照号", "身份证号", "身份证", "证件号", "护照号", "纳税人识别号"],
+    "开户名": ["开户名", "收款人姓名", "账户名", "户名"],
+    "支付渠道": ["支付渠道", "付款方式", "支付方式"],
 }
 _INV_ALIAS_DEFAULT = {
     "开票人姓名": ["销售方信息名称", "开票人", "销售方名称", "姓名"],
@@ -99,15 +113,22 @@ def load_rules():
             CONFIG["TOLERANCE"] = float(num.group())
         elif key == "实习生关键字" and val and "|" not in val:
             CONFIG["INTERN_KEYWORDS"] = [w.strip() for w in re.split(r"[、,，/]", val) if w.strip()]
+        elif key == "公司关键字" and val and "|" not in val and "—" not in val and "参数" not in val:
+            kws = [w.strip() for w in re.split(r"[、,，/]", val) if w.strip()]
+            if kws:
+                CONFIG["COMPANY_KEYWORDS"] = kws
 
 
 # ----------------- 工具 -----------------
 def norm_id(v):
-    """身份证号归一化：去空格、大写（末位 x→X）、去不可见字符。空→''。"""
+    """证件号归一化：去空格、大写（末位 x→X）、去不可见字符。空→''。"""
     if v is None:
         return ""
     s = str(v).strip().upper()
     s = re.sub(r"\s+", "", s)
+    # Excel 可能把长数字读成 float
+    if re.fullmatch(r"\d+\.0", s):
+        s = s[:-2]
     return s
 
 
@@ -130,9 +151,101 @@ def to_number(v):
         return None
 
 
+def strip_name_noise(name):
+    """去掉括号昵称/语种标注：'TA THI MINH HUYEN（明玄）'→'TA THI MINH HUYEN'；
+       '流畅（阿拉伯语）'→'流畅'；'张丽娟（西班牙语)'→'张丽娟'。"""
+    if not name:
+        return ""
+    s = str(name).strip()
+    s = re.sub(r"[（(][^）)]*[）)]", "", s)
+    return s.strip()
+
+
+def has_cjk(text):
+    return bool(text) and bool(re.search(r"[一-鿿]", str(text)))
+
+
 def is_foreign_name(name):
-    """姓名不含中文字符 = 外国人（纯英文名）。"""
-    return bool(name) and not re.search(r"[一-鿿]", str(name))
+    """姓名（可已去噪）不含中文字符且含拉丁字母 = 外国人名。
+       纯符号/空/纯数字不算。"""
+    if not name:
+        return False
+    s = str(name).strip()
+    if not s or has_cjk(s):
+        return False
+    return bool(re.search(r"[A-Za-z]", s))
+
+
+def is_chinese_id(idno):
+    """中国大陆 18 位身份证（末位可为 X）。"""
+    s = norm_id(idno)
+    return bool(re.fullmatch(r"\d{17}[\dX]", s))
+
+
+def is_passport_like(idno):
+    """护照样证件：非 18 位身份证、5–15 位字母数字且至少 1 个字母。
+       例：E04731572 / C6624835 / X7636596 / AB1279372。
+       注意：代收款人填了中方身份证时不会命中（靠英文名信号兜）。"""
+    s = norm_id(idno)
+    if not s or is_chinese_id(s):
+        return False
+    if not re.fullmatch(r"[A-Z0-9]{5,15}", s):
+        return False
+    return bool(re.search(r"[A-Z]", s))
+
+
+def is_company_name(name):
+    """供应商名含公司关键字 → 疑对公，不走普通个人催票。"""
+    if not name:
+        return False
+    s = str(name)
+    for kw in CONFIG.get("COMPANY_KEYWORDS", []):
+        if kw and kw in s:
+            return True
+    return False
+
+
+def foreigner_reasons(name, account_name, idno):
+    """外国人识别信号。返回命中理由列表（空=非外籍）。
+
+    强信号（任一即可豁免）：
+      1) 供应商名去括号后纯英文
+      2) 开户名纯英文
+    弱信号：
+      3) 证件为护照样 —— 仅当「供应商或开户名至少一侧偏外」时采纳，
+         避免「中文名+中文开户+怪证件号」误伤中国人（证件录入错误常见）。
+         中文名+护照+中文开户仍采纳（黎俊灵反例靠开户英文；纯护照+全中文靠弱信号+无拉丁时：
+         若证件护照样且姓名/开户都无拉丁，仍采纳护照——外籍中文名真实存在，如越南译员中文名）。
+
+    实际策略（亮晶 2026-07）：
+      - 英文名/英文开户 → 一定豁免
+      - 护照样证件 → 豁免（中文名外籍真实存在；误伤面用「18位身份证」排除中国人）
+    """
+    reasons = []
+    clean_name = strip_name_noise(name)
+    if is_foreign_name(clean_name) or is_foreign_name(name):
+        reasons.append("供应商英文名")
+    acct_raw = account_name or ""
+    acct = strip_name_noise(acct_raw)
+    if is_foreign_name(acct) or is_foreign_name(acct_raw):
+        reasons.append("开户名英文")
+    if is_passport_like(idno):
+        reasons.append("证件为护照号")
+    # 去重保序
+    seen, out = set(), []
+    for r in reasons:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def is_corporate_pay_channel(channel):
+    """支付渠道写了对公 → 疑对公支付，待人工。"""
+    if not channel:
+        return False
+    s = str(channel).strip()
+    return "对公" in s
 
 
 def _find_col(header, aliases):
@@ -173,7 +286,7 @@ def _pick_sheet(wb, required_groups):
 
 # ----------------- 读两张表 -----------------
 def read_list(path, list_alias):
-    """读待支付清单 → list[dict(name,pay,note,idno)]。
+    """读待支付清单 → list[dict(name,pay,note,idno,account_name)]。
        按列特征认 sheet（需含『供应商姓名』+『应付金额』），自动定位表头行，无视其它干扰 sheet。"""
     name_al = list_alias.get("供应商姓名", _LIST_ALIAS_DEFAULT["供应商姓名"])
     pay_al = list_alias.get("应付金额", _LIST_ALIAS_DEFAULT["应付金额"])
@@ -190,10 +303,15 @@ def read_list(path, list_alias):
     idx = {}
     for key, default in _LIST_ALIAS_DEFAULT.items():
         aliases = list_alias.get(key, default)
+        # 别名配置里可能有 _ 开头的注释键
+        if key.startswith("_"):
+            continue
         c = _find_col(header, aliases)
         idx[key] = c
         if c is None and key in ("供应商姓名", "应付金额", "身份证号"):
             warns.append(f"清单缺关键列「{key}」(别名 {aliases})")
+    if idx.get("开户名") is None:
+        warns.append("清单无「开户名」列：外国人识别少一个信号（仍可用护照号/供应商英文名）")
     SUMMARY = {"合计", "总计", "小计", "共计", "合 计", "总 计", "total", "Total", "TOTAL"}
     out = []
     for r in rows[1:]:
@@ -202,17 +320,25 @@ def read_list(path, list_alias):
         nm = str(r[idx["供应商姓名"]]).strip()
         if nm.replace(":", "").replace("：", "") in SUMMARY:   # 跳过表底"合计/总计"汇总行
             continue
+        acct = ""
+        if idx.get("开户名") is not None and r[idx["开户名"]] not in (None, ""):
+            acct = str(r[idx["开户名"]]).strip()
+        channel = ""
+        if idx.get("支付渠道") is not None and r[idx["支付渠道"]] not in (None, ""):
+            channel = str(r[idx["支付渠道"]]).strip()
         out.append(dict(
-            name=str(r[idx["供应商姓名"]]).strip(),
+            name=nm,
             pay=to_number(r[idx["应付金额"]]) if idx["应付金额"] is not None else None,
             note=str(r[idx["备注"]] or "") if idx["备注"] is not None else "",
             idno=norm_id(r[idx["身份证号"]]) if idx["身份证号"] is not None else "",
+            account_name=acct,
+            pay_channel=channel,
         ))
     return out, header, warns
 
 
 def read_invoices(path, inv_alias):
-    """读发票台账 → 按身份证号求和合计金额；同时记一份按姓名(兜底/展示)。
+    """读发票台账 → 按身份证号求和合计金额；同时按开票人姓名求和（姓名兜底）。
        按列特征认台账 sheet（需含『纳税人识别号』+『合计金额』），**无视 Sheet4/财务核对/Sheet2 等
        手工底稿等干扰 sheet**，也不依赖它叫不叫 Sheet1。"""
     id_al = inv_alias.get("身份证号", _INV_ALIAS_DEFAULT["身份证号"])
@@ -237,16 +363,73 @@ def read_invoices(path, inv_alias):
     sum_by_id = defaultdict(float)
     cnt_by_id = defaultdict(int)
     sum_by_name = defaultdict(float)
+    cnt_by_name = defaultdict(int)
+    # 姓名 → 出现过的税号集合（兜底命中时写进提示，方便亮晶看个体户税号）
+    tax_ids_by_name = defaultdict(set)
     for r in rows[1:]:
         idv = norm_id(r[ci_id]) if ci_id is not None else ""
         amt = to_number(r[ci_amt]) if ci_amt is not None else None
         amt = amt or 0.0
+        nm = ""
+        if ci_nm is not None and r[ci_nm]:
+            nm = str(r[ci_nm]).strip()
         if idv:
             sum_by_id[idv] += amt
             cnt_by_id[idv] += 1
-        if ci_nm is not None and r[ci_nm]:
-            sum_by_name[str(r[ci_nm]).strip()] += amt
-    return dict(sum_by_id=sum_by_id, cnt_by_id=cnt_by_id, sum_by_name=sum_by_name), header, warns
+        if nm:
+            sum_by_name[nm] += amt
+            cnt_by_name[nm] += 1
+            if idv:
+                tax_ids_by_name[nm].add(idv)
+            # 也按去噪名索引一份（「张丽娟（西班牙语)」台账侧通常不带括号，主要清清单侧）
+            clean = strip_name_noise(nm)
+            if clean and clean != nm:
+                sum_by_name[clean] += amt
+                cnt_by_name[clean] += 1
+                if idv:
+                    tax_ids_by_name[clean].add(idv)
+    return dict(
+        sum_by_id=sum_by_id,
+        cnt_by_id=cnt_by_id,
+        sum_by_name=sum_by_name,
+        cnt_by_name=cnt_by_name,
+        tax_ids_by_name=tax_ids_by_name,
+    ), header, warns
+
+
+def _lookup_invoice(name, idno, inv):
+    """匹配发票金额。优先身份证；未命中再精确姓名兜底。
+       返回 (inv_sum, matched_cnt, match_method, tip_extra)
+       match_method: 身份证 / 姓名兜底 / 未匹配 / 无证件
+    """
+    if idno and idno in inv["sum_by_id"]:
+        return (
+            round(inv["sum_by_id"][idno], 2),
+            inv["cnt_by_id"].get(idno, 0),
+            "身份证",
+            "",
+        )
+    # 姓名兜底：精确匹配供应商姓名；再试去噪名
+    candidates = []
+    if name:
+        candidates.append(name)
+        clean = strip_name_noise(name)
+        if clean and clean != name:
+            candidates.append(clean)
+    for nm in candidates:
+        if nm in inv["sum_by_name"] and inv["cnt_by_name"].get(nm, 0) > 0:
+            inv_sum = round(inv["sum_by_name"][nm], 2)
+            cnt = inv["cnt_by_name"][nm]
+            tax_ids = sorted(inv.get("tax_ids_by_name", {}).get(nm, set()))
+            tax_hint = "、".join(tax_ids[:3]) if tax_ids else "（无）"
+            # 若清单有身份证但与票上税号不同，明确写疑个体户
+            tip = f"身份证未命中，按姓名兜底；票上税号={tax_hint}"
+            if idno and tax_ids and idno not in tax_ids:
+                tip += "（疑个体户/税号≠身份证）"
+            return inv_sum, cnt, "姓名兜底", tip
+    if not idno:
+        return 0.0, 0, "无证件", ""
+    return 0.0, 0, "未匹配", ""
 
 
 # ----------------- 核对核心 -----------------
@@ -257,47 +440,112 @@ def classify(clist, inv):
     INTERN = CONFIG["INTERN_KEYWORDS"]
     out = []
     for c in clist:
-        name, pay, note, idno = c["name"], c["pay"], c["note"], c["idno"]
-        rec = dict(供应商姓名=name, 应付金额=pay, 备注=note,
-                   开票总额=None, 差额=None, 状态="", 核对提示="")
-        # 实习生豁免
+        name = c["name"]
+        pay = c["pay"]
+        note = c.get("note") or ""
+        idno = c.get("idno") or ""
+        account_name = c.get("account_name") or ""
+        pay_channel = c.get("pay_channel") or ""
+        rec = dict(
+            供应商姓名=name,
+            开户名=account_name or None,
+            应付金额=pay,
+            备注=note,
+            开票总额=None,
+            差额=None,
+            状态="",
+            匹配方式="",
+            核对提示="",
+        )
+        # 1) 实习生豁免
         if any(k in note for k in INTERN):
             rec["状态"] = "豁免-实习生"
-            out.append(rec); continue
-        # 外国人豁免（纯英文名）
-        if is_foreign_name(name):
+            rec["匹配方式"] = "—"
+            out.append(rec)
+            continue
+        # 2) 公司名 / 支付渠道对公 → 待人工（疑对公，不进普通个人催票）
+        corp_tips = []
+        if is_company_name(name):
+            corp_tips.append("供应商名含公司字样")
+        if is_corporate_pay_channel(pay_channel):
+            corp_tips.append(f"支付渠道={pay_channel}")
+        if corp_tips:
+            rec["状态"] = "标黄-待人工"
+            rec["匹配方式"] = "—"
+            rec["核对提示"] = "、".join(corp_tips) + "，疑对公/公司收款，勿按个人催票，人工定走法"
+            inv_sum, cnt, method, tip_x = _lookup_invoice(name, idno, inv)
+            if inv_sum > 0:
+                rec["开票总额"] = inv_sum
+                if pay is not None:
+                    rec["差额"] = round(inv_sum - pay, 2)
+                rec["匹配方式"] = method
+                rec["核对提示"] += f"；台账有关联票{inv_sum:g}（{method}）"
+            out.append(rec)
+            continue
+        # 3) 外国人三信号豁免
+        freasons = foreigner_reasons(name, account_name, idno)
+        if freasons:
             rec["状态"] = "豁免-外国人"
-            out.append(rec); continue
-        # 应付金额异常
+            rec["匹配方式"] = "—"
+            rec["核对提示"] = "外籍信号：" + "+".join(freasons)
+            out.append(rec)
+            continue
+        # 3.5) 开户名与供应商明显不同（且两边都是中文）→ 提示代收，但仍按票核（不自动豁免）
+        # 在后面出提示时附加，这里先记标志
+        proxy_tip = ""
+        if (account_name and name
+                and strip_name_noise(account_name) != strip_name_noise(name)
+                and has_cjk(name) and has_cjk(account_name)
+                and not is_foreign_name(strip_name_noise(account_name))):
+            proxy_tip = f"开户名({account_name})≠供应商，疑代收"
+        # 4) 应付金额异常
         if pay is None:
             rec["状态"] = "标黄-待人工"
+            rec["匹配方式"] = "—"
             rec["核对提示"] = "应付金额缺失/非数字，人工核"
-            out.append(rec); continue
-        # ≤门槛放行
+            out.append(rec)
+            continue
+        # 5) ≤门槛放行
         if pay <= TH:
             rec["状态"] = "可付"
+            rec["匹配方式"] = "—"
             rec["核对提示"] = f"≤{TH:g}不要求开票"
-            out.append(rec); continue
-        # >门槛：按身份证号求和发票
-        matched_cnt = inv["cnt_by_id"].get(idno, 0) if idno else 0
-        inv_sum = round(inv["sum_by_id"].get(idno, 0.0), 2) if idno else 0.0
+            out.append(rec)
+            continue
+        # 6) >门槛：身份证主 + 姓名兜底
+        inv_sum, matched_cnt, method, tip_extra = _lookup_invoice(name, idno, inv)
         rec["开票总额"] = inv_sum
         rec["差额"] = round(inv_sum - pay, 2)
+        rec["匹配方式"] = method
         if inv_sum <= 0:
             rec["状态"] = "标黄-未开票"
             if matched_cnt > 0:
-                rec["核对提示"] = "身份证匹到票但合计为0，疑串票/录入0，人工核"
-            elif not idno:
-                rec["核对提示"] = "无身份证号(疑外籍/护照)，人工核"
+                tips = ["证件/姓名匹到票但合计为0，疑串票/录入0，人工核"]
+            elif method == "无证件":
+                tips = ["无身份证号(疑外籍/护照)，人工核"]
             else:
-                rec["核对提示"] = "台账无此人发票"
+                tips = ["台账无此人发票"]
+            if proxy_tip:
+                tips.append(proxy_tip)
+            rec["核对提示"] = "；".join(tips)
         elif inv_sum >= pay - TOL:
             rec["状态"] = "可付"
-            if rec["差额"] > TOL:
-                rec["核对提示"] = "开票多于应付(多开)，多开差异留第二轮"
+            tips = []
+            if tip_extra:
+                tips.append(tip_extra)
+            if rec["差额"] is not None and rec["差额"] > TOL:
+                tips.append("开票多于应付(多开)，多开差异留第二轮")
+            if proxy_tip:
+                tips.append(proxy_tip)
+            rec["核对提示"] = "；".join(tips)
         else:
             rec["状态"] = "标黄-缺票"
-            rec["核对提示"] = f"差{abs(rec['差额']):.2f}，待补票"
+            tips = [f"差{abs(rec['差额']):.2f}，待补票"]
+            if tip_extra:
+                tips.append(tip_extra)
+            if proxy_tip:
+                tips.append(proxy_tip)
+            rec["核对提示"] = "；".join(tips)
         out.append(rec)
     return out
 
@@ -308,39 +556,66 @@ def _style(ws, ncol, yellow_row_idx):
     hfont = Font(name="等线", size=10.5, bold=True)
     hfill = PatternFill("solid", fgColor="BDD7EE")
     yfill = PatternFill("solid", fgColor="FFFF00")
+    ofill = PatternFill("solid", fgColor="FCE4D6")  # 浅橙：待人工
     align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     border = Border(*[Side(style="thin", color="999999")] * 4)
     for i in range(1, ncol + 1):
         c = ws.cell(1, i)
-        c.font = hfont; c.fill = hfill; c.alignment = align; c.border = border
+        c.font = hfont
+        c.fill = hfill
+        c.alignment = align
+        c.border = border
     for ri in yellow_row_idx:  # 1-based 数据行号(含表头偏移)
+        # 状态列决定颜色：待人工用浅橙，其余标黄用黄
+        status_col = None
         for i in range(1, ncol + 1):
-            ws.cell(ri, i).fill = yfill
+            if ws.cell(1, i).value == "状态":
+                status_col = i
+                break
+        fill = yfill
+        if status_col and str(ws.cell(ri, status_col).value or "").find("待人工") >= 0:
+            fill = ofill
+        for i in range(1, ncol + 1):
+            ws.cell(ri, i).fill = fill
     ws.row_dimensions[1].height = 26
     ws.freeze_panes = "A2"
+    # 列宽略调
+    widths = {
+        "供应商姓名": 22, "开户名": 18, "应付金额": 12, "备注": 18,
+        "开票总额": 12, "差额": 10, "状态": 14, "匹配方式": 10, "核对提示": 42,
+    }
+    for i in range(1, ncol + 1):
+        h = ws.cell(1, i).value
+        if h in widths:
+            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = widths[h]
 
 
 def write_output(out_path, records):
-    df = pd.DataFrame(records, columns=["供应商姓名", "应付金额", "备注", "开票总额", "差额", "状态", "核对提示"])
+    df = pd.DataFrame(records, columns=OUT_COLS)
     flagged = df[df["状态"].str.startswith("标黄")].copy()
     payable = df[~df["状态"].str.startswith("标黄")].copy()
     # 运行报告
     from collections import Counter
     cnt = Counter(df["状态"])
-    report = pd.DataFrame(
-        [(k, v) for k, v in sorted(cnt.items())] + [("合计", len(df)), ("标黄合计", len(flagged))],
-        columns=["状态", "人数"])
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    report_rows = [(k, v) for k, v in sorted(cnt.items())]
+    report_rows += [
+        ("合计", len(df)),
+        ("标黄合计", len(flagged)),
+        ("其中待人工", int((df["状态"] == "标黄-待人工").sum())),
+        ("姓名兜底命中", int((df["匹配方式"] == "姓名兜底").sum())),
+    ]
+    report = pd.DataFrame(report_rows, columns=["状态", "人数"])
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         df.to_excel(w, sheet_name="主核对表", index=False)
         flagged.to_excel(w, sheet_name="不付名单(催票)", index=False)
         payable.to_excel(w, sheet_name="可付名单", index=False)
         report.to_excel(w, sheet_name="运行报告", index=False)
-        # 主核对表：标黄行高亮
         yellow_rows = [i + 2 for i, st in enumerate(df["状态"]) if str(st).startswith("标黄")]
         _style(w.sheets["主核对表"], len(df.columns), yellow_rows)
         _style(w.sheets["不付名单(催票)"], len(flagged.columns), list(range(2, len(flagged) + 2)))
         _style(w.sheets["可付名单"], len(payable.columns), [])
+        _style(w.sheets["运行报告"], len(report.columns), [])
     return out_path, df, flagged, payable, report
 
 
@@ -395,7 +670,7 @@ def inspect_mode(input_dir):
             print(f"    ⚠ {x}")
     if inv:
         d, hdr, w = read_invoices(inv, ia)
-        print(f"  发票：{len(d['sum_by_id'])} 个身份证；表头={hdr}")
+        print(f"  发票：{len(d['sum_by_id'])} 个证件号；表头={hdr}")
         for x in w:
             print(f"    ⚠ {x}")
 
@@ -408,14 +683,27 @@ def run(list_path, inv_path, out_path):
     inv, ihdr, iwarn = read_invoices(inv_path, ia)
     for x in lwarn + iwarn:
         log(f"⚠ {x}")
-    log(f"· 清单 {len(clist)} 人；发票台账 {len(inv['sum_by_id'])} 个身份证、"
+    log(f"· 清单 {len(clist)} 人；发票台账 {len(inv['sum_by_id'])} 个证件、"
         f"{sum(inv['cnt_by_id'].values())} 张票")
-    log(f"· 门槛>{CONFIG['THRESHOLD']:g} 才要票｜容差≤{CONFIG['TOLERANCE']:g}｜匹配键=身份证号")
+    log(f"· 门槛>{CONFIG['THRESHOLD']:g} 才要票｜容差≤{CONFIG['TOLERANCE']:g}｜"
+        f"匹配=身份证主+姓名兜底｜外籍=英文名/开户名/护照号")
     records = classify(clist, inv)
     out_path, df, flagged, payable, report = write_output(out_path, records)
     log("· 结果：")
     for _, r in report.iterrows():
         log(f"    {r['状态']}: {r['人数']}")
+    # 主动点名：金额大的未开票、姓名兜底、待人工
+    big = df[(df["状态"] == "标黄-未开票") & (df["应付金额"].fillna(0) >= 5000)]
+    if len(big):
+        log("· ⚠ 大额未开票（优先催）：" + "、".join(
+            f"{r.供应商姓名}({r.应付金额:g})" for _, r in big.iterrows()))
+    name_fb = df[df["匹配方式"] == "姓名兜底"]
+    if len(name_fb):
+        log("· 姓名兜底命中（疑个体户税号，已按名放行若足额）：" + "、".join(
+            f"{r.供应商姓名}" for _, r in name_fb.iterrows()))
+    manual = df[df["状态"] == "标黄-待人工"]
+    if len(manual):
+        log("· 待人工：" + "、".join(f"{r.供应商姓名}" for _, r in manual.iterrows()))
     log(f"· 已写出 → {out_path}")
     return out_path
 
@@ -430,11 +718,13 @@ def main():
     ap.add_argument("--inspect", action="store_true")
     a = ap.parse_args()
     if a.inspect:
-        inspect_mode(a.input_dir); return
+        inspect_mode(a.input_dir)
+        return
     lp, ip = a.list_path, a.inv_path
     if not lp or not ip:
         flp, fip = find_inputs(a.input_dir)
-        lp = lp or flp; ip = ip or fip
+        lp = lp or flp
+        ip = ip or fip
     if not lp or not ip:
         log("✗ 没找齐输入：需要『待支付清单』和『发票台账』两个 xlsx。"
             "放进 工作区/input/ 或用 --list/--invoice 指定。")
