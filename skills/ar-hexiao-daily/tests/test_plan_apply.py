@@ -53,6 +53,26 @@ def test_empty_row_is_writable(tmp_path):
     assert V.check_one(_item(2), rows)["verdict"] == "write"
 
 
+def test_default_jiezhang_no_is_still_writable(tmp_path):
+    """她表未收款的行**预置「是否结账=否」**、回款列全空 → 这是"还没填"，必须可写。
+    2026-07-24 真实 24 号数据实测 bug：validate 把预置的「否」当"已填过"，4 笔可填全被误判冲突、
+    可写=0。修复=判"填没填过"只看回款证据列（计提/回款明细/收款时间/收款方式），是否结账不算证据。"""
+    five = {"是否结账": "否"}  # 只有预置默认，回款四列全空
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", five)])
+    rows = V.read_ledger_rows(led)
+    # 计划要把它翻「否→是」+填钱 → 应判"可写"，不是冲突
+    assert V.check_one(_item(2), rows)["verdict"] == "write"
+
+
+def test_partial_row_keeps_jiezhang_no_is_writable(tmp_path):
+    """部分回款：计划**保持结账「否」**、计提留空、只填回款；行本就预置「否」→ 仍可写。"""
+    five = {"是否结账": "否"}
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", five)])
+    rows = V.read_ledger_rows(led)
+    res = V.check_one(_item(2, 计提=None, 是否结账="否", 回款明细=60.0), rows)
+    assert res["verdict"] == "write"
+
+
 def test_already_filled_same_is_skip(tmp_path):
     five = {"计提": 100.0, "回款明细": 100.0, "是否结账": "是",
             "收款时间": dt.date(2026, 7, 8), "收款方式": "汇"}

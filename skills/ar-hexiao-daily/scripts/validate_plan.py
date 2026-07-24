@@ -138,9 +138,17 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             return {"verdict": "conflict", "reason": f"{k} 不是数字：{v!r}"}
 
     # ③ 目标格现在是什么
-    filled = [k for k in FIVE if _norm(row.get(k)) not in ("", "None")]
+    # ⚠「是否结账」是她盈亏表**预置的默认值**：单子交付了、钱还没到的行默认就是「否」
+    #   （2026-07-24 真实全表统计：「否」+回款空 = 1973 行，全是还没收款的挂账行）。
+    #   所以它**不能当"这一行她已经填过"的证据**——否则每一笔新到账（表里那行本就带着「否」）
+    #   都会被误判成"已填过、且和计划不一致"→ 冲突，导致自动回填对真实新数据全线失效
+    #   （2026-07-24 opencode 真实 24 号数据实测：4 笔可填全被「否」挡成冲突、可写=0）。
+    #   判"填没填过"只看**回款证据列**（计提/回款明细/收款时间/收款方式）；是否结账留给下面 same/diff
+    #   去比对（她填了钱却没翻「是」这种真不一致，仍会照常报冲突）。
+    evidence_cols = [k for k in FIVE if k != "是否结账"]
+    filled = [k for k in evidence_cols if _norm(row.get(k)) not in ("", "None")]
     if not filled:
-        return {"verdict": "write", "reason": "五列为空，可写"}
+        return {"verdict": "write", "reason": "回款列为空，可写（是否结账为她表预置默认，不计入已填证据）"}
 
     same = all(
         _norm(row.get(k)) == _norm(five.get(k))
