@@ -88,11 +88,15 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
         so = (it.get("so") or "").strip()
         if so and so not in so_list:
             so_list.append(so)
-    existing = best.get("flow_order_existing") or ""
-    # 若 item 上只有单 SO 的 suggest，用全量 SO 重算
-    order_suggest = FlowLedger.suggest_order_cell(so_list, existing) if so_list else (
-        best.get("flow_order_suggest") or ""
-    )
+    existing = (best.get("flow_order_existing") or "").strip()
+    # 始终在 existing 上合并 SO；so_list 空时 suggest_order_cell 原样返回 existing（禁止抹成空）
+    order_suggest = FlowLedger.suggest_order_cell(so_list, existing)
+    if not str(order_suggest).strip() and best.get("flow_order_suggest"):
+        order_suggest = str(best.get("flow_order_suggest") or "")
+    # 仍空且表上本来有单号 → 保住表上的（apply 也不会写空单号）
+    if not str(order_suggest).strip() and existing:
+        order_suggest = existing
+
     updated = summary_row.get("流转表_是否更新应收款_建议")
     if updated is None:
         updated = ""
@@ -111,6 +115,8 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
         "updated_suggest": updated,
         "flow_locate": best.get("flow_locate") or summary_row.get("flow_locate") or "",
         "so_list": so_list,
+        "write_order": bool(str(order_suggest).strip()),  # 空单号不写列，防抹掉已有
+        "write_updated": True,  # 是否更新列：空白=刻意留空，仍可写空
     }
 
     # skip：没有任何可写/可展示动作
@@ -123,22 +129,17 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
     if hits and int(hits) > 1:
         return {**base, "verdict": "hand", "reason": f"多命中 hits={hits}，须人工指定行"}
 
-    # hits == 1
-    if matched_by not in STRONG and not matched_by.startswith("三键"):
-        # 弱命中
+    # hits == 1：准入必须是精确强三键集合（禁止 startswith 放宽）
+    if matched_by not in STRONG:
         if "名字不符" in matched_by or matched_by == "日期+金额(名字不符)":
             return {**base, "verdict": "hand", "reason": "弱命中（名字不符），须人工确认"}
-        if matched_by not in STRONG:
-            return {**base, "verdict": "hand", "reason": f"非强三键（{matched_by or '未知'}）"}
+        return {**base, "verdict": "hand", "reason": f"非强三键（{matched_by or '未知'}）"}
 
     if not file_ or not sheet or row_no is None:
         return {**base, "verdict": "hand", "reason": "强命中但无法解析 file/sheet/row"}
 
-    # 有可写内容：单号建议变化，或是否更新有明确建议（含空白=刻意留空也算可写空）
-    has_order = bool(str(order_suggest).strip())
-    # 空白 updated 也是合法写入（清成空）
-    has_updated_field = True  # always may write updated column to suggested value
-    if not has_order and not has_updated_field:
+    # 至少要写单号或是否更新之一；单号空则只写是否更新
+    if not base["write_order"] and not base["write_updated"]:
         return {**base, "verdict": "skip", "reason": "无可写字段"}
 
     return {**base, "verdict": "write", "reason": ""}

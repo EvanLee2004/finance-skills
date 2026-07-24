@@ -44,7 +44,7 @@ def _result_with_flow_items(items_meta):
     for m in items_meta:
         it = {
             "ar": m["ar"],
-            "so": m.get("so") or "SO1",
+            "so": m["so"] if "so" in m else "SO1",
             "sod": m.get("sod") or "SOD1",
             "bucket": m.get("bucket") or "auto",
             "code": m.get("code") or "",
@@ -248,6 +248,87 @@ def test_apply_all_rejects_without_confirmed(tmp_path):
         "--checked", str(checked), "--ledger", str(led), "--workspace", str(tmp_path),
     ])
     assert rc == 2
+
+
+def test_plan_empty_so_preserves_existing_order_and_exact_strong():
+    """so 列表空时 order_suggest 必须保留 flow_order_existing；伪造「三键*」不得 write。"""
+    result = _result_with_flow_items([
+        {
+            "ar": "AR_KEEP",
+            "so": "",  # 无 SO
+            "flow_hits": 1,
+            "flow_matched_by": "三键",
+            "flow_file": "流转A.xlsx",
+            "flow_sheet": "明细",
+            "flow_row_no": 2,
+            "flow_order_existing": "EXISTING_SO",
+            "flow_order_suggest": "",
+            "updated": "是",
+        },
+        {
+            "ar": "AR_FAKE",
+            "so": "SO9",
+            "flow_hits": 1,
+            "flow_matched_by": "三键(伪造变体)",
+            "flow_file": "流转A.xlsx",
+            "flow_sheet": "明细",
+            "flow_row_no": 3,
+            "flow_order_suggest": "SO9",
+            "updated": "是",
+        },
+    ])
+    # 手工补 existing（helper 未传的字段）
+    for it in result["auto"] + result["hold"]:
+        if it["ar"] == "AR_KEEP":
+            it["flow_order_existing"] = "EXISTING_SO"
+            it["so"] = ""
+    plan = BFP.build_plan(result)
+    by = {it["ar"]: it for it in plan["items"]}
+    assert by["AR_KEEP"]["order_suggest"] == "EXISTING_SO"
+    assert by["AR_KEEP"]["verdict"] == "write"
+    assert by["AR_KEEP"].get("write_order") is True
+    assert by["AR_FAKE"]["verdict"] == "hand", by["AR_FAKE"]
+    assert "非强三键" in (by["AR_FAKE"].get("reason") or "") or "伪造" in (
+        by["AR_FAKE"].get("matched_by") or ""
+    )
+
+
+def test_apply_flow_empty_order_does_not_wipe_existing(tmp_path):
+    """order_suggest 空 + write_order false 时不得清空表上已有单号。"""
+    ws = tmp_path / "ws"
+    (ws / "02_我的表副本").mkdir(parents=True)
+    flow_path = ws / "02_我的表副本" / "流转测.xlsx"
+    _flow_xlsx(flow_path, [
+        ("2026-07-22", "甲公司", 100, "EXISTING_SO", ""),
+    ])
+    plan = {
+        "items": [{
+            "ar": "AR1",
+            "verdict": "write",
+            "file": "流转测.xlsx",
+            "sheet": "明细",
+            "row_no": 2,
+            "order_suggest": "",
+            "updated_suggest": "是",
+            "write_order": False,
+            "write_updated": True,
+            "matched_by": "三键",
+            "hits": 1,
+        }],
+        "counts": {"write": 1},
+    }
+    plan_p = tmp_path / "plan.json"
+    plan_p.write_text(json.dumps(plan), encoding="utf-8")
+    rc = AF.main([
+        "--plan", str(plan_p), "--workspace", str(ws),
+        "--confirmed", "--in-place",
+    ])
+    assert rc == 0
+    wb = openpyxl.load_workbook(str(flow_path), read_only=True, data_only=True)
+    row = list(wb["明细"].iter_rows(min_row=2, max_row=2, values_only=True))[0]
+    wb.close()
+    assert row[3] == "EXISTING_SO"  # 单号未抹
+    assert row[4] == "是"
 
 
 def test_apply_all_skips_flow_when_ledger_fails(tmp_path):

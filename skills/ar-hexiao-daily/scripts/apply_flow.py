@@ -121,22 +121,33 @@ def write_flow_items(
                 order_v = it.get("order_suggest")
                 if order_v is None:
                     order_v = ""
+                order_v = str(order_v).strip()
+                # 禁止用空串覆盖已有单号（plan 应保留 existing；双保险）
+                write_order = it.get("write_order")
+                if write_order is None:
+                    write_order = bool(order_v)
                 upd_v = it.get("updated_suggest")
                 if upd_v is None:
                     upd_v = ""
                 upd_v = str(upd_v).strip()
                 if upd_v in ("（空白）", "空白", "空"):
                     upd_v = ""
-                edits.append((r, col_order, str(order_v)))
-                edits.append((r, col_upd, upd_v))
+                write_updated = it.get("write_updated")
+                if write_updated is None:
+                    write_updated = True
+                did_order = bool(write_order and order_v)
+                if did_order:
+                    edits.append((r, col_order, order_v))
+                if write_updated:
+                    edits.append((r, col_upd, upd_v))
                 changes.append(
                     {
                         "ar": it.get("ar"),
                         "file": fname,
                         "sheet": sheet_name,
                         "row_no": r,
-                        "单号": str(order_v),
-                        "是否更新应收款": upd_v,
+                        "单号": order_v if did_order else "(未改)",
+                        "是否更新应收款": upd_v if write_updated else "(未改)",
                     }
                 )
             all_edits_by_sheet[sheet_name] = edits
@@ -187,6 +198,12 @@ def write_flow_items(
                     exp_upd = str(it.get("updated_suggest") or "").strip()
                     if exp_upd in ("（空白）", "空白", "空"):
                         exp_upd = ""
+                    wo = it.get("write_order")
+                    if wo is None:
+                        wo = bool(exp_order)
+                    wu = it.get("write_updated")
+                    if wu is None:
+                        wu = True
 
                     def _norm_order(s):
                         return "\n".join(
@@ -195,11 +212,12 @@ def write_flow_items(
                             if x.strip()
                         )
 
-                    if _norm_order(got_order) != _norm_order(exp_order):
+                    # 只校验实际写入的列（空单号跳过写时不要求表变成空）
+                    if wo and exp_order and _norm_order(got_order) != _norm_order(exp_order):
                         local_problems.append(
                             f"{it.get('ar')} 单号回读不符：期望 {exp_order!r} 实际 {got_order!r}"
                         )
-                    if got_upd != exp_upd:
+                    if wu and got_upd != exp_upd:
                         local_problems.append(
                             f"{it.get('ar')} 是否更新回读不符：期望 {exp_upd!r} 实际 {got_upd!r}"
                         )
