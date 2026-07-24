@@ -254,16 +254,16 @@ def summarize_records(
             }
         )
 
-    # round each cell to 2
+    # 展示单元格四舍五入到 2 位；合计用“原始值累加、最后只舍入一次”，
+    # 避免“各桶先各自 round 再相加”产生 0.01 漂移（对齐旧 exe：raw 累加、display 时才舍入）。
     rounded: dict[str, dict[str, float]] = {}
-    grand = 0.0
+    grand_raw = 0.0
     for d, depts in by_date.items():
         rounded[d] = {}
         for dept, v in depts.items():
-            rv = round(v, 2)
-            rounded[d][dept] = rv
-            grand += rv
-    grand = round(grand, 2)
+            rounded[d][dept] = round(v, 2)
+            grand_raw += v
+    grand = round(grand_raw, 2)
 
     return SummaryResult(
         by_date=rounded,

@@ -113,6 +113,25 @@ def test_summarize_fixture_handcalc(tmp_path):
         assert headers[2 + i] == name
 
 
+def test_grand_total_no_round_then_sum_drift():
+    """合计须用“原始值累加、最后舍入一次”，避免各桶先 round 再相加的 0.01 漂移。
+
+    多语原始 1.975563 万、未匹配原始 0.135075 万：
+      - 各桶先 round(2) 再相加 = 1.98 + 0.14 = 2.12（错，旧行为）
+      - 原始相加再 round     = round(2.110638) = 2.11（对，对齐 exe）
+    """
+    org = {"甲": "本地化"}  # 乙 不在表 → 未匹配
+    records = [
+        {"销售": "甲", "下单日期": "2026-07-23", "下单预估额/本币": 19755.63},
+        {"销售": "乙", "下单日期": "2026-07-23", "下单预估额/本币": 1350.75},
+    ]
+    result = summarize_records(records, org)
+    assert result.grand_total_wan == 2.11  # 不是 2.12
+    # 展示单元格仍各自四舍五入
+    assert result.by_date["2026-07-23"]["多语（不含运保）"] == 1.98
+    assert result.by_date["2026-07-23"]["（未匹配）"] == 0.14
+
+
 def test_amount_fallback_to_original_currency():
     org = {"甲": "数据"}
     records = [

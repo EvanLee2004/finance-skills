@@ -17,6 +17,8 @@ def write_report(
     window_end: date | str | None = None,
     api_row_count: int | None = None,
     include_detail: bool = False,
+    data_asof: datetime | None = None,
+    late_warning: str | None = None,
     extra_log: dict[str, Any] | None = None,
 ) -> Path:
     from openpyxl import Workbook
@@ -25,6 +27,12 @@ def write_report(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    asof = data_asof or datetime.now()
+    asof_text = (
+        f"数据截至 {asof.strftime('%Y-%m-%d %H:%M:%S')}"
+        "（智云为实时数据，昨日订单当天可能被改期，本表为该时刻快照）"
+    )
 
     wb = Workbook()
     ws = wb.active
@@ -55,12 +63,26 @@ def write_report(
         ws.column_dimensions[get_column_letter(col)].width = 16
     ws.freeze_panes = "A2"
 
+    # 数据截至 + 晚跑提示：直接落在数据下方，亮晶打开就看得到
+    ws.append([])
+    asof_row = ws.max_row + 1
+    ws.cell(row=asof_row, column=1, value=asof_text).font = Font(italic=True, color="808080")
+    if late_warning:
+        warn_row = asof_row + 1
+        wc = ws.cell(row=warn_row, column=1, value=f"⚠ {late_warning}")
+        wc.font = Font(bold=True, color="C00000")
+        wc.alignment = Alignment(wrap_text=False, vertical="center")
+
     # 处理日志
     log = wb.create_sheet("处理日志")
     log.append(["项目", "内容"])
     log["A1"].font = Font(bold=True)
     log["B1"].font = Font(bold=True)
     log.append(["处理时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+    log.append(["数据截至", asof.strftime("%Y-%m-%d %H:%M:%S")])
+    log.append(["快照说明", "智云为实时数据，昨日订单当天可能被改期，本表为该时刻快照"])
+    if late_warning:
+        log.append(["⚠晚跑提示", late_warning])
     log.append(
         [
             "日期窗口",
@@ -70,7 +92,7 @@ def write_report(
     log.append(["接口行数", api_row_count if api_row_count is not None else result.detail_row_count])
     log.append(["明细行数", result.detail_row_count])
     log.append(["总计万元", result.grand_total_wan])
-    log["B6"].number_format = "#,##0.00"
+    log.cell(row=log.max_row, column=2).number_format = "#,##0.00"  # 不依赖行号，插行也不错位
     log.append(["金额字段", result.amount_field_used or "（未解析到）"])
     dtot = dept_totals(result)
     for name in DEPT_DISPLAY_ORDER:

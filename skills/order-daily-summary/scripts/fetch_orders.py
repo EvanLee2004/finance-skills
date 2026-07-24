@@ -149,8 +149,16 @@ def fetch_all_rows(
     app_id: str,
     filter_controls: list[dict] | None = None,
 ) -> list[dict]:
+    """翻页拉全部命中行。
+
+    以服务端第 1 页返回的 count 为总数依据翻页并做一致性校验：
+    若服务端声明命中 N 行、实际只拉到 < N 行（例如服务端悄悄封顶每页条数、
+    或翻页丢页），**直接 FetchError 报错中止**——财务数字宁可报错，绝不静默少算。
+    服务端若未给 count，则退回“短页即止”的旧行为。
+    """
     fc = filter_controls or []
     out: list[dict] = []
+    server_total: int | None = None
     page = 1
     while page <= MAX_PAGES:
         body = {
@@ -169,12 +177,27 @@ def fetch_all_rows(
         }
         d = post("Worksheet/GetFilterRows", body).get("data") or {}
         rows = d.get("data") or []
+        if page == 1:
+            total = d.get("count")
+            if isinstance(total, int) and total >= 0:
+                server_total = total
         out.extend(rows)
-        if len(rows) < PAGE_SIZE:
+        if server_total is not None:
+            # 已知总数：拉够总数、或某页空了就停
+            if len(out) >= server_total or not rows:
+                break
+        elif len(rows) < PAGE_SIZE:
+            # 未知总数：退回短页即止
             break
         page += 1
     else:
         raise FetchError(f"翻页超过安全上限 {MAX_PAGES} 页仍未拉完")
+    # 一致性闸：服务端声明总数 ≠ 实抓行数 → 报错，绝不静默上报错误数字
+    if server_total is not None and len(out) != server_total:
+        raise FetchError(
+            f"抓取行数与服务端声明不一致：服务端 count={server_total}，实抓={len(out)} 行。"
+            "疑似分页封顶/翻页丢数，已中止以免上报少算的下单额。"
+        )
     return out
 
 
