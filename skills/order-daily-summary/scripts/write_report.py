@@ -109,15 +109,16 @@ def write_report(
 
     if include_detail and result.detail_rows:
         detail = wb.create_sheet("明细")
-        dheaders = ["销售", "下单日期", "金额本币", "金额万元", "归类", "金额字段"]
+        dheaders = ["销售", "SO", "订单名称", "下单日期", "金额本币", "金额万元", "归类", "金额字段"]
         detail.append(dheaders)
         for cell in detail[1]:
             cell.font = Font(bold=True)
             cell.fill = header_fill
         for r in result.detail_rows:
             detail.append([r.get(h, "") for h in dheaders])
-        for col in range(1, len(dheaders) + 1):
-            detail.column_dimensions[get_column_letter(col)].width = 14
+        widths = {"销售": 12, "SO": 14, "订单名称": 36, "下单日期": 12, "金额本币": 12, "金额万元": 10, "归类": 16, "金额字段": 16}
+        for col, h in enumerate(dheaders, start=1):
+            detail.column_dimensions[get_column_letter(col)].width = widths.get(h, 14)
 
     wb.save(out_path)
     return out_path

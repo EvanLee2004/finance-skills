@@ -26,7 +26,9 @@ from fetch_orders import ZHIYUN_DEFAULTS, LoginError, fetch_orders  # noqa: E402
 from summarize import (  # noqa: E402
     DEPT_DISPLAY_ORDER,
     dept_totals,
+    filter_records_by_date_window,
     load_org_map_from_xlsx,
+    load_records_from_order_xlsx,
     summarize_records,
 )
 from write_report import write_report  # noqa: E402
@@ -105,8 +107,9 @@ def _late_run_warning(today: date, fetch_time: datetime) -> str | None:
     if fetch_time.time() <= LATE_RUN_AFTER:
         return None
     return (
-        f"本次于 {fetch_time.strftime('%H:%M')} 抓取，晚于每日 {SNAPSHOT_HOUR:02d}:00 快照；"
-        "昨日订单当天可能已被改期/改单号，本数字可能与 9 点快照不同（属正常，非取数错误）。"
+        f"本次于 {fetch_time.strftime('%H:%M')} 实时抓取，晚于每日 {SNAPSHOT_HOUR:02d}:00 快照口径；"
+        "智云「下单日期」可被改期/改单号，晚跑数字常小于 9 点（例：大单改到今天则昨日报表少一截）。"
+        "要对齐「九点下单/旧 exe」：请在 09:00–09:15 跑本技能，或用 --from-xlsx 喂 9 点人工导出的下单表。"
     )
 
 
@@ -155,6 +158,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="组织架构 xlsx 路径（默认 config/销售组织架构.xlsx）",
     )
+    parser.add_argument(
+        "--from-xlsx",
+        default=None,
+        help="离线模式：跳过智云，直接读本地「下单」导出 xlsx（与旧 exe 同口径；"
+        "用于 9 点人工导出后汇总，或与 exe 对数）。不需账号。",
+    )
+    parser.add_argument(
+        "--no-date-filter",
+        action="store_true",
+        help="配合 --from-xlsx：不过滤日期窗口，导出表里有什么算什么"
+        "（导出已是单日时可开）",
+    )
     args = parser.parse_args(argv)
 
     today = _parse_today(args.today)
@@ -162,12 +177,6 @@ def main(argv: list[str] | None = None) -> int:
     if is_weekend(today) and not args.force:
         # still allow run; task book says 若仍触发 with weekend window; --force for default scripts
         pass
-
-    cfg_path = Path(args.config) if args.config else None
-    cfg = load_config(cfg_path)
-    if not _has_credentials(cfg):
-        print(_creds_help(), file=sys.stderr)
-        return 2
 
     org_path = Path(args.org) if args.org else (_SKILL_ROOT / "config" / "销售组织架构.xlsx")
     if not org_path.is_file():
@@ -178,20 +187,48 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"运行日={today.isoformat()} 窗口={start.isoformat()}～{end.isoformat()}")
-    print("正在登录智云并抓取下单…（需内网）")
+    offline = bool(args.from_xlsx)
+    late_warning: str | None = None
+    source_note = ""
 
-    try:
-        records = fetch_orders(start, end, cfg)
-    except LoginError as e:
-        print(f"登录失败：{e}", file=sys.stderr)
-        print("请检查账号密码与内网连通，勿在对话中粘贴密码。", file=sys.stderr)
-        return 3
-    except Exception as e:  # noqa: BLE001
-        print(f"抓数失败：{type(e).__name__}: {e}", file=sys.stderr)
-        return 4
-
-    fetch_time = datetime.now()  # 抓取时刻 = 数据快照的“截至”时间
-    late_warning = _late_run_warning(today, fetch_time)
+    if offline:
+        xlsx_path = Path(args.from_xlsx)
+        print(f"离线模式：读取本地下单表 {xlsx_path}")
+        try:
+            raw = load_records_from_order_xlsx(xlsx_path)
+        except (OSError, ValueError) as e:
+            print(f"读本地下单表失败：{e}", file=sys.stderr)
+            return 4
+        if args.no_date_filter:
+            records = raw
+            source_note = f"离线导出 {xlsx_path.name}（未滤日期窗口，共 {len(raw)} 行）"
+        else:
+            records = filter_records_by_date_window(raw, start, end)
+            source_note = (
+                f"离线导出 {xlsx_path.name}（窗口内 {len(records)}/{len(raw)} 行）"
+            )
+        fetch_time = datetime.now()
+        # 离线=吃固定导出，不算「晚跑实时抓」
+        late_warning = None
+    else:
+        cfg_path = Path(args.config) if args.config else None
+        cfg = load_config(cfg_path)
+        if not _has_credentials(cfg):
+            print(_creds_help(), file=sys.stderr)
+            return 2
+        print("正在登录智云并抓取下单…（需内网）")
+        try:
+            records = fetch_orders(start, end, cfg)
+        except LoginError as e:
+            print(f"登录失败：{e}", file=sys.stderr)
+            print("请检查账号密码与内网连通，勿在对话中粘贴密码。", file=sys.stderr)
+            return 3
+        except Exception as e:  # noqa: BLE001
+            print(f"抓数失败：{type(e).__name__}: {e}", file=sys.stderr)
+            return 4
+        fetch_time = datetime.now()  # 抓取时刻 = 数据快照的“截至”时间
+        late_warning = _late_run_warning(today, fetch_time)
+        source_note = "智云实时 GetFilterRows"
 
     org_map = load_org_map_from_xlsx(org_path)
     result = summarize_records(records, org_map)
@@ -204,9 +241,10 @@ def main(argv: list[str] | None = None) -> int:
         window_start=start,
         window_end=end,
         api_row_count=len(records),
-        include_detail=bool(args.detail),
+        include_detail=True if offline else bool(args.detail),  # 离线默认带明细+SO 便于对 exe
         data_asof=fetch_time,
         late_warning=late_warning,
+        extra_log={"取数来源": source_note},
     )
 
     print(f"明细行数={result.detail_row_count}")
@@ -215,15 +253,19 @@ def main(argv: list[str] | None = None) -> int:
     breakdown = "  ".join(f"{name}={dtot.get(name, 0.0):.2f}" for name in DEPT_DISPLAY_ORDER)
     print(f"分部门万元：{breakdown}")
     print(f"金额字段={result.amount_field_used or '（未解析）'}")
+    print(f"取数来源={source_note}")
     if result.unmatched_sales:
         print(f"未匹配销售({len(result.unmatched_sales)})：{'、'.join(result.unmatched_sales)}")
         print("请更新 config/销售组织架构.xlsx 后重跑。")
     else:
         print("未匹配销售=无")
-    print(f"数据截至={fetch_time.strftime('%Y-%m-%d %H:%M:%S')}（智云为实时数据，本表为该时刻快照）")
-    if late_warning:
-        print(f"⚠ {late_warning}")
-    print(f"输出={out_file}")
+    if offline:
+        print(f"数据来自本地导出（固定快照），输出={out_file}")
+    else:
+        print(f"数据截至={fetch_time.strftime('%Y-%m-%d %H:%M:%S')}（智云为实时数据，本表为该时刻快照）")
+        if late_warning:
+            print(f"⚠ {late_warning}")
+        print(f"输出={out_file}")
     return 0
 
 
