@@ -80,6 +80,46 @@
 | 同事安装 | 下 `财务技能包_vX.Y.Z.zip`（Gitee Release 附件 / 飞书）+《财务技能使用手册》 |
 | 当前对齐 | **v1.0.22 / 15 技能**（含 `order-daily-summary` 九点下单统计） |
 
+## 同事本机：更新财务技能包（复制整段粘进 opencode）
+
+> **用途**：已装过旧版、收到新 zip 时用。整段复制 → 粘进本机 opencode → 允许访问 → 跑完后**重启 opencode**。  
+> **铁律**：只更新下面白名单里的「财务技能包」技能；你本机自己装的其他 skill **一律不删、不改、不挪**。首次安装请看使用手册第三节 A 段（飞书那份）。
+
+**使用前**：把新的 `财务技能包_vX.Y.Z.zip` 放到桌面（不用解压）。
+
+```
+我要更新已经装过的「财务技能包」（官方包，共 15 个技能）。请你全程自动完成，要点「允许访问」就允许。
+
+【红线·只动财务包，别碰我别的技能】
+- 本机 opencode 的 skills 目录里可能还有我自己装的其他技能（不是财务技能包的）。
+- 你只能更新 / 新增下面「财务包白名单」里的文件夹；白名单以外的任何技能文件夹一律不删、不改、不移动、不覆盖。
+- 禁止清空整个 skills 目录；禁止「只保留这 15 个」；禁止为了对齐名单去删其他技能；禁止重命名我白名单外的夹。
+
+【财务包白名单】（仅这些可覆盖 / 新增）
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+
+【新包在哪】
+桌面上以「财务技能包」开头的 zip（可能带版本号，如 财务技能包_v1.0.22.zip）。桌面可能在「我的用户目录\Desktop」，也可能被 OneDrive 接管在「...\OneDrive\Desktop」，两处都找。是 zip 先解压到临时目录，是文件夹直接用（里面应有上述白名单子文件夹）。
+
+【装到哪】
+opencode 技能目录一般是「我的用户目录\.config\opencode\skills\」（Windows 上 = %USERPROFILE%\.config\opencode\skills\）。没有就新建；位置不对就你自己定位本机 opencode 实际加载技能的 skills 目录。
+
+【步骤】
+1）只对白名单内技能：用新版覆盖 SKILL.md、scripts、README 等源码文件；白名单里本机还没有的新技能（如 order-daily-summary）整夹复制进去。
+2）⚠ 保留我本地的 config：若某白名单技能里已有 config 文件夹（例如 receivables-merge 的销售归属表、order-daily-summary 的组织架构 / config.local.json），保留我原来的 config，绝不覆盖；只有该技能本机还没有 config 时才从新包复制。
+3）可选清理（仅当存在时才删，且只删这些已下线旧夹，绝不扩删）：payroll-info-match、insurance-fund-merge、bank-income-extract；以及名字带 -manipulation 或 -extraction 的旧财务技能夹。
+4）顺手补装依赖（国内镜像，慢就等）：
+   pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pandas openpyxl xlrd pypdf pdfplumber pdf2image python-docx python-pptx markitdown lxml defusedxml Pillow requests playwright
+   再跑：playwright install chromium
+   （清华不通就换 https://mirrors.aliyun.com/pypi/simple 再装一次。）
+
+【汇报·必须逐条说清】
+- 更新 / 新增了哪些财务技能（列名）
+- 白名单外的其他技能有没有动到（必须明确写「未动」；若误动了立刻说明并道歉）
+- 我的 config / 维护表保住没
+- 然后提醒我重启 opencode 生效
+```
+
 ### 双端 push（本机已配好）
 
 ```bash
