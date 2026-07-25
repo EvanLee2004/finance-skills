@@ -174,10 +174,12 @@ def main(argv=None) -> int:
     ap.add_argument("--workspace", default=str(common.WORK))
     ap.add_argument("--result", default="", help="判定结果 json")
     ap.add_argument("--out", default="", help="输出 json 路径")
+    # 防呆：AI 常把 --hexiao-date 顺手传给链上每个脚本。本脚本用不到，
+    # 但收下总比 argparse 报错中断整条链好（2026-07-25 opencode 实测踩到）。
+    ap.add_argument("--hexiao-date", default="", help="（本脚本用不到，收下防止链路中断）")
     args = ap.parse_args(argv)
 
-    ws = Path(args.workspace)
-    common.ensure_out_dirs(ws)
+    ws = common.ensure_out_dirs(args.workspace)  # 解析真工作区，防产出分家
     out_dir = ws / "04_产出"
     result_path = Path(args.result) if args.result else _latest(out_dir, "判定结果_*.json")
     if not result_path or not result_path.is_file():

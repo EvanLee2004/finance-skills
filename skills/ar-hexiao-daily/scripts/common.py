@@ -258,13 +258,73 @@ def mask_customer(name: str) -> str:
     return s[0] + "*" * (len(s) - 2) + s[-1]
 
 
-def ensure_out_dirs(workspace=None) -> None:
-    """建齐工作区四个子目录。传 workspace 时跟随它，否则用技能自带工作区。"""
+WS_SUBDIRS = ("01_智云导出", "02_我的表副本", "03_台账", "04_产出")
+
+
+def _has_inputs(base) -> bool:
+    """这个目录像不像一个**已经在用**的工作区（放了她的表/智云导出）。"""
+    from pathlib import Path as _P
+
+    base = _P(base)
+    for d in ("01_智云导出", "02_我的表副本"):
+        p = base / d
+        if p.is_dir() and any(
+            x.is_file() and not x.name.startswith(("~$", "."))
+            for x in p.iterdir()
+        ):
+            return True
+    return False
+
+
+def resolve_workspace(workspace=None, *, quiet: bool = False):
+    """
+    把调用方给的 --workspace 解析成**真正那个工作区**。
+
+    为什么要有它（2026-07-25 opencode 实测踩到）：
+      AI 会 `cd` 进技能目录再传 `--workspace .`。旧版 `ensure_out_dirs` 二话不说
+      在那儿新建四个空目录 → **产出被劈成两半**：判定/校验落在 `工作区/04_产出/`、
+      日清和流转计划落在技能根的 `04_产出/`。
+      后果不是"文件不好找"这么轻：她说「确认」时 `apply_all` 按默认工作区去找
+      流转计划**找不到**，于是**只写盈亏、静默跳过流转，还不报错**。
+
+    规则：
+      1. 给的目录本身就有输入 → 用它
+      2. 给的目录没有、但它下面的 `工作区/` 有 → **自动纠正**过去（喊一声）
+      3. 都没有 → 回退技能自带工作区（若那儿有输入），否则原样返回让调用方去报缺
+    """
     from pathlib import Path as _P
 
     base = _P(workspace) if workspace else WORK
-    for d in ("01_智云导出", "02_我的表副本", "03_台账", "04_产出"):
+    if _has_inputs(base):
+        return base
+    nested = base / "工作区"
+    if _has_inputs(nested):
+        if not quiet:
+            import sys as _s
+
+            print(
+                f"注意：{base} 里没有输入，已自动改用 {nested}（产出也会落在那儿，不会分家）",
+                file=_s.stderr,
+            )
+        return nested
+    if _has_inputs(WORK):
+        if not quiet and _P(base).resolve() != WORK.resolve():
+            import sys as _s
+
+            print(f"注意：{base} 里没有输入，已自动改用技能自带工作区 {WORK}", file=_s.stderr)
+        return WORK
+    return base
+
+
+def ensure_out_dirs(workspace=None):
+    """
+    解析出真正的工作区并建齐四个子目录。**返回解析后的工作区**——
+    调用方必须用返回值，别再用自己那个 raw 路径（否则又会分家）。
+    """
+    base = resolve_workspace(workspace)
+    for d in WS_SUBDIRS:
         (base / d).mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def parse_rate_args(rate_items: Optional[Sequence[str]]) -> Dict[str, float]:

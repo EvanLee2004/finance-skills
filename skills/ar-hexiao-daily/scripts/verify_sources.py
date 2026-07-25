@@ -121,7 +121,7 @@ def main(argv=None) -> int:
     ap.add_argument("action", choices=["snapshot", "verify"])
     ap.add_argument("--workspace", default=str(common.WORK))
     args = ap.parse_args(argv)
-    ws = Path(args.workspace)
+    ws = common.resolve_workspace(args.workspace)
     return do_snapshot(ws) if args.action == "snapshot" else do_verify(ws)
 
 

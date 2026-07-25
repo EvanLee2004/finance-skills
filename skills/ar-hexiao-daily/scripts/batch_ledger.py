@@ -201,7 +201,7 @@ def suggest_date(workspace: Path, today: Optional[dt.date] = None) -> Dict[str, 
 
 
 def _cmd_gaps(args) -> int:
-    ws = Path(args.workspace)
+    ws = common.resolve_workspace(args.workspace, quiet=True)
     through = common.resolve_batch_date(args.through) if args.through else None
     info = find_gaps(ws, through=through, include_weekend=args.all_days)
     if info["first_use"]:
@@ -230,7 +230,7 @@ def _cmd_gaps(args) -> int:
 
 
 def _cmd_record(args) -> int:
-    ws = Path(args.workspace)
+    ws = common.resolve_workspace(args.workspace, quiet=True)
     d = common.resolve_batch_date(args.hexiao_date)
     if d is None:
         print(f"ERROR: 认不出核销日期 {args.hexiao_date!r}", file=sys.stderr)
@@ -246,7 +246,7 @@ def _cmd_record(args) -> int:
 
 
 def _cmd_show(args) -> int:
-    ws = Path(args.workspace)
+    ws = common.resolve_workspace(args.workspace, quiet=True)
     data = load(ws)
     runs = data.get("runs") or {}
     if not runs:

@@ -353,3 +353,109 @@ def test_suggest_walks_forward_day_by_day(tmp_path):
     assert BL.suggest_date(tmp_path, today=dt.date(2026, 7, 24))["date"] == dt.date(2026, 7, 21)
     BL.record(tmp_path, dt.date(2026, 7, 21), "applied", payments=1)
     assert BL.suggest_date(tmp_path, today=dt.date(2026, 7, 24))["date"] == dt.date(2026, 7, 22)
+
+
+# ══════════════════════════════════════════════════════════
+# D. 工作区解析（2026-07-25 opencode 实测踩到：产出分家 → 流转静默不写）
+# ══════════════════════════════════════════════════════════
+
+def _fake_ws(tmp_path):
+    """造一个"像在用"的工作区：02_我的表副本 里有文件。"""
+    ws = tmp_path / "工作区"
+    for d in ("01_智云导出", "02_我的表副本", "03_台账", "04_产出"):
+        (ws / d).mkdir(parents=True, exist_ok=True)
+    (ws / "02_我的表副本" / "盈亏副本.xlsx").write_bytes(b"x")
+    return ws
+
+
+def test_resolve_workspace_uses_dir_with_inputs(tmp_path):
+    ws = _fake_ws(tmp_path)
+    assert C.resolve_workspace(ws, quiet=True) == ws
+
+
+def test_resolve_workspace_corrects_parent_to_nested(tmp_path):
+    """
+    AI 会 cd 进技能目录再传 `--workspace .`。旧版就地新建四个空目录 →
+    判定/校验落 `工作区/04_产出/`、日清和流转计划落技能根 `04_产出/` → **产出分家**。
+    真正的伤害在后面：她说「确认」时 apply_all 按默认工作区找流转计划找不到，
+    于是**只写盈亏、静默跳过流转还不报错**。所以必须自动纠正到真工作区。
+    """
+    _fake_ws(tmp_path)
+    assert C.resolve_workspace(tmp_path, quiet=True) == tmp_path / "工作区"
+
+
+def test_ensure_out_dirs_returns_resolved_and_does_not_pollute(tmp_path):
+    """`ensure_out_dirs` 必须返回纠正后的工作区，且不在错误位置留空壳目录。"""
+    _fake_ws(tmp_path)
+    got = C.ensure_out_dirs(tmp_path)
+    assert got == tmp_path / "工作区"
+    assert not (tmp_path / "01_智云导出").exists()
+
+
+def test_empty_dir_is_not_treated_as_workspace(tmp_path):
+    """空目录（只有四个空子夹）不算"在用的工作区"，不能把它当成真工作区。"""
+    for d in ("01_智云导出", "02_我的表副本"):
+        (tmp_path / d).mkdir(parents=True)
+    assert C._has_inputs(tmp_path) is False
+
+
+def test_stray_hexiao_date_arg_does_not_crash_chain():
+    """
+    防呆：AI 常把 --hexiao-date 顺手传给链上每个脚本。用不到也得收下，
+    否则 argparse 直接报错、整条链断在中间（实测断过一次）。
+    """
+    import build_flow_plan, build_worklist, validate_plan
+    for mod in (build_flow_plan, build_worklist, validate_plan):
+        ap = mod.main.__globals__["argparse"].ArgumentParser()
+    # 直接验证参数被接受：解析不该抛异常
+    import subprocess, sys as _s
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parents[1]
+    r = subprocess.run(
+        [_s.executable, str(root / "scripts" / "build_flow_plan.py"),
+         "--hexiao-date", "2026-07-22", "--workspace", str(root / "工作区")],
+        capture_output=True, text=True,
+    )
+    assert "unrecognized arguments" not in (r.stderr or "")
+
+
+# ══════════════════════════════════════════════════════════
+# E. 取数防呆：数据已在就别再登录（2026-07-25 opencode 实测踩到）
+# ══════════════════════════════════════════════════════════
+
+def test_already_fetched_detects_full_set(tmp_path):
+    """她手导过、或上一轮取过 → 四件套齐了就该跳过取数，不该卡在输密码上。"""
+    import fetch_zhiyun as FZ
+    d = tmp_path / "01_智云导出"
+    d.mkdir(parents=True)
+    for k in ("回款记录", "订单交付", "核销明细", "订单明细"):
+        (d / f"{k}_20260722.xlsx").write_bytes(b"x")
+    assert len(FZ.already_fetched(d, "2026-07-22")) == 4
+
+
+def test_already_fetched_partial_or_other_day(tmp_path):
+    import fetch_zhiyun as FZ
+    d = tmp_path / "01_智云导出"
+    d.mkdir(parents=True)
+    (d / "回款记录_20260722.xlsx").write_bytes(b"x")
+    (d / "订单交付_20260721.xlsx").write_bytes(b"x")   # 别的日子的不算
+    assert len(FZ.already_fetched(d, "2026-07-22")) == 1
+    assert FZ.already_fetched(d, "2026-07-23") == []
+
+
+def test_flow_write_is_idempotent(tmp_path):
+    """
+    重跑不该把同样的值再写一遍（2026-07-25 实测：重跑又写 11 笔、每次多一个备份，
+    看着像又干了活）。表里已经是这个值 → 跳过、不备份、不重写。
+    """
+    src = _flow(tmp_path, [[dt.date(2026, 7, 24), "某某公司", 1000.0, "", ""]])
+    it = _flow_item(2)
+    changes, problems = AF.write_flow_items(tmp_path, [it], in_place=True)
+    assert not problems and len(changes) == 1          # 第一遍：真写
+    h1 = C.sha256_file(src)
+
+    changes2, problems2 = AF.write_flow_items(tmp_path, [it], in_place=True)
+    assert not problems2
+    assert changes2 == []                               # 第二遍：什么都不写
+    assert C.sha256_file(src) == h1                     # 文件一个字节没动
+    assert len(list((tmp_path / "02_我的表副本" / "备份").glob("*"))) == 1  # 不多存备份

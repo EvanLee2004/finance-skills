@@ -294,10 +294,10 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--out", default="", help="清单 xlsx 路径")
     ap.add_argument("--flow-plan", default="", help="流转写入计划_校验后.json；默认取 04_产出 最新")
+    ap.add_argument("--hexiao-date", default="", help="（日期以判定结果为准，收下防止链路中断）")
     args = ap.parse_args(argv)
 
-    ws = Path(args.workspace)
-    common.ensure_out_dirs(ws)
+    ws = common.ensure_out_dirs(args.workspace)  # 解析真工作区，防产出分家
     out_dir = ws / "04_产出"
 
     result_path = Path(args.result) if args.result else _latest(out_dir, "判定结果_*.json")

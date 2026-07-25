@@ -181,6 +181,7 @@ def write_flow_items(
 
     changes: List[dict] = []
     problems: List[str] = []
+    skipped: List[dict] = []
     today = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     for fname, group in by_file.items():
@@ -233,11 +234,31 @@ def write_flow_items(
                 write_updated = it.get("write_updated")
                 if write_updated is None:
                     write_updated = True
-                did_order = bool(write_order and order_v)
+                # 幂等：表里已经是这个值就别再写一遍（2026-07-25 实测：重跑会重写同样的
+                # 11 笔、每次多存一个备份、还报「写入完成 11 笔」，看着像又干了活）
+                cur_vals = list(rows[r - 1]) if r - 1 < len(rows) else []
+
+                def _cur(idx0):
+                    return str(cur_vals[idx0] or "").strip() if idx0 < len(cur_vals) else ""
+
+                def _norm_lines(s):
+                    return "\n".join(
+                        x.strip() for x in str(s).replace("\r", "").split("\n") if x.strip()
+                    )
+
+                same_order = _norm_lines(_cur(cols["单号"])) == _norm_lines(order_v)
+                same_upd = _cur(cols["是否更新应收款"]) == upd_v
+
+                did_order = bool(write_order and order_v and not same_order)
                 if did_order:
                     edits.append((r, col_order, order_v))
-                if write_updated:
+                do_upd = bool(write_updated and not same_upd)
+                if do_upd:
                     edits.append((r, col_upd, upd_v))
+                if not did_order and not do_upd:
+                    skipped.append(it)
+                    continue
+                write_updated = do_upd
                 changes.append(
                     {
                         "ar": it.get("ar"),
@@ -251,8 +272,8 @@ def write_flow_items(
             all_edits_by_sheet[sheet_name] = edits
         wb.close()
 
-        if not all_edits_by_sheet:
-            continue
+        if not any(all_edits_by_sheet.values()):
+            continue  # 这份文件里的都跟表里一样，不备份不重写
 
         backup_dir = src.parent / "备份"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -344,6 +365,8 @@ def write_flow_items(
             for t in tmps:
                 t.unlink(missing_ok=True)
 
+    if skipped:
+        print(f"流转：{len(skipped)} 笔表里已经是这个值，跳过（幂等，不重复写、不多存备份）")
     return changes, problems
 
 
@@ -392,7 +415,7 @@ def main(argv=None) -> int:
         print("流转无可自动写的笔（全是手填/跳过）。什么都没改。")
         return 0
 
-    ws = Path(args.workspace)
+    ws = common.resolve_workspace(args.workspace)
     changes, problems = write_flow_items(ws, items, in_place=args.in_place)
     report = Path(args.report) if args.report else (
         ws / "04_产出" / f"流转变更清单_{dt.date.today().strftime('%Y%m%d')}.xlsx"
@@ -406,7 +429,10 @@ def main(argv=None) -> int:
         for p in problems[:15]:
             print(f"  - {p}", file=sys.stderr)
         return 1
-    print(f"流转写入完成：{len(changes)} 笔")
+    if changes:
+        print(f"流转写入完成：{len(changes)} 笔")
+    else:
+        print("流转：没有需要改的（表里已经是这个值）。什么都没写。")
     return 0
 
 

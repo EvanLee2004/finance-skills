@@ -94,8 +94,7 @@ def main():
     ap.add_argument("--workspace", default=str(common.WORK), help="工作区根目录")
     ap.add_argument("--report", default="", help="运行报告输出路径")
     args = ap.parse_args()
-    ws = Path(args.workspace)
-    common.ensure_out_dirs()
+    ws = common.ensure_out_dirs(args.workspace)
     files = list_files(ws)
     lines = [
         f"工作区：{ws.resolve()}",

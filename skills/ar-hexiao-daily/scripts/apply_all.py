@@ -93,7 +93,7 @@ def main(argv=None) -> int:
     # 2) 流转
     flow_plan = args.flow_plan
     if not flow_plan:
-        ws = Path(args.workspace)
+        ws = common.resolve_workspace(args.workspace)
         cand = ws / "04_产出" / "流转写入计划_校验后.json"
         if cand.is_file():
             flow_plan = str(cand)

@@ -183,36 +183,39 @@ SOD 凑不出唯一 / 一 SO 多行 / 手续费 / 尾差 / 跨年 → 带选项�
 
 ### 3.1 主路径命令
 
+**⚠ 照抄，别自己改路径、别加 `--workspace`。**
+所有脚本默认就用技能自带的 `工作区/`，**不传最稳**。传了 `--workspace .` 这种相对路径，
+产出会分家（判定落一处、日清落另一处），她说确认时流转计划找不到 → **只写盈亏、静默漏掉流转**。
+（程序现在会自动纠正并喊一声，但别去踩。）她的表放在别处时，才传**绝对路径**。
+
 ```bash
-SKILL="<本skill目录>"
-WS="$SKILL/工作区"
-LEDGER="$WS/02_我的表副本/<盈亏副本.xlsx>"
-HX="2026-07-24"          # ★ 核销日期：§0.4 复述并经她确认后才填进来
+cd "<本skill目录>"                # ← 只做这一件事，后面全用相对脚本名
+HX=2026-07-24                     # ★ §0.4 复述并经她确认后才填
 
 # ① 先看有没有漏掉的核销日（有就先报给她，一天一批补）
-python3 "$SKILL/scripts/batch_ledger.py"    gaps --workspace "$WS"
+python3 scripts/batch_ledger.py    gaps
 
-python3 "$SKILL/scripts/fetch_zhiyun.py"    --date "$HX" --workspace "$WS"
-python3 "$SKILL/scripts/verify_sources.py"  snapshot --workspace "$WS"
-python3 "$SKILL/scripts/inspect_inputs.py"  --workspace "$WS"
-# --hexiao-date：数据实际是哪天，跟她确认的那天对不上就退出（防取错日子）
-python3 "$SKILL/scripts/classify_hexiao.py" --workspace "$WS" --hexiao-date "$HX"
-python3 "$SKILL/scripts/validate_plan.py" \
-  --plan "$WS/04_产出/判定结果_*.json" --ledger "$LEDGER" \
-  --out "$WS/04_产出/写入计划_校验后.json"
-python3 "$SKILL/scripts/build_flow_plan.py" --workspace "$WS"
-python3 "$SKILL/scripts/build_worklist.py"  --workspace "$WS"
+# ② 取数。**这天的四件套已经在 01_智云导出/ 里就会自动跳过**（她手导的也算）。
+#    要登录时它会当场问她账密——⛔ 你（AI）绝不替她输、绝不写进命令行或环境变量。
+#    不在内网 / 非交互环境跑不了这步：那就让她手导四张表放进 01_智云导出/，直接跳到 ③。
+python3 scripts/fetch_zhiyun.py    --date "$HX"
+python3 scripts/verify_sources.py  snapshot
+python3 scripts/inspect_inputs.py
+python3 scripts/classify_hexiao.py --hexiao-date "$HX"   # 数据不是这天就退出，防取错日子
+python3 scripts/validate_plan.py                          # 判定结果与盈亏副本自动找
+python3 scripts/build_flow_plan.py
+python3 scripts/build_worklist.py
 # ★ 停。把《核销日清》给她。禁止继续 apply。
 
 # 仅当她说「确认/OK/可以写/按这个写」：
-python3 "$SKILL/scripts/apply_all.py" \
-  --checked "$WS/04_产出/写入计划_校验后.json" \
-  --flow-plan "$WS/04_产出/流转写入计划_校验后.json" \
-  --ledger "$LEDGER" --workspace "$WS" \
+python3 scripts/apply_all.py \
+  --checked 工作区/04_产出/写入计划_校验后.json \
+  --ledger  工作区/02_我的表副本/<盈亏副本.xlsx> \
   --confirmed --in-place --flow-in-place
+# 流转计划不传会自动取 工作区/04_产出/流转写入计划_校验后.json
 # 头几次可去掉 --in-place / --flow-in-place，出新文件并排验
 
-python3 "$SKILL/scripts/verify_sources.py" verify --workspace "$WS"
+python3 scripts/verify_sources.py verify
 ```
 
 确认词：`确认` `OK` `ok` `可以写` `按这个写` `没问题写吧` `写吧`。  
@@ -250,7 +253,7 @@ python3 "$SKILL/scripts/verify_sources.py" verify --workspace "$WS"
 5. 写入前复核没过 → **重出日清让她重新确认**，不许硬写。  
 6. 对话只报笔数/路径/成败/日期。  
 7. 依赖：`pip install openpyxl xlrd`；智云另需 requests/playwright。  
-8. 测试：`python3 -m pytest tests/ -v`（应 ≥178 例全绿）。
+8. 测试：`python3 -m pytest tests/ -v`（应 ≥186 例全绿）。
 
 ## 5. 验收
 

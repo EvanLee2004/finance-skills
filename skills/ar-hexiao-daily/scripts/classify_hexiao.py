@@ -985,8 +985,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    ws = Path(args.workspace)
-    common.ensure_out_dirs(ws)
+    ws = common.ensure_out_dirs(args.workspace)  # 解析真工作区，防产出分家
     rates = common.parse_rate_args(args.rate)
 
     ledger = None
@@ -1093,6 +1092,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ws, hexiao_date, "classified",
                 payments=len(payments), counts=dict(c),
             )
+            # 顺手把漏天报出来。**不能指望编排的 AI 记得先跑 gaps**
+            # （2026-07-25 opencode 实测：它直接开跑，§0.4 的查漏天那步被跳过了）。
+            # 漏天是"事后看不出来"的错，宁可每次判完都提一句。
+            info = batch_ledger.find_gaps(ws, through=hexiao_date)
+            others = [g for g in info["gaps"] if g != hexiao_date]
+            if others:
+                short = "、".join(f"{g.month}-{g.day}" for g in others[:6])
+                print(
+                    f"\n⚠ 还有 {len(others)} 个核销日从来没跑过：{short}"
+                    f"{'…' if len(others) > 6 else ''}"
+                    f"\n   跟她说一句：这几天也没跑，要不要接着补？（一天一批，从早到晚）",
+                    file=sys.stderr,
+                )
         except Exception as e:  # 台账写不了不该让已算对的判定失败
             print(f"WARN: 跑批台账登记失败（不影响本次判定）：{type(e).__name__}", file=sys.stderr)
     return 0

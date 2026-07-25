@@ -214,17 +214,44 @@ def validate(plan: dict, rows: Dict[int, dict], ledger_path: Optional[Path] = No
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="写入前校验计划（plan→validate→execute）")
-    ap.add_argument("--plan", required=True, help="判定结果 json")
-    ap.add_argument("--ledger", required=True, help="盈亏核算表副本（只读）")
+    # --plan / --ledger 都可不给：不给就去工作区自己找（脏活归程序，别让 AI/她填路径）
+    ap.add_argument("--plan", default="", help="判定结果 json；不给则取 04_产出 最新")
+    ap.add_argument("--ledger", default="", help="盈亏核算表副本（只读）；不给则取 02_我的表副本/*盈亏*")
     ap.add_argument("--out", default="", help="校验后计划 json")
+    # 防呆：同上。--workspace 还用于在没给 --out 时把结果落进正确的 04_产出/
+    ap.add_argument("--workspace", default="", help="工作区根（没给 --out 时用它定产出位置）")
+    ap.add_argument("--hexiao-date", default="", help="（校验日期以判定结果为准，收下防止链路中断）")
     args = ap.parse_args(argv)
 
-    plan_p, ledger_p = Path(args.plan), Path(args.ledger)
+    ws = common.resolve_workspace(args.workspace or None)
+    out_dir = ws / "04_产出"
+
+    def _latest(pattern: str):
+        c = [p for p in sorted(out_dir.glob(pattern)) if not p.name.startswith("~$")]
+        return c[-1] if c else None
+
+    plan_p = Path(args.plan) if args.plan else (_latest("判定结果_*.json") or Path(""))
+    if args.ledger:
+        ledger_p = Path(args.ledger)
+    else:
+        cand = [
+            p for p in sorted((ws / "02_我的表副本").glob("*盈亏*"))
+            if not p.name.startswith(("~$", "."))
+        ] if (ws / "02_我的表副本").is_dir() else []
+        ledger_p = cand[0] if cand else Path("")
+
     if not plan_p.is_file():
-        print(f"ERROR: 找不到判定结果 {plan_p}", file=sys.stderr)
+        print(
+            f"ERROR: 找不到判定结果{f' {plan_p}' if args.plan else f'（{out_dir} 里没有 判定结果_*.json）'}"
+            "\n  先跑 classify_hexiao.py",
+            file=sys.stderr,
+        )
         return 2
     if not ledger_p.is_file():
-        print(f"ERROR: 找不到盈亏表 {ledger_p}", file=sys.stderr)
+        print(
+            f"ERROR: 找不到盈亏表{f' {ledger_p}' if args.ledger else f'（{ws}/02_我的表副本/ 里没有 *盈亏* 文件）'}",
+            file=sys.stderr,
+        )
         return 2
 
     plan = json.loads(plan_p.read_text(encoding="utf-8"))
@@ -235,7 +262,8 @@ def main(argv=None) -> int:
         return 2
 
     result = validate(plan, rows, ledger_path=ledger_p)
-    out_p = Path(args.out) if args.out else plan_p.with_name("写入计划_校验后.json")
+    # 没给 --out 就落进**解析后的工作区**的 04_产出/，别落到 plan 旁边（会跟日清分家）
+    out_p = Path(args.out) if args.out else (out_dir / "写入计划_校验后.json")
     out_p.parent.mkdir(parents=True, exist_ok=True)
     out_p.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 

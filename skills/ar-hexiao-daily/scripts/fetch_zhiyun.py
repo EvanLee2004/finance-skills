@@ -605,15 +605,48 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     return summary
 
 
+def already_fetched(out_dir: Path, day: str) -> List[str]:
+    """
+    这天的智云四件套是不是已经在 01_智云导出/ 里了。
+
+    为什么要查（2026-07-25 opencode 实测踩到）：她也可能**自己从智云手导**再放进来，
+    或者上一轮已经取过。旧版不管三七二十一先登录，结果在没有终端的环境里
+    卡死在输密码上（EOFError），整条链断在第一步。
+    """
+    stamp = day.replace("-", "")
+    need = ("回款记录", "订单交付", "核销明细", "订单明细")
+    if not out_dir.is_dir():
+        return []
+    got = []
+    for key in need:
+        for p in out_dir.glob("*.xlsx"):
+            if p.name.startswith("~$"):
+                continue
+            if key in p.name and (stamp in p.name or day in p.name):
+                got.append(p.name)
+                break
+    return got
+
+
 def resolve_credentials(args) -> Tuple[str, str]:
     user = (args.user or os.environ.get("ZHIYUN_USER") or "").strip()
     pwd = (args.password or os.environ.get("ZHIYUN_PASS") or "").strip()
     if args.cookie_only:
         return "", ""
-    if not user:
-        user = input("智云账号（邮箱/手机）: ").strip()
-    if not pwd:
-        pwd = getpass.getpass("智云密码（不回显、不落盘）: ")
+    try:
+        if not user:
+            user = input("智云账号（邮箱/手机）: ").strip()
+        if not pwd:
+            pwd = getpass.getpass("智云密码（不回显、不落盘）: ")
+    except (EOFError, KeyboardInterrupt):
+        # 非交互环境（AI 自动跑、CI、后台）——说清怎么办，别甩个 traceback
+        raise SystemExit(
+            "ERROR: 这里没法交互输密码（不是终端）。三选一：\n"
+            "  ① 她本人在终端里跑这条命令，当场输一次账密（推荐，密码不落盘）\n"
+            "  ② 她从智云手导那四张表放进 01_智云导出/，然后**跳过取数**直接判定\n"
+            "  ③ 已有 MD_PSS_ID 时用 --cookie-only\n"
+            "  ⛔ 绝不要把密码写进命令行或环境变量传给 AI（会进日志/会话记录）"
+        )
     if not user or not pwd:
         raise SystemExit("ERROR: 需要账号和密码（或改用 --cookie-only + MD_PSS_ID）")
     return user, pwd
@@ -630,6 +663,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument(
         "--skip-gap-check", action="store_true",
         help="不查漏天（默认会查：有从没跑过的核销日就先报出来）",
+    )
+    ap.add_argument(
+        "--force", action="store_true",
+        help="这天的四件套已在 01_智云导出/ 里也强制重新取一遍",
     )
     ap.add_argument("--workspace", default="", help="技能工作区根（含 01_智云导出）")
     ap.add_argument("--out", default="", help="直接指定导出目录（优先于 workspace）")
@@ -675,6 +712,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("   → 一天一批补，从最早那天开始：--date <那天>。别几天合成一批。")
         except Exception as e:
             print(f"WARN: 漏天检查跳过（{type(e).__name__}）", file=sys.stderr)
+
+    # ③ 这天的数据已经在了就别再登录取一遍（她手导的、或上一轮取过的）
+    have = already_fetched(out_dir, day)
+    if len(have) == 4 and not args.force:
+        print(
+            f"✅ {day} 的智云四件套已经在 {out_dir} 里了，**不用再取数**：\n   "
+            + "\n   ".join(have)
+            + "\n👉 直接往下跑判定即可（要强制重取加 --force）"
+        )
+        return 0
+    if have:
+        print(f"注意：{out_dir} 里已有 {len(have)}/4 份该日文件，缺的那几份会重新取。")
 
     cookie = (os.environ.get("MD_PSS_ID") or "").strip()
     account_id = (args.account_id or "").strip()

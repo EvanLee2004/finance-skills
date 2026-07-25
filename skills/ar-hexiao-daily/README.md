@@ -128,7 +128,7 @@ fetch_zhiyun --date <核销日> → verify_sources snapshot → inspect_inputs
 
 ## 验收口径（判断脚本对不对）
 
-- pytest **≥178 例全绿**；无 `--confirmed` 时 apply 必须拒绝。
+- pytest **≥186 例全绿**；无 `--confirmed` 时 apply 必须拒绝。
 - **确认之后她动了表** → apply 必须非 0 退出且源表哈希**仍然不变**（一个字节没写）。
 - **漏天查得出**：跑过 7-20 与 7-23 后，`batch_ledger gaps` 必须报出 7-21 / 7-22。
 - **金标（2026-07-22 真实 13 笔）**：157 个 SOD 行、可填 143、与她手工填的**逐格一致 143/143**、异常 0、13 笔到账全覆盖。改完代码这条必须仍成立。
