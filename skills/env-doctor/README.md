@@ -11,11 +11,14 @@
 1. **同事主动**说「配下环境 / 把依赖装齐」→ agent 照清单「一把全装」命令装齐（国内镜像）。
 2. **任何技能报缺依赖**（ModuleNotFoundError、找不到 soffice/tesseract 等）→ agent 自动查清单、按国内镜像装上、重试原技能，不用同事操心。
 
-## 覆盖范围（截至 2026-06-24，8 个技能）
+> 本技能属**行为/环境层**，不是财务业务技能，因此 README 不套
+> [`docs/技能README模板.md`](../../docs/技能README模板.md) 的「手工怎么做 / 人+AI 流程」三段。
+
+## 覆盖范围（依赖清单以 `config/依赖与安装清单.md` 为准）
 
 - Python 核心库：pandas、openpyxl、pypdf、pdfplumber、pdf2image、python-docx、python-pptx、markitdown、lxml、defusedxml、Pillow
 - PDF 高级（按需）：pytesseract、reportlab、pypdfium2
 - 系统级：LibreOffice、poppler、tesseract、Node.js
 - Python ≥3.10（可选校验路径需要）
 
-详见 [`config/依赖与安装清单.md`](config/依赖与安装清单.md)。
+**加了新技能 = 改这张清单**（不是改代码）。详见 [`config/依赖与安装清单.md`](config/依赖与安装清单.md)。

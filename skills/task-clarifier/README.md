@@ -6,4 +6,7 @@
 - 核心铁律见 `SKILL.md`。
 - **改编自 [trailofbits/skills](https://github.com/trailofbits/skills) 的 `ask-questions-if-underspecified`（CC BY-SA 4.0, © Trail of Bits）；本技能文件同以 CC BY-SA 4.0 共享。**
 
+> 本技能属**行为层**（纯提示词、无脚本、不碰业务数据），因此 README 不套
+> [`docs/技能README模板.md`](../../docs/技能README模板.md) 的「手工怎么做 / 人+AI 流程」三段。
+
 维护：李明昊，2026-06。
