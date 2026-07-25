@@ -172,8 +172,14 @@ def build_workbook(
     fc = (flow_plan or {}).get("counts") or {}
     m_write = int(fc.get("write") or 0)
     m_hand = int(fc.get("hand") or 0)
+    # 日期抬头：她可能今天补跑上周三的批次，也可能隔天才回来确认。
+    # 不把「这是哪一天的」印在最显眼的地方，她核对的就可能是另一天的账。
+    hx = result.get("hexiao_date") or ""
     lines = [
         ["《核销日清》—— 一份就够，别的表都不用开"],
+        [f"★ 核销日期：{common.date_cn(hx) if hx else '(数据里没有核销日期，请核对取数)'}"],
+        [f"  （这批算的是**销售在这一天核销**的到账；跟钱哪天到银行、你哪天建的回款没关系）"],
+        [f"  清单生成时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"],
         [""],
         [f"这次一共 {result.get('payment_count', '?')} 笔到账，拆成 {counts.get('total', 0)} 个订单行。"],
         [""],
@@ -326,8 +332,12 @@ def main(argv=None) -> int:
         except Exception as e:
             print(f"WARN: 无法生成流转计划：{e}", file=sys.stderr)
 
+    # 文件名跟**核销日**走，不跟运行日走：她补跑 7-22 时若按运行日命名，
+    # 会跟今天那批撞名甚至盖掉，事后翻出来也分不清哪份是哪天的。
+    hexiao_date = common.norm_date(result.get("hexiao_date"))
+    stamp = hexiao_date.strftime("%Y%m%d") if hexiao_date else dt.date.today().strftime("%Y%m%d")
     today = dt.date.today().strftime("%Y%m%d")
-    out_path = Path(args.out) if args.out else out_dir / f"核销日清_{today}.xlsx"
+    out_path = Path(args.out) if args.out else out_dir / f"核销日清_{stamp}.xlsx"
     build_workbook(result, checked, out_path, flow_plan=flow_plan)
 
     rows = collect_rows(result, checked)
@@ -335,13 +345,23 @@ def main(argv=None) -> int:
     for r in rows:
         tally[r[1]] = tally.get(r[1], 0) + 1
     fc = (flow_plan or {}).get("counts") or {}
+    print(f"核销日期：{common.date_cn(hexiao_date) if hexiao_date else '(未知·请核对取数)'}")
     print("《核销日清》已生成：" + " / ".join(f"{k} {v}" for k, v in tally.items()))
     print(
         f"流转：确认后自动写 {fc.get('write', 0)} · 须手填 {fc.get('hand', 0)} · 跳过 {fc.get('skip', 0)}"
     )
     print(f"结果: {out_path}")
 
+    if hexiao_date is not None:
+        try:
+            import batch_ledger
+
+            batch_ledger.record(ws, hexiao_date, "listed", counts=tally)
+        except Exception as e:
+            print(f"WARN: 跑批台账登记失败（不影响清单）：{type(e).__name__}", file=sys.stderr)
+
     (out_dir / f"运行报告_{today}.txt").write_text(
+        f"核销日期 {result.get('hexiao_date') or '(未知)'}\n"
         f"清单 {out_path.name}\n"
         f"判定 {result_path.name}\n"
         f"校验 {checked_path.name if checked else '(未跑 validate_plan)'}\n"

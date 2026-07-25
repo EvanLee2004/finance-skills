@@ -150,25 +150,30 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     if not filled:
         return {"verdict": "write", "reason": "回款列为空，可写（是否结账为她表预置默认，不计入已填证据）"}
 
-    same = all(
-        _norm(row.get(k)) == _norm(five.get(k))
-        for k in FIVE
-        if five.get(k) is not None
-    )
-    if same:
+    # 这行她已经填过了 → 逐列比对。**两种不一致都算不一致**：
+    #   ① 计划有值 ≠ 表里的值
+    #   ② 计划算的是「留空」，但表里填了值 —— 2026-07-25 修：旧版 `if five.get(k) is not None`
+    #      把这种整个跳过了，结果「表里计提=1000、本次算的是留空」会被判成"已填过且一致·跳过"，
+    #      静默放过。而「计提到底该不该填」恰恰是明妹口径里最容易出错的一条
+    #      （回款明细合计 = 交付额才可填计提），漏报等于把最该她看的那行藏起来。
+    diff: List[str] = []
+    for k in FIVE:
+        want, got = five.get(k), _norm(row.get(k))
+        if want is None:
+            if got not in ("", "None"):
+                diff.append(f"{k}: 表里={got!r} 本次算的是**留空**")
+            continue
+        if got != _norm(want):
+            diff.append(f"{k}: 表里={got!r} 计划={_norm(want)!r}")
+    if not diff:
         return {"verdict": "skip", "reason": "已经填过且与本次一致（幂等跳过）"}
-    diff = [
-        f"{k}: 表里={_norm(row.get(k))!r} 计划={_norm(five.get(k))!r}"
-        for k in FIVE
-        if five.get(k) is not None and _norm(row.get(k)) != _norm(five.get(k))
-    ]
     return {
         "verdict": "conflict",
         "reason": "这行已经填过，且和本次算的不一样 → " + "；".join(diff),
     }
 
 
-def validate(plan: dict, rows: Dict[int, dict]) -> dict:
+def validate(plan: dict, rows: Dict[int, dict], ledger_path: Optional[Path] = None) -> dict:
     items = list(plan.get("auto") or [])
     checked: List[dict] = []
     seen_rows: Dict[int, str] = {}
@@ -183,15 +188,28 @@ def validate(plan: dict, rows: Dict[int, dict]) -> dict:
             }
         elif res["verdict"] == "write":
             seen_rows[ref] = it.get("case_id") or ""
-        checked.append({**it, "_check": res})
+        item = {**it, "_check": res}
+        # 校验这一刻该行的身份，写进计划带给 apply。
+        # apply 拿它跟**写入那一刻**的表再对一次：对不上说明中间被插过行/删过行。
+        cur = rows.get(int(ref)) if ref else None
+        if cur is not None:
+            item["_identity"] = {"row": int(ref), "SO": cur["SO"], "SOD": cur["SOD"]}
+        checked.append(item)
     buckets = {"write": [], "skip": [], "conflict": []}
     for c in checked:
         buckets[c["_check"]["verdict"]].append(c)
-    return {
+    out = {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "hexiao_date": plan.get("hexiao_date") or "",
         "counts": {k: len(v) for k, v in buckets.items()},
         **buckets,
     }
+    if ledger_path is not None:
+        # 盈亏副本在「校验」这一刻的指纹。apply 前会再算一次比对：
+        # 不一致 = 她在"看清单 → 说确认"这段时间动过表 → 拒写，让她重跑一遍（几十秒的事）。
+        out["ledger_path"] = str(ledger_path)
+        out["ledger_sha256"] = common.sha256_file(ledger_path)
+    return out
 
 
 def main(argv=None) -> int:
@@ -216,12 +234,14 @@ def main(argv=None) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
-    result = validate(plan, rows)
+    result = validate(plan, rows, ledger_path=ledger_p)
     out_p = Path(args.out) if args.out else plan_p.with_name("写入计划_校验后.json")
     out_p.parent.mkdir(parents=True, exist_ok=True)
     out_p.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     c = result["counts"]
+    if result.get("hexiao_date"):
+        print(f"核销日期：{common.date_cn(result['hexiao_date'])}")
     print(f"校验完成 可写={c['write']} 幂等跳过={c['skip']} 冲突={c['conflict']}")
     for x in result["conflict"][:10]:
         print(f"  ⚠ {x.get('case_id')}: {x['_check']['reason']}")

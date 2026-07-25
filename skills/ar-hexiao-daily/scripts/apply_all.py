@@ -25,6 +25,33 @@ except Exception:
     pass
 
 
+def _record_done(args, *, ledger_written: bool, flow_written: bool) -> None:
+    """
+    写完表 → 在跑批台账上把这个核销日标成「已写表·收工」。
+    只有落到这一步，`batch_ledger gaps` 才不会再把这天算成没跑过。
+    """
+    try:
+        import json
+
+        import batch_ledger
+
+        plan = json.loads(Path(args.checked).read_text(encoding="utf-8"))
+        d = common.norm_date(plan.get("hexiao_date"))
+        if d is None:
+            print(
+                "WARN: 这份计划里没有核销日期（旧版计划），跑批台账没法登记这一天。",
+                file=sys.stderr,
+            )
+            return
+        batch_ledger.record(
+            Path(args.workspace), d, "applied",
+            written={"盈亏": bool(ledger_written), "流转": bool(flow_written)},
+        )
+        print(f"跑批台账：{common.date_cn(d)} 已标记「已写表·收工」")
+    except Exception as e:
+        print(f"WARN: 跑批台账登记失败（不影响已写入的数据）：{type(e).__name__}", file=sys.stderr)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="确认后：盈亏 → 流转")
     ap.add_argument("--checked", required=True, help="盈亏 写入计划_校验后.json")
@@ -72,6 +99,7 @@ def main(argv=None) -> int:
             flow_plan = str(cand)
     if not flow_plan or not Path(flow_plan).is_file():
         print("WARN: 无流转写入计划，跳过流转写入（盈亏已成功）。")
+        _record_done(args, ledger_written=True, flow_written=False)
         return 0
 
     flow_args = [
@@ -87,8 +115,10 @@ def main(argv=None) -> int:
             f"WARN: 盈亏已写成功，但流转写入 EXIT:{rc2}（请看流转变更/手填项）。",
             file=sys.stderr,
         )
+        _record_done(args, ledger_written=True, flow_written=False)
         return rc2
     print("统一写入完成：盈亏 + 流转")
+    _record_done(args, ledger_written=True, flow_written=True)
     return 0
 
 

@@ -17,10 +17,12 @@
 
 ```mermaid
 flowchart TD
+    D0["⓪ 先定「跑哪个核销日」<br/>batch_ledger gaps 查漏天<br/>→ 复述给她确认 → 才取数"] --> A
+    D0 -.->|"有从没跑过的天"| GAP["⚠ 先报漏天<br/>一天一批补 · 禁止合并"]
     subgraph 取数["① 取数 · 只有一个入口"]
-        A["智云·财务管理·回款记录<br/>只筛 核销日期 = 昨天"] --> B["每笔到账点进去读3张关联子表<br/>下单SO+交付额 / 同币种核销明细逐SO / 由SO查订单明细拿SOD"]
+        A["智云·财务管理·回款记录<br/>只筛 核销日期 = 她确认的那天"] --> B["每笔到账点进去读3张关联子表<br/>下单SO+交付额 / 同币种核销明细逐SO / 由SO查订单明细拿SOD"]
     end
-    B --> C{"② SOD级判定<br/>classify_hexiao.py<br/>一行 = 一个SOD"}
+    B --> C{"② SOD级判定<br/>classify_hexiao.py<br/>一行 = 一个SOD<br/>混多个核销日 → 直接退出"}
     C -->|"定位到唯一SOD行"| HIT["✅ 命中 · 可填"]
     C -->|"没逐单金额/没回满/多行同额/还没交付/跨年"| HOLD["⏸ 挂起 hold"]
     C -->|"核销比到账还多/没挂订单/作废"| EXC["⛔ 冲突 · 异常"]
@@ -30,15 +32,31 @@ flowchart TD
     COV["③ 覆盖率硬校验<br/>每笔到账都必须有判定<br/>对不齐就报错退出 · 绝不静默丢单"] --> V["④ 写入前校验 validate_plan<br/>拿她当前盈亏表逐行复核<br/>已填过→跳过 · 行号还对不对 · 值合法吗"]
     V --> W[["⑤ 《核销日清》一份<br/>今天填N / 已填跳过S / 冲突C / 挂账M / 异常K"]]
     W ==>|"★ 到这必须停"| G{"⑥ 她打开扫一眼<br/>说 确认 / 可以写?"}
-    G -->|"确认"| AP["⑦ apply_to_copy --confirmed<br/>只写盈亏『明细』sheet<br/>写前自动备份 · 写后回读比对"]
+    G -->|"确认"| PRE{"⑦ 写入前复核<br/>指纹 + 每行SO/SOD身份<br/>流转比 日期/公司/金额"}
     G -->|"没确认"| STOP["🔒 不写 · 就停在这"]
-    AP --> VS["⑧ verify_sources<br/>证明确认前源表哈希没变过"]
-    W -.->|"挂账待办"| R["⑨ rescan_holds 重扫<br/>下次到账/交付进表后再判"]
+    PRE -->|"她在这期间动过表"| REDO["⛔ 整批拒写 · 一个字节没动<br/>重出日清让她再确认一次"]
+    PRE -->|"没动过"| AP["⑧ apply_all --confirmed<br/>先盈亏『明细』· 后流转安全子集<br/>写前备份 · 写后回读比对(含SOD)"]
+    AP --> VS["⑨ verify_sources<br/>证明确认前源表哈希没变过"]
+    AP --> BL["⑩ 跑批台账登记<br/>这个核销日=已写表·收工"]
+    W -.->|"挂账待办"| R["rescan_holds 重扫<br/>下次到账/交付进表后再判"]
 
+    style D0 fill:#dbeafe,stroke:#1d4ed8,color:#000
     style W fill:#fde68a,stroke:#b45309,color:#000
     style G fill:#fecaca,stroke:#b91c1c,color:#000
+    style PRE fill:#fecaca,stroke:#b91c1c,color:#000
     style AP fill:#bbf7d0,stroke:#15803d,color:#000
 ```
+
+### 两个日期别混（2026-07-25 立）
+
+| 日期 | 是什么 | 驱动 |
+|---|---|---|
+| **到账日期** | 钱哪天到银行 | 第 1–4 步（日记账 / 挑收入 / 流转表 / 建回款） |
+| **核销日期** | 销售哪天在智云把钱核到订单上 | **第 6 步起（本技能默认口径）** |
+
+她的口径原话：「与建回款无固定隔天关系；核了就进那个核销日」→ 两者**天然不是同一天**。
+所以每次开跑先 `batch_ledger gaps` 查漏天、再把日期复述给她确认；**一批只跑一天**，
+产出一律按**核销日**命名（补跑历史日才不会跟今天那批撞名）。
 
 ## 判定怎么分类 · 每笔到账 → SOD
 
@@ -81,30 +99,35 @@ flowchart TD
 
 ## 触发词（同事说这些话会自动用它）
 
-跑昨天的核销 / 做核销 / 应收核销 / 回款核销 / 核销清单 / 日清 / 挂账还有哪些没做 / 重扫挂账 / 拉智云 / 抓核销 / 确认回填 / 可以写了 / 按这个写
+跑昨天的核销 / 做核销 / 应收核销 / 回款核销 / 核销清单 / 日清 / 挂账还有哪些没做 / 重扫挂账 / 拉智云 / 抓核销 / 确认回填 / 可以写了 / 按这个写 / 跑X月X号的核销 / 补上周的核销 / 哪几天没跑 / 有没有漏的天
 
 ## 会变的在哪（改表不改码）
 
 | 文件 | 改什么 |
 |---|---|
-| `config/业务规则.md` | 手续费口径、尾差阈值、跨年老单等待拍板项 |
+| `config/业务规则.md` | 手续费口径、尾差阈值、跨年老单、**日期口径与写前复核** |
+| `工作区/03_台账/跑批台账.json` | 哪个核销日跑过/漏了（程序自动写，也可人工订正） |
 | `config/判定码.json` | E 码文案 / 大白话 |
 | `config/列名别名.json` | 她盈亏表列名变了加别名 |
 
 ## 怎么跑（命令链，顺序钉死）
 
 ```bash
-fetch_zhiyun → verify_sources snapshot → inspect_inputs → classify_hexiao
-→ validate_plan → build_worklist   # ★ 到此必须停，把《核销日清》给她
+batch_ledger gaps                  # ★ 先查漏天 → 复述核销日给她确认
+fetch_zhiyun --date <核销日> → verify_sources snapshot → inspect_inputs
+→ classify_hexiao --hexiao-date <核销日>
+→ validate_plan → build_flow_plan → build_worklist   # ★ 到此必须停，把《核销日清》给她
 # 仅当她说「确认/可以写」：
-→ apply_to_copy --confirmed --in-place → verify_sources verify
+→ apply_all --confirmed --in-place --flow-in-place → verify_sources verify
 ```
 
 > ⚠ `validate_plan` **必须在** `build_worklist` **之前**——否则她昨天已填过的会被又列一遍。完整命令见 `SKILL.md §3.1`。
 
 ## 验收口径（判断脚本对不对）
 
-- pytest **≥140 例全绿**；无 `--confirmed` 时 apply 必须拒绝。
+- pytest **≥175 例全绿**；无 `--confirmed` 时 apply 必须拒绝。
+- **确认之后她动了表** → apply 必须非 0 退出且源表哈希**仍然不变**（一个字节没写）。
+- **漏天查得出**：跑过 7-20 与 7-23 后，`batch_ledger gaps` 必须报出 7-21 / 7-22。
 - **金标（2026-07-22 真实 13 笔）**：157 个 SOD 行、可填 143、与她手工填的**逐格一致 143/143**、异常 0、13 笔到账全覆盖。改完代码这条必须仍成立。
 
 ## 数据红线

@@ -59,7 +59,95 @@ def _locate_cols(ws_rows, aliases) -> Tuple[int, Dict[str, int]]:
     if opt is None:
         raise ValueError("流转表找不到「是否更新应收款」列")
     cols["是否更新应收款"] = opt
+    # 身份列（可缺）：写入前拿来核"这一行还是当初命中的那一行吗"
+    for key, fallback in (
+        ("日期", ["日期", "到账日期"]),
+        ("公司名称", ["公司名称", "公司", "付款方"]),
+        ("金额", ["金额", "到账金额"]),
+    ):
+        idx = common.fuzzy_find_col(headers, aliases.get("到账流转", {}).get(key, fallback))
+        if idx is not None:
+            cols[key] = idx
     return hrow, cols
+
+
+def precheck_flow_identity(workspace: Path, items: List[dict]) -> List[str]:
+    """
+    写流转表之前复核每条 write 项的行身份（2026-07-25 立）。
+
+    准入（强三键唯一命中）是在 `build_flow_plan` 那一刻算的，到真正写入之间
+    隔着一次人工确认。她的到账流转表是**每天往里加行**的活表，中间插一行，
+    row_no 之后的全部错位 → 单号会写到别人那笔到账上。
+    所以这里拿计划里记的 (日期/公司名称/金额) 跟**当前**那一行再对一次。
+
+    任一条对不上 → 整批不写流转（不是只跳过那一条：插行会让它之后的全错位）。
+    """
+    import openpyxl
+
+    aliases = common.load_aliases()
+    problems: List[str] = []
+    by_file: Dict[str, List[dict]] = {}
+    for it in items:
+        by_file.setdefault(it.get("file") or "", []).append(it)
+
+    for fname, group in by_file.items():
+        src = _resolve_flow_path(workspace, fname)
+        if not src or not src.is_file():
+            problems.append(f"找不到流转文件 {fname}")
+            continue
+        wb = openpyxl.load_workbook(str(src), read_only=True, data_only=True)
+        try:
+            for sheet_name, g2 in _group_by(group, "sheet").items():
+                if sheet_name not in wb.sheetnames:
+                    problems.append(f"sheet 不存在 {sheet_name}")
+                    continue
+                rows = list(wb[sheet_name].iter_rows(values_only=True))
+                try:
+                    _hrow, cols = _locate_cols(rows, aliases)
+                except Exception as e:
+                    problems.append(f"{fname}#{sheet_name}: 列定位失败 {e}")
+                    continue
+                for it in g2:
+                    ident = it.get("identity") or {}
+                    if not ident:
+                        continue  # 旧计划没记身份：靠强三键准入，不额外拦
+                    r = int(it["row_no"])
+                    if r - 1 >= len(rows):
+                        problems.append(f"{it.get('ar')}: 第 {r} 行现在不存在了（表被删过行？）")
+                        continue
+                    vals = list(rows[r - 1])
+
+                    def cell(key):
+                        i = cols.get(key)
+                        return vals[i] if i is not None and i < len(vals) else None
+
+                    if "日期" in cols and ident.get("date"):
+                        now = common.norm_date(cell("日期"))
+                        if now is None or now.isoformat() != ident["date"]:
+                            problems.append(
+                                f"{it.get('ar')}: 第 {r} 行日期变了"
+                                f"（计划时 {ident['date']}，现在 {now}）"
+                            )
+                    if "公司名称" in cols and ident.get("payer"):
+                        now = str(cell("公司名称") or "").strip()
+                        if now and now != ident["payer"]:
+                            problems.append(f"{it.get('ar')}: 第 {r} 行付款方变了（表被插过行？）")
+                    if "金额" in cols and ident.get("amount") is not None:
+                        now = common.to_number(cell("金额"))
+                        if now is None or abs(float(now) - float(ident["amount"])) > 0.005:
+                            problems.append(
+                                f"{it.get('ar')}: 第 {r} 行金额变了（表被插过行？）"
+                            )
+        finally:
+            wb.close()
+    return problems
+
+
+def _group_by(items: List[dict], key: str) -> Dict[str, List[dict]]:
+    g: Dict[str, List[dict]] = {}
+    for it in items:
+        g.setdefault(it.get(key) or "", []).append(it)
+    return g
 
 
 def write_flow_items(
@@ -77,6 +165,16 @@ def write_flow_items(
 
     aliases = common.load_aliases()
     write_items = [it for it in items if (it.get("verdict") or "") == "write"]
+
+    # ★ 一个格子都还没动之前，先核对每条 write 项的行身份
+    stale = precheck_flow_identity(workspace, write_items)
+    if stale:
+        return [], [
+            "写入前复核没过，**流转表一个字都没写**（她的表在出计划之后被动过）：",
+            *stale,
+            "→ 重跑 build_flow_plan.py + build_worklist.py 出新清单，她再确认一次。",
+        ]
+
     by_file: Dict[str, List[dict]] = {}
     for it in write_items:
         by_file.setdefault(it.get("file") or "", []).append(it)

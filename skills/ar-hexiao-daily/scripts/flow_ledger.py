@@ -354,6 +354,14 @@ def annotate_records(
             rec["flow_sheet"] = r0.get("sheet") or ""
             rec["flow_row_no"] = r0.get("row_no")
             rec["flow_order_existing"] = r0.get("order_cell") or ""
+            # 命中那一行的身份（日期/付款方/金额）。写入时拿它再对一次：
+            # 从「出计划」到「她说确认」之间她可能往流转表里插过行 → 行号错位，
+            # 光有 row_no 是证明不了"还是这一行"的。
+            rec["flow_identity"] = {
+                "date": r0.get("date").isoformat() if r0.get("date") else "",
+                "payer": r0.get("payer") or "",
+                "amount": r0.get("amount"),
+            }
             so = str(rec.get("so") or "").strip()
             if so:
                 rec["flow_order_suggest"] = FlowLedger.suggest_order_cell(

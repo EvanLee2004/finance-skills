@@ -975,6 +975,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--flow-complete", action="store_true",
         help="声明当天所有渠道的流转表都已给全；只有这时才判 E0（对不到账）",
     )
+    ap.add_argument(
+        "--hexiao-date", default="",
+        help="声明这批是哪个**核销日期**（她确认过的那天）。给了就跟数据核对，对不上直接退出",
+    )
+    ap.add_argument(
+        "--allow-mixed-dates", action="store_true",
+        help="允许一批里混着多个核销日（默认禁止：混批会让覆盖率/幂等校验和她逐行核对全失真）",
+    )
     args = ap.parse_args(argv)
 
     ws = Path(args.workspace)
@@ -1026,23 +1034,67 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             file=sys.stderr,
         )
 
+    # ── 这一批到底是哪个核销日（2026-07-25 立）─────────────────────────
+    # 产出、清单、文件名一律按**核销日**走，不按"跑的那天"走：她补跑 7-22 的批次时，
+    # 文件名写成运行日就会跟今天的批次撞名/盖掉，事后也说不清哪份是哪天的。
+    batch_dates = sorted({p["hexiao_date"] for p in payments if p.get("hexiao_date")})
+    if len(batch_dates) > 1 and not args.allow_mixed_dates:
+        print(
+            "ERROR: 这批数据里混着多个核销日期："
+            + "、".join(d.isoformat() for d in batch_dates)
+            + "\n  一次只跑一个核销日（混批会让 AR 覆盖率、幂等校验和她逐行核对全部失真）。"
+            "\n  重新取一天的数，或确实要混批就加 --allow-mixed-dates。",
+            file=sys.stderr,
+        )
+        return 2
+    hexiao_date = batch_dates[0] if batch_dates else None
+    if args.hexiao_date:
+        want = common.resolve_batch_date(args.hexiao_date)
+        if want is None:
+            print(f"ERROR: 认不出 --hexiao-date {args.hexiao_date!r}", file=sys.stderr)
+            return 2
+        if hexiao_date is not None and want != hexiao_date:
+            # 她确认的是这天、数据却是那天 → 多半取数取错了日子，绝不能闷头往下判
+            print(
+                f"ERROR: 你确认要跑的是 {common.date_cn(want)}，"
+                f"但 01_智云导出/ 里的数据是 {common.date_cn(hexiao_date)} 的。\n"
+                "  先确认这次到底要跑哪天，再重新取数。",
+                file=sys.stderr,
+            )
+            return 2
+        hexiao_date = hexiao_date or want
+
     result = classify_records(records, ledger, rates)
     result["flow_sources"] = flow.sources
     result["payment_count"] = len(payments)
-    today = dt.date.today().strftime("%Y%m%d")
-    out_path = Path(args.out) if args.out else (ws / "04_产出" / f"判定结果_{today}.json")
+    result["hexiao_date"] = hexiao_date.isoformat() if hexiao_date else ""
+    stamp = hexiao_date.strftime("%Y%m%d") if hexiao_date else dt.date.today().strftime("%Y%m%d")
+    out_path = Path(args.out) if args.out else (ws / "04_产出" / f"判定结果_{stamp}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(serialize_result(result), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     c = result["counts"]
+    print(f"核销日期：{common.date_cn(hexiao_date)}（这批算的是这一天核销的到账）")
     print(
         f"判定完成 到账 {len(payments)} 笔 → 订单行 {c['total']} 条："
         f"可填={c['auto']} 挂账={c['hold']} 异常={c['exception']}"
     )
     print(f"E码分布: {result['e_code_dist']}")
     print(f"结果: {out_path}")
+
+    # 登记跑批台账：这一天判过了。没这一步就查不出"哪天从来没跑过"
+    if hexiao_date is not None:
+        try:
+            import batch_ledger
+
+            batch_ledger.record(
+                ws, hexiao_date, "classified",
+                payments=len(payments), counts=dict(c),
+            )
+        except Exception as e:  # 台账写不了不该让已算对的判定失败
+            print(f"WARN: 跑批台账登记失败（不影响本次判定）：{type(e).__name__}", file=sys.stderr)
     return 0
 
 

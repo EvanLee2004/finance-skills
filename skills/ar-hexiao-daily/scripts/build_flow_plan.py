@@ -114,6 +114,8 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
         "order_suggest": order_suggest,
         "updated_suggest": updated,
         "flow_locate": best.get("flow_locate") or summary_row.get("flow_locate") or "",
+        # 命中行的身份，交给 apply_flow 在写入前再核一次（防插行导致行号错位）
+        "identity": best.get("flow_identity") or {},
         "so_list": so_list,
         "write_order": bool(str(order_suggest).strip()),  # 空单号不写列，防抹掉已有
         "write_updated": True,  # 是否更新列：空白=刻意留空，仍可写空

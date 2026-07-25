@@ -138,11 +138,24 @@ def extract_so(text: str) -> str:
 
 
 def resolve_date(s: str) -> str:
+    """
+    把 --date 解析成具体某一天。**这里指的永远是「核销日期」**
+    （销售哪天在智云把钱核到订单上），不是钱哪天到银行的「到账日期」——
+    明妹口径：两者没有固定隔天关系，天然可能差好几天。
+
+    另外：`yesterday` 是相对**运行那一刻**算的，她晚上跑和第二天早上跑不是同一天。
+    所以调用方（SKILL / main）必须把解析结果**复述给她确认**，别让相对说法飘着。
+    """
     s = (s or "").strip().lower()
     if s in ("yesterday", "t-1", "昨天"):
         return (date.today() - timedelta(days=1)).isoformat()
     if s in ("today", "今天"):
         return date.today().isoformat()
+    if s in ("last-workday", "上个工作日", "上一个工作日"):
+        cur = date.today() - timedelta(days=1)
+        while cur.weekday() >= 5:
+            cur -= timedelta(days=1)
+        return cur.isoformat()
     datetime.strptime(s, "%Y-%m-%d")
     return s
 
@@ -610,7 +623,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="智云只读取数（单入口：回款记录按核销日期 + 关联子表）"
     )
-    ap.add_argument("--date", default="yesterday", help="YYYY-MM-DD / yesterday / today")
+    ap.add_argument(
+        "--date", "--hexiao-date", dest="date", default="yesterday",
+        help="**核销日期** YYYY-MM-DD / yesterday / last-workday（不是到账日期）",
+    )
+    ap.add_argument(
+        "--skip-gap-check", action="store_true",
+        help="不查漏天（默认会查：有从没跑过的核销日就先报出来）",
+    )
     ap.add_argument("--workspace", default="", help="技能工作区根（含 01_智云导出）")
     ap.add_argument("--out", default="", help="直接指定导出目录（优先于 workspace）")
     ap.add_argument("--base-url", default=os.environ.get("ZHIYUN_BASE", BASE_DEFAULT))
@@ -631,6 +651,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         out_dir = Path(args.workspace) / "01_智云导出"
     else:
         out_dir = Path(__file__).resolve().parent.parent / "工作区" / "01_智云导出"
+
+    # ① 把"跑哪天"说死了再登录取数（相对说法解析成具体日期，供 agent 复述给她确认）
+    print(f"★ 本次取的是**核销日期 = {day}** 的到账（销售在这一天核销的；不是到账日期）")
+
+    # ② 漏天检查：`--date yesterday` 只看昨天，她请假/周末/系统故障跳过的那几天
+    #    没有任何机制发现。漏一天 = 那天的到账永远不会回填，而且事后看不出来。
+    workspace = out_dir.parent
+    if not args.skip_gap_check:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import batch_ledger
+            import common as _c
+
+            info = batch_ledger.find_gaps(workspace, through=_c.norm_date(day))
+            gaps = [g for g in info["gaps"] if g.isoformat() != day]
+            if gaps:
+                print("⚠ 这几个核销日**从来没跑过**（会漏掉那天的到账）：")
+                for g in gaps[:10]:
+                    print(f"     · {_c.date_cn(g)}")
+                if len(gaps) > 10:
+                    print(f"     …另有 {len(gaps) - 10} 天")
+                print("   → 一天一批补，从最早那天开始：--date <那天>。别几天合成一批。")
+        except Exception as e:
+            print(f"WARN: 漏天检查跳过（{type(e).__name__}）", file=sys.stderr)
 
     cookie = (os.environ.get("MD_PSS_ID") or "").strip()
     account_id = (args.account_id or "").strip()
@@ -661,7 +705,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         del cookie
 
     print("✅ 智云只读取数完成（未写系统）")
-    print(f"📁 目录: {out_dir.resolve()}")
+    print(f"📁 核销日期: {day}   目录: {out_dir.resolve()}")
+
+    # 空批要说明白：「那天销售一笔都没核销」和「取数取失败了」看着都是 0 笔，
+    # 但一个是收工、一个是事故。不区分她会以为跑过了就不管了。
+    if not summary["回款记录笔数"]:
+        print(
+            f"ℹ️ {day} 这天**一笔核销都没有**（不是出错）。常见于周末、假期、"
+            "或销售当天没来得及核。这天就算处理完了，已记进跑批台账。"
+        )
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import batch_ledger
+            import common as _c
+
+            batch_ledger.record(
+                out_dir.parent, _c.norm_date(day), "classified", payments=0,
+                note="空批：那天没有任何核销",
+            )
+        except Exception:
+            pass
+        return 0
+
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import batch_ledger
+        import common as _c
+
+        batch_ledger.record(
+            out_dir.parent, _c.norm_date(day), "fetched",
+            payments=summary["回款记录笔数"],
+        )
+    except Exception:
+        pass
     print(
         f"   回款记录 {summary['回款记录笔数']} 笔 · 下单 {summary['下单行数']} 行"
         f"（{summary['涉及SO数']} 个 SO）· 核销明细 {summary['核销明细行数']} 行"
@@ -672,7 +748,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"   ⚠ 有 {len(summary['无下单行的AR'])} 笔到账没抓到下单行，判定会报异常不会漏")
     if summary["查不到SOD的SO"]:
         print(f"   ⚠ 有 {len(summary['查不到SOD的SO'])} 个 SO 查不到 SOD，将退化成按 SO 匹配")
-    print("👉 下一步：把盈亏/流转表副本放进 02_我的表副本/ 后说「跑昨天的核销」")
+    print(
+        f"👉 下一步：把盈亏/流转表副本放进 02_我的表副本/，"
+        f"再跑判定（核销日期 {day}）"
+    )
     return 0
 
 

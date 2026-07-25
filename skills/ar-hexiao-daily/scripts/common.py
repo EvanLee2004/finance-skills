@@ -93,6 +93,70 @@ def norm_date(v: Any) -> Optional[dt.date]:
     return None
 
 
+# ══════════════════════════════════════════════════════════════
+# 日期口径（2026-07-25）：这条链路有**两个互不相干的日期**，别混
+#   · 到账日期 = 钱哪天到银行 → 驱动第 1–4 步（日记账/挑收入/流转表/建回款）
+#   · 核销日期 = 销售哪天在智云把这笔钱核到订单上 → 驱动第 6 步起的主战场
+# 明妹口径原话：「与建回款无固定隔天关系；核了就进那个核销日，没核就进更后的日期」
+# → 所以两者**天然不是同一天**，任何产出都必须写死是哪个日期的哪种口径。
+# ══════════════════════════════════════════════════════════════
+WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def date_cn(d: Any) -> str:
+    """给她看的日期写法：2026-07-24（周四）。给 None 返回 '(未知)'。"""
+    dd = norm_date(d)
+    if dd is None:
+        return "(未知)"
+    return f"{dd.isoformat()}（{WEEKDAY_CN[dd.weekday()]}）"
+
+
+def resolve_batch_date(s: Any, today: Optional[dt.date] = None) -> Optional[dt.date]:
+    """
+    把 --date 的写法解析成具体日期。**永远返回具体某一天**，不留"昨天"这种相对说法
+    ——相对说法会随运行时刻漂移（她晚上跑和第二天早上跑，"昨天"不是同一天）。
+    """
+    today = today or dt.date.today()
+    if s is None:
+        return None
+    if isinstance(s, (dt.date, dt.datetime)):
+        return norm_date(s)
+    key = str(s).strip().lower()
+    if not key:
+        return None
+    if key in ("yesterday", "t-1", "昨天", "昨日"):
+        return today - dt.timedelta(days=1)
+    if key in ("today", "t", "今天", "今日"):
+        return today
+    if key in ("last-workday", "上个工作日", "上一个工作日"):
+        return prev_workday(today)
+    return norm_date(key)
+
+
+def prev_workday(d: Optional[dt.date] = None) -> dt.date:
+    """
+    上一个工作日。周一跑时"昨天"是周日——销售周末不核销，取回来必是空批。
+    注意：这**只是默认值的猜测**，不是漏天的兜底；真正防漏天靠 batch_ledger 的空档检测。
+    """
+    d = d or dt.date.today()
+    cur = d - dt.timedelta(days=1)
+    while cur.weekday() >= 5:  # 5=周六 6=周日
+        cur -= dt.timedelta(days=1)
+    return cur
+
+
+def sha256_file(path) -> str:
+    """文件指纹。用于「校验时看到的表」和「写入时的表」是不是同一份。"""
+    import hashlib
+    from pathlib import Path as _P
+
+    h = hashlib.sha256()
+    with _P(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def fuzzy_find_col(
     headers: Sequence[str],
     aliases: Sequence[str],

@@ -29,7 +29,7 @@ from typing import Dict, List
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
-from validate_plan import FIVE, _norm, read_ledger_rows  # noqa: E402
+from validate_plan import FIVE, _norm, check_one, read_ledger_rows  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -115,6 +115,68 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
     return changes
 
 
+def precheck_before_write(plan: dict, items: List[dict], src: Path) -> List[str]:
+    """
+    **写入前再复核一次**（2026-07-25 立）。
+
+    为什么非有不可：`validate_plan` 复核的是"校验那一刻"的表，而中间隔着一次
+    **人工确认**——她看《核销日清》可能看几分钟，也可能隔天才回你一句「确认」。
+    而 `--in-place` 写的正是她天天在用的那份表：
+      · 月初贴交付会**插行**、部分核销会在上方**插行** → 行号当场全部错位
+      · 错位之后按旧行号写 = 把这一笔的五列写到**别人那一单**上
+      · 更糟的是我们还会写 SOD 列，等于把那行的单号也覆盖掉
+    而写后回读只证明"值写进去了"，证明不了"写对了行"，所以照样会报 ✓。
+
+    两道闸：
+      ① 指纹：校验时的盈亏副本 sha256 与现在不一致 → 表被动过，整批拒写
+      ② 身份：拿**当前**表对每条 write 项重跑 check_one，任何一条不再是 write → 整批拒写
+    任一不过就整批中止（不是跳过那一条）——因为插一行会让它**之后所有行**一起错位，
+    只跳过报错的那条，等于把剩下的照样写歪。
+    """
+    problems: List[str] = []
+
+    recorded = plan.get("ledger_sha256")
+    if recorded:
+        if plan.get("ledger_path") and Path(plan["ledger_path"]).resolve() != src.resolve():
+            problems.append(
+                f"这份计划是对着 {Path(plan['ledger_path']).name} 校验的，"
+                f"现在要写的却是 {src.name}"
+            )
+        elif common.sha256_file(src) != recorded:
+            problems.append(
+                f"{src.name} 在「校验」之后被改动过（指纹对不上）"
+                "——可能你自己填了几行、或者插了行"
+            )
+    else:
+        print(
+            "WARN: 这份计划里没有盈亏表指纹（旧版计划），跳过指纹闸；仍会逐行复核身份。",
+            file=sys.stderr,
+        )
+
+    rows = read_ledger_rows(src)
+    for it in items:
+        ref = it.get("ledger_row_ref")
+        ident = it.get("_identity") or {}
+        cur = rows.get(int(ref)) if ref else None
+        if cur is None:
+            problems.append(f"第 {ref} 行现在不存在了（{it.get('case_id')}）")
+            continue
+        # 身份：这一行还是校验时那一行吗
+        for key in ("SO", "SOD"):
+            was, now = ident.get(key), cur.get(key)
+            if was and now and was != now:
+                problems.append(
+                    f"第 {ref} 行已经不是原来那单了：校验时 {key}={was}，现在 {key}={now}"
+                )
+        # 内容：这一行还能写吗（她可能刚好自己把这行填了）
+        res = check_one(it, rows)
+        if res["verdict"] != "write":
+            problems.append(
+                f"第 {ref} 行现在不能写了（{res['verdict']}）：{res['reason']}"
+            )
+    return problems
+
+
 def verify_written(out: Path, items: List[dict]) -> List[str]:
     """回读逐格比对——写完必须证明真写对了，而不是"保存没报错就算成"。"""
     rows = read_ledger_rows(out)
@@ -133,6 +195,13 @@ def verify_written(out: Path, items: List[dict]) -> List[str]:
                 problems.append(
                     f"第 {r} 行 {k}：期望 {_norm(five.get(k))!r} 实际 {_norm(row.get(k))!r}"
                 )
+        # SOD 也是我们写进去的一列（write_plan 会写），必须一起回读证明。
+        # 2026-07-25 补：旧版只比五列，SOD 写歪了回读照样报「全部一致 ✓」。
+        sod = (five.get("实收SOD") or it.get("sod") or "").strip()
+        if sod and _norm(row.get("SOD")) != _norm(sod):
+            problems.append(
+                f"第 {r} 行 SOD：期望 {sod!r} 实际 {_norm(row.get('SOD'))!r}"
+            )
     return problems
 
 
@@ -310,6 +379,29 @@ def main(argv=None) -> int:
     if not writable:
         print("没有可写的笔（可能都已经填过了）。什么都没改。")
         return 0
+
+    # ★ 写入前最后一道闸：她的表在「校验 → 确认」这段时间里变了没有
+    try:
+        stale = precheck_before_write(plan, writable, src)
+    except ValueError as e:
+        print(f"ERROR: 写入前复核读不了表：{e}", file=sys.stderr)
+        return 2
+    if stale:
+        print(
+            "ERROR: 写入前复核没过——**一个字都没写**。\n"
+            "  你的表在「出清单」之后被改动过，再按旧行号写就会写到别人那一单上。",
+            file=sys.stderr,
+        )
+        for x in stale[:10]:
+            print(f"  - {x}", file=sys.stderr)
+        if len(stale) > 10:
+            print(f"  …另有 {len(stale) - 10} 条", file=sys.stderr)
+        print(
+            "  → 怎么办：重跑 validate_plan.py + build_worklist.py 出一份新的《核销日清》，"
+            "她再确认一次（几十秒的事，别绕过）。",
+            file=sys.stderr,
+        )
+        return 2
 
     today = dt.date.today().strftime("%Y%m%d")
     report = Path(args.report) if args.report else (
