@@ -6,6 +6,7 @@
 """
 import os
 import sys
+from pathlib import Path
 from collections import defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,21 +42,13 @@ def _inv(pairs, name_pairs=None):
     )
 
 
-PASS = 0
-FAIL = 0
-
-
 def check_eq(label, got, want):
-    global PASS, FAIL
-    if got == want:
-        PASS += 1
-    else:
-        FAIL += 1
-        print(f"  ✗ {label}: got={got!r} want={want!r}")
+    """原自跑脚本：失败 assert，语义不放宽。"""
+    assert got == want, f"{label}: got={got!r} want={want!r}"
 
 
 def check_true(label, cond):
-    check_eq(label, bool(cond), True)
+    assert bool(cond), label
 
 
 def status_of(clist, inv, name):
@@ -331,9 +324,14 @@ def test_real_smoke():
 def test_july2026_regression_if_present():
     """本月亮晶真数据（若 Downloads 或本地副本在）——验收补洞金标。"""
     print("· 2026-07 亮晶真数据回归（若文件在）")
+    # 路径可用环境变量覆盖；默认找运行者 Downloads（不写死本机用户名）
+    # LIC_LIST_XLSX / LIC_INV_XLSX 可分别覆盖清单与发票
+    home_dl = Path.home() / "Downloads"
     candidates = [
-        ("/Users/evanlee/Downloads/个人译费汇总.xlsx",
-         "/Users/evanlee/Downloads/个人发票汇总.xlsx"),
+        (
+            os.environ.get("LIC_LIST_XLSX") or str(home_dl / "个人译费汇总.xlsx"),
+            os.environ.get("LIC_INV_XLSX") or str(home_dl / "个人发票汇总.xlsx"),
+        ),
     ]
     # 技能家测试数据也可能以后放副本（无 PII 红线时）
     lp = ip = None
@@ -377,15 +375,4 @@ def test_july2026_regression_if_present():
         check_true(f"07月 {nm} 不在未开票催票", nm not in uninv)
 
 
-if __name__ == "__main__":
-    test_helpers()
-    test_core_rules()
-    test_foreigner_three_signals()
-    test_name_fallback_个体户税号()
-    test_company_heuristic()
-    test_id_match_beats_name()
-    test_sheet_isolation()
-    test_real_smoke()
-    test_july2026_regression_if_present()
-    print(f"\n{'='*40}\nPASS={PASS}  FAIL={FAIL}")
-    sys.exit(1 if FAIL else 0)
+# 跑：pytest tests/test_robustness.py -q

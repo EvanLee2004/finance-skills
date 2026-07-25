@@ -298,10 +298,12 @@ def test_two_files_min():
 
 def test_real_desktop_smoke():
     print("· 真实样本冒烟（有则跑，无则跳过）")
+    # 可用 DREAME_SAMPLE_DIR 覆盖；默认仅用 ~ /Desktop，不写死本机用户名
     candidates = [
-        "/Users/evanlee/Desktop/追觅对账",
+        os.environ.get("DREAME_SAMPLE_DIR") or "",
         os.path.join(os.path.expanduser("~"), "Desktop", "追觅对账"),
     ]
+    candidates = [c for c in candidates if c]
     src_dir = None
     for c in candidates:
         if os.path.isdir(c):

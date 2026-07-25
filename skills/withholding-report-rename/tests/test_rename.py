@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-回归测试：5 个样本 PDF -> 5 个已知正确新名（含金额）。
+回归测试：5 个样本 PDF -> 5 个已知正确新名（含金额）。真 pytest。
 
 样本 PDF 含境外客户名，不进 git（见 .gitignore），放在本地资料家：
     财务部skills/技能/代扣代缴申报表重命名/测试数据/
-也可用环境变量 WR_TESTDATA 指向别处。测试数据不在时优雅跳过（exit 0），
+也可用环境变量 WR_TESTDATA 指向别处。测试数据不在时 skip，
 不让缺数据把别的机器上的回归搞红。
-
-跑：python3 tests/test_rename.py
 """
 import os
 import sys
+
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
@@ -34,15 +34,18 @@ GOLDEN = {
 }
 
 
-def main():
+def _pdfs_available():
     if not os.path.isdir(TESTDATA):
-        print(f"[skip] 测试数据不在：{TESTDATA}（设 WR_TESTDATA 指向 5 个样本 PDF）")
-        return 0
+        return False
+    return any(f.lower().endswith(".pdf") for f in os.listdir(TESTDATA))
+
+
+@pytest.mark.skipif(not _pdfs_available(), reason=f"测试 PDF 不在 {TESTDATA}（设 WR_TESTDATA）")
+def test_golden_rename_five_samples():
+    """原 main() 的 5 条金标断言，语义不删不放宽。"""
     pdfs = [os.path.join(TESTDATA, f) for f in os.listdir(TESTDATA)
             if f.lower().endswith(".pdf")]
-    if not pdfs:
-        print(f"[skip] {TESTDATA} 里没有 PDF")
-        return 0
+    assert pdfs, f"{TESTDATA} 里没有 PDF"
 
     pattern = rename.build_suffix_pattern(rename.load_suffix_words())
     overrides = rename.load_overrides()
@@ -64,14 +67,12 @@ def main():
         else:
             print(f"  ✓ {frag} -> {rec['newbase']}")
 
-    if fails:
-        print("\n✗ 回归失败：")
-        for x in fails:
-            print("  -", x)
-        return 1
-    print(f"\n✓ 全部 {len(GOLDEN)} 个样本通过")
-    return 0
+    assert not fails, "回归失败：\n" + "\n".join(f"  - {x}" for x in fails)
+    assert len(GOLDEN) == 5
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+def test_load_suffix_words_nonempty():
+    """无 PDF 也能跑的轻量断言：词表可加载。"""
+    words = rename.load_suffix_words()
+    assert isinstance(words, list) and len(words) >= 5
+    assert any(w == "LIMITED" or w == "TECHNOLOGY" for w in words)

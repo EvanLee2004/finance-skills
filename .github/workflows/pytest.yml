@@ -1,0 +1,37 @@
+# finance-skills · push/PR 跑仓根 pytest
+# 写法对齐同工作区利润看板仓 .github/workflows/verify.yml 的 checkout + setup-python 骨架
+# （看板另有 pre-commit/run_verify/前端构建；本仓只做依赖安装 + pytest）
+name: pytest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pytest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    env:
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Run pytest
+        run: |
+          # 铁律：禁止 | tail 吞退出码；本步直接跑，真实退出码即 job 结果
+          python -m pytest -q

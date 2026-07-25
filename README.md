@@ -2,6 +2,26 @@
 
 一个个 skill，专门解决财务部各种**复杂、反复**的活——合并、拆分、对账、核销、报表……
 
+## 许可证
+
+本仓库默认采用 **MIT License**（见根目录 `LICENSE`）。
+
+- **为什么 MIT**：公开技能仓需要「clone 即可用、可改、可再分发」；MIT 是最常见的宽松许可证之一，与多数 Python 工具链兼容，条款短、无专利额外条款。
+- **对比过 Apache-2.0**：Apache-2.0 带明确专利授权与 NOTICE 要求，更重；本仓以财务脚本技能为主、无多贡献方专利博弈场景，MIT 更轻。
+- **待拍板**：最终许可证选型属产品决策，默认按 MIT 落地，若需 Apache-2.0 / 其他请明昊确认后改。
+
+## 开发 / 测试
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m pytest -q         # 仓根；配置见 pytest.ini（同名测试文件已改为唯一 basename）
+```
+
+
+CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pytest`。
+
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
 **当前源码共 15 个技能**。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。

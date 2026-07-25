@@ -1,0 +1,17 @@
+# finance-skills · 仓根可安装依赖（业务技能实测 import 清单）
+# 装：pip install -r requirements.txt
+# 国内镜像示例：pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+# 测试
+pytest>=8.0
+
+# Excel / 表处理（多数业务技能）
+openpyxl>=3.1
+pandas>=2.0
+xlrd>=2.0
+
+# PDF（代扣代缴重命名；pdf 基座脚本也用）
+pdfplumber>=0.11
+
+# HTTP（智云抓取：order-daily-summary / ar-hexiao-daily.fetch_zhiyun）
+requests>=2.28

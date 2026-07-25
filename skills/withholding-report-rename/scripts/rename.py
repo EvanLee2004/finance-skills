@@ -31,12 +31,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 CONFIG_DIR = os.path.join(SKILL_DIR, "config")
 
-# ── pdfplumber 守卫：缺了给人话，别裸崩 ─────────────────────────────
+# ── pdfplumber：import 期绝不 sys.exit（pytest 收集会 import 本模块）──
+# 缺依赖时延后到 main()/实际开 PDF 再给人话退出。
 try:
     import pdfplumber
-except ImportError:
-    print("✗ 缺 pdfplumber。装：pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pdfplumber")
-    sys.exit(1)
+except ImportError:  # pragma: no cover
+    pdfplumber = None  # type: ignore[assignment]
+
+
+def _require_pdfplumber():
+    """CLI/开 PDF 前调用：缺库则给人话并 exit 1。"""
+    if pdfplumber is None:
+        print(
+            "✗ 缺 pdfplumber。装：pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pdfplumber"
+        )
+        sys.exit(1)
+    return pdfplumber
 
 
 # ── 业务词表兜底（config/名称分词词表.md 缺失时用这批） ──────────────
@@ -215,7 +225,8 @@ def plan_one(path, suffix_pattern, overrides):
         return rec
 
     try:
-        with pdfplumber.open(path) as pdf:
+        pl = _require_pdfplumber()
+        with pl.open(path) as pdf:
             name = find_name(pdf, suffix_pattern)
             basis, tax = get_totals(pdf)
     except Exception as e:  # 坏 PDF 不连坐其它文件
@@ -268,6 +279,8 @@ def main():
                     help="copy=改好名的副本写新夹、原件不动（默认）；rename=就地改名（先自动备份）")
     ap.add_argument("--dry-run", action="store_true", help="只算不写，打印计划")
     args = ap.parse_args()
+
+    _require_pdfplumber()
 
     in_dir = os.path.abspath(args.input)
     if not os.path.isdir(in_dir):

@@ -9,6 +9,7 @@ import csv
 import subprocess
 import tempfile
 import openpyxl
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -31,11 +32,9 @@ SPECIAL_CUST = "方圆测科"
 
 
 def check(d, c):
-    global PASS, FAIL
-    ok = bool(c)
-    print(f"  {'✓' if ok else '✗'} {d}")
-    PASS += ok
-    FAIL += (not ok)
+    """原自跑脚本 check：失败就 assert，语义不放宽。"""
+    assert bool(c), d
+    print(f"  ✓ {d}")
 
 
 def run(args):
@@ -93,7 +92,7 @@ def make_hist(path, rows):
             w.writerow(r)
 
 
-def main():
+def test_robustness_suite():
     tmp = tempfile.mkdtemp(prefix="compliance_spot_")
     allp = os.path.join(tmp, "合成_应收all.xlsx")
     make_main_all(allp)
@@ -273,9 +272,4 @@ def main():
             check("测试数据退出 0", rc == 0)
             check("测试数据清单非空", os.path.isfile(fout) and os.path.getsize(fout) > 20)
 
-    print(f"\n{'='*40}\n通过 {PASS} / 失败 {FAIL}  →  {'ALL PASS ✓' if FAIL == 0 else 'HAS FAILURES ✗'}")
-    sys.exit(0 if FAIL == 0 else 1)
-
-
-if __name__ == "__main__":
-    main()
+    print(f"\n{'='*40}\nALL ASSERTIONS PASSED")
