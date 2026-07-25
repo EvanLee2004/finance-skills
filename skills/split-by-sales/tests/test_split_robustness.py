@@ -126,3 +126,41 @@ def test_auto_date_from_filename(tmp):
     assert "自动取自文件名" in log and "0604" in log
     assert os.path.isdir(o5)
     assert any("0604" in f for f in os.listdir(o5)), "产物文件名含 0604（非今天）"
+
+
+def test_unbalanced_exits_nonzero(tmp, monkeypatch):
+    """对账失败必须非 0 退出（E3：分流总数=输入总数）。"""
+    # 打桩 do_split 返回 unbalanced，不依赖造假行
+    import importlib.util
+    from pathlib import Path
+
+    split_path = Path(SPLIT).resolve()
+    spec = importlib.util.spec_from_file_location("split_mod", split_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    fake = {
+        "input_rows": 10,
+        "people": 1,
+        "out_rows": 5,
+        "unassigned": 0,
+        "ignored": 0,
+        "balanced": False,
+        "missing_cols": [],
+        "per_person": [],
+        "out_dir": tmp,
+    }
+    monkeypatch.setattr(mod, "do_split", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["split.py", "--input", os.path.join(tmp, "x.xlsx"), "--out-dir", tmp, "--date", "0604"],
+    )
+    # 需要真实文件通过前置校验
+    make_all(os.path.join(tmp, "x.xlsx"))
+    monkeypatch.setattr(
+        sys, "argv",
+        ["split.py", "--input", os.path.join(tmp, "x.xlsx"), "--out-dir", tmp, "--date", "0604"],
+    )
+    with pytest.raises(SystemExit) as ei:
+        mod.main()
+    assert ei.value.code == 1

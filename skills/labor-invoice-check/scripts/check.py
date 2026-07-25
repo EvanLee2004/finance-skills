@@ -688,6 +688,10 @@ def run(list_path, inv_path, out_path):
     log(f"· 门槛>{CONFIG['THRESHOLD']:g} 才要票｜容差≤{CONFIG['TOLERANCE']:g}｜"
         f"匹配=身份证主+姓名兜底｜外籍=英文名/开户名/护照号")
     records = classify(clist, inv)
+    # E3：分流总数必须等于输入清单人数（禁止静默少人）
+    if len(records) != len(clist):
+        log(f"✗ 核对行数 {len(records)} ≠ 清单 {len(clist)}，拒绝写出。")
+        sys.exit(1)
     out_path, df, flagged, payable, report = write_output(out_path, records)
     log("· 结果：")
     for _, r in report.iterrows():

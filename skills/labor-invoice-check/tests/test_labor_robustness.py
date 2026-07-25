@@ -217,6 +217,23 @@ def test_id_match_beats_name():
     check_eq("身份证优先于姓名(第二张伟无票)", res[1]["匹配方式"], "未匹配")
 
 
+def test_classify_count_matches_list():
+    """E3：classify 输出行数 = 清单人数。"""
+    check.CONFIG.update({
+        "THRESHOLD": 800.0, "TOLERANCE": 1.0,
+        "INTERN_KEYWORDS": ["Intern"],
+        "COMPANY_KEYWORDS": ["有限公司"],
+    })
+    clist = [
+        _row("甲", 1000, idno="110000000000000001"),
+        _row("乙", 500, idno="110000000000000002"),
+        _row("丙", 200, note="Intern", idno="110000000000000003"),
+    ]
+    inv = _inv([("110000000000000001", 1000.0)])
+    res = check.classify(clist, inv)
+    assert len(res) == len(clist)
+
+
 def test_helpers():
     print("· 工具函数")
     import datetime

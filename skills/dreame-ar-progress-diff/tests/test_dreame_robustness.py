@@ -20,21 +20,13 @@ SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(SKILL_DIR, "scripts"))
 import compare  # noqa: E402
 
-PASS = 0
-FAIL = 0
-
-
 def check_eq(label, got, want):
-    global PASS, FAIL
-    if got == want:
-        PASS += 1
-    else:
-        FAIL += 1
-        print(f"  ✗ {label}: got={got!r} want={want!r}")
+    """真 assert：pytest 必须能因断言失败变红。"""
+    assert got == want, f"{label}: got={got!r} want={want!r}"
 
 
 def check_true(label, cond):
-    check_eq(label, bool(cond), True)
+    assert bool(cond), label
 
 
 def _fill(cell, rgb):
@@ -355,22 +347,4 @@ def test_real_desktop_smoke():
         check_true(f"真实样本不崩({e})", False)
 
 
-def main():
-    print("=" * 60)
-    print("dreame-ar-progress-diff 回归")
-    print("=" * 60)
-    test_normalize_and_formula()
-    test_align_rename()
-    test_label_extract()
-    test_inspect_and_skip_report()
-    test_two_files_min()
-    test_synthetic_end_to_end()
-    test_real_desktop_smoke()
-    print("=" * 60)
-    print(f"通过 {PASS}  失败 {FAIL}")
-    print("=" * 60)
-    return 0 if FAIL == 0 else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+# 跑：pytest tests/test_dreame_robustness.py -q

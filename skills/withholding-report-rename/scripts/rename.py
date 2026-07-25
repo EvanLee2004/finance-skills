@@ -301,6 +301,10 @@ def main():
 
     ok = [p for p in plans if p["status"] == "ok"]
     manual = [p for p in plans if p["status"] != "ok"]
+    # E3：每个输入 PDF 必须进计划（ok 或待人工），禁止静默丢文件
+    if len(ok) + len(manual) != len(pdfs) or len(plans) != len(pdfs):
+        log(f"✗ 计划条数 {len(plans)}（ok={len(ok)} manual={len(manual)}）≠ 输入 PDF {len(pdfs)}")
+        sys.exit(1)
 
     log(f"共 {len(plans)} 个 PDF：可重命名 {len(ok)}，待人工确认 {len(manual)}")
     for p in plans:

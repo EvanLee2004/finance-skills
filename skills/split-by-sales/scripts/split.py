@@ -330,8 +330,11 @@ def main():
         rep = do_split(inp, out_dir, date_str, ignore_sales, gm_owners)
     except Exception as e:
         log(f"✗ 拆分出错：{e}"); sys.exit(1)
-    log(f"\n✓ 完成：{rep['people']} 位销售，输出在 {rep['out_dir']}"
-        + ("" if rep["balanced"] else "  ⚠ 对账没对上，先别发，检查！"))
+    if not rep["balanced"]:
+        # 分流总数 ≠ 输入总数：禁止静默成功（防漏铁律 E3）
+        log(f"\n✗ 对账没对上，先别发。输出在 {rep['out_dir']}（退出码 1）")
+        sys.exit(1)
+    log(f"\n✓ 完成：{rep['people']} 位销售，输出在 {rep['out_dir']}")
 
 
 if __name__ == "__main__":
