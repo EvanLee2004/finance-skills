@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,24 @@ from summarize import (  # noqa: E402
     summarize_records,
 )
 
-GOLD = Path("/Users/evanlee/Downloads/下单汇总_20260724_085036.xlsx")
+# 金标：某次 08:50 人工导出的下单表（真实数据，不进仓库）。
+# 位置可用环境变量覆盖，方便换机器/换人跑；默认找运行者的 Downloads。
+# ⚠ 不能只判 is_file()：文件在、但**读不了**（macOS 隐私授权、权限、被占用）时
+#    旧写法会让整套测试硬失败。公开仓里谁 clone 都跑不了 = 没人跑测试。
+GOLD = Path(
+    os.environ.get("ORDER_GOLD_XLSX")
+    or (Path.home() / "Downloads" / "下单汇总_20260724_085036.xlsx")
+)
 ORG = Path(__file__).resolve().parents[1] / "config" / "销售组织架构.xlsx"
+
+
+def _gold_readable() -> bool:
+    """文件既在、又真的读得开，才算能跑金标。"""
+    try:
+        with GOLD.open("rb"):
+            return True
+    except OSError:
+        return False
 
 
 def test_load_and_sum_synthetic(tmp_path):
@@ -40,7 +57,7 @@ def test_load_and_sum_synthetic(tmp_path):
     assert r.detail_rows[0].get("SO") == "SO1"
 
 
-@pytest.mark.skipif(not GOLD.is_file(), reason="本机无 08:50 金标导出")
+@pytest.mark.skipif(not _gold_readable(), reason="本机无 08:50 金标导出（或读不了）")
 def test_gold_085036_is_4_26_wan():
     recs = load_records_from_order_xlsx(GOLD)
     assert len(recs) == 11

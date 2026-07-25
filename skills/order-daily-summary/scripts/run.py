@@ -31,6 +31,7 @@ from summarize import (  # noqa: E402
     load_records_from_order_xlsx,
     summarize_records,
 )
+import coverage
 from write_report import write_report  # noqa: E402
 
 
@@ -233,6 +234,24 @@ def main(argv: list[str] | None = None) -> int:
     org_map = load_org_map_from_xlsx(org_path)
     result = summarize_records(records, org_map)
 
+    # ── 覆盖台账：这次算了哪几天 + 有没有哪几天从来没算过 ────────────────
+    # 日期窗口只认周末、不认法定节假日：长假后第一个上班日只抓"昨天"，
+    # 假期那几天会静默漏掉。这里把覆盖情况记下来并把断档印进产物《统计区间》页。
+    covered_days = coverage.daterange(start, end)
+    gaps: list = []
+    try:
+        gaps = coverage.find_gaps(out_dir, through=end)["gaps"]
+        # 本次要覆盖的这几天不算断档
+        gaps = [g for g in gaps if g not in set(covered_days)]
+    except Exception as e:  # noqa: BLE001 — 台账坏了不该让当天的报表出不来
+        print(f"提示：覆盖台账读取失败（不影响本次统计）：{type(e).__name__}", file=sys.stderr)
+
+    rows_by_date: dict[str, int] = {}
+    for r in result.detail_rows:
+        k = str(r.get("下单日期") or "")[:10]
+        if k:
+            rows_by_date[k] = rows_by_date.get(k, 0) + 1
+
     stamp = fetch_time.strftime("%Y%m%d_%H%M%S")
     out_file = out_dir / f"下单数据_{start.isoformat()}_{end.isoformat()}_{stamp}.xlsx"
     write_report(
@@ -245,7 +264,15 @@ def main(argv: list[str] | None = None) -> int:
         data_asof=fetch_time,
         late_warning=late_warning,
         extra_log={"取数来源": source_note},
+        covered_days=covered_days,
+        gaps=gaps,
+        run_day=today,
     )
+
+    try:
+        coverage.record(out_dir, covered_days, run_day=today, rows_by_date=rows_by_date)
+    except Exception as e:  # noqa: BLE001
+        print(f"提示：覆盖台账登记失败（不影响本次统计）：{type(e).__name__}", file=sys.stderr)
 
     print(f"明细行数={result.detail_row_count}")
     print(f"总计万元={result.grand_total_wan}")
@@ -254,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"分部门万元：{breakdown}")
     print(f"金额字段={result.amount_field_used or '（未解析）'}")
     print(f"取数来源={source_note}")
+    if gaps:
+        print(f"⚠ 有 {len(gaps)} 个工作日从来没统计过：" + "、".join(d.isoformat() for d in gaps[:8]))
+        print("   多半是法定假期/机器没跑（本程序不认节假日）；补法见产物《统计区间》页。")
     if result.unmatched_sales:
         print(f"未匹配销售({len(result.unmatched_sales)})：{'、'.join(result.unmatched_sales)}")
         print("请更新 config/销售组织架构.xlsx 后重跑。")

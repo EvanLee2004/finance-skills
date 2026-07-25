@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,9 @@ def write_report(
     data_asof: datetime | None = None,
     late_warning: str | None = None,
     extra_log: dict[str, Any] | None = None,
+    covered_days: list[date] | None = None,
+    gaps: list[date] | None = None,
+    run_day: date | None = None,
 ) -> Path:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -73,6 +76,74 @@ def write_report(
         wc.font = Font(bold=True, color="C00000")
         wc.alignment = Alignment(wrap_text=False, vertical="center")
 
+    # ── 统计区间（亮晶打开第二眼就看这页：这份表到底算了哪几天）──────────
+    # 2026-07-25 明昊要求：每天跑出来的产物要单独开一页说清"统计的是哪些天"，
+    # 顺带把"有没有哪几天从来没统计过"（节假日漏跑）直接印出来。
+    rng = wb.create_sheet("统计区间")
+    title = rng.cell(row=1, column=1, value="这份表统计的是哪几天")
+    title.font = Font(bold=True, size=14)
+    rng.append([])
+    rng.append(["运行日（哪天跑的）", (run_day or date.today()).isoformat()])
+    rng.append(["统计窗口", f"{window_start or ''} ~ {window_end or ''}".strip(" ~") or "（未指定）"])
+
+    days = list(covered_days or [])
+    if not days and window_start and window_end:
+        try:
+            s = date.fromisoformat(str(window_start))
+            e = date.fromisoformat(str(window_end))
+            days = [s + timedelta(days=i) for i in range((e - s).days + 1)]
+        except (TypeError, ValueError):
+            days = []
+    rng.append(["共统计天数", len(days)])
+    rng.append([])
+
+    rng.append(["逐日明细", "", ""])
+    rng.cell(row=rng.max_row, column=1).font = Font(bold=True)
+    rng.append(["下单日期", "星期", "该日合计(万元)"])
+    for cell in rng[rng.max_row]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    _wk = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    for d in days:
+        key = d.isoformat()
+        rng.append([key, _wk[d.weekday()], totals.get(key, 0.0)])
+        rng.cell(row=rng.max_row, column=3).number_format = "#,##0.00"
+
+    rng.append([])
+    if gaps:
+        _wkn = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        warn = rng.cell(
+            row=rng.max_row + 1,
+            column=1,
+            value=f"⚠ 注意：有 {len(gaps)} 个工作日从来没统计过（下面这些天的下单没进过任何一张表）",
+        )
+        warn.font = Font(bold=True, color="C00000")
+        rng.append(["漏掉的日期", "星期", ""])
+        for cell in rng[rng.max_row]:
+            cell.font = Font(bold=True)
+        for d in gaps:
+            rng.append([d.isoformat(), _wkn[d.weekday()], ""])
+            rng.cell(row=rng.max_row, column=1).fill = PatternFill(fill_type="solid", fgColor="FFC7CE")
+        rng.append([])
+        tip = rng.cell(
+            row=rng.max_row + 1,
+            column=1,
+            value=(
+                "多半是法定假期或机器没跑——本程序只认周末、不认节假日。"
+                "补法：从智云手工导出一张覆盖这几天的「下单」表，用离线模式跑一次"
+                "（--from-xlsx <那张表> --no-date-filter）。"
+                "⛔ 别一天一天补跑：窗口按运行日倒推、逐天跑会互相重叠，同一天被算好几遍。"
+            ),
+        )
+        tip.font = Font(color="C00000")
+    else:
+        ok = rng.cell(row=rng.max_row + 1, column=1, value="✅ 从第一次统计到现在，工作日没有断档")
+        ok.font = Font(bold=True, color="1F7A1F")
+
+    rng.column_dimensions["A"].width = 46
+    rng.column_dimensions["B"].width = 10
+    rng.column_dimensions["C"].width = 16
+
     # 处理日志
     log = wb.create_sheet("处理日志")
     log.append(["项目", "内容"])
@@ -101,6 +172,14 @@ def write_report(
     unmatched = "、".join(result.unmatched_sales) if result.unmatched_sales else "无"
     log.append(["未匹配销售数量", len(result.unmatched_sales)])
     log.append(["未匹配销售名单", unmatched])
+    if gaps:
+        log.append(["⚠断档天数", len(gaps)])
+        log.append(["⚠断档日期", "、".join(d.isoformat() for d in gaps[:20])])
+        log.append([
+            "怎么补",
+            "从智云导一张覆盖这几天的「下单」表 → 离线模式 --from-xlsx <表> --no-date-filter；"
+            "⛔ 别一天一天补跑（窗口会重叠、同一天算好几遍）",
+        ])
     if extra_log:
         for k, v in extra_log.items():
             log.append([str(k), v])
