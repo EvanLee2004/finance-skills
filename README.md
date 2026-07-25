@@ -4,20 +4,22 @@
 
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
-**当前源码共 15 个技能**（与官方分发包 `财务技能包_v1.0.22` 一致）。装到同事机器请用飞书下发的 zip + 使用手册；**本仓是源码与版本真相源**。
+**当前源码共 15 个技能**。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
 
-> ### ⭐ 更新去哪？就这一个仓库
+> ### ⭐ 更新去哪？就这一个仓库 · 2026-07-25 起 git 即分发
 >
 > | | |
 > |--|--|
 > | **GitHub** | https://github.com/EvanLee2004/finance-skills |
-> | **Gitee（国内）** | https://gitee.com/Lee157/finance-skills |
+> | **Gitee（国内优先）** | https://gitee.com/Lee157/finance-skills |
 > | **分支** | `main` |
-> | **形态** | **一个 monorepo**（全部 skill 在 `skills/` 下，不是一 skill 一仓） |
+> | **形态** | **一个 monorepo**（全部 skill 在 `skills/` 下） |
+> | **开发交付** | 测绿 → `git push origin main`（双端）→ **完成**。**默认不再打 zip、不再飞书发压缩包** |
+> | **同事更新** | 对 opencode 说一句 **「更新财务skills」** → 拉云端 main → **只覆盖白名单** → 保留本地 config → **不动自装技能** |
 >
-> 详细流程、白名单、config 保留、zip 备用路径 → 必读 **[SOURCE.md](./SOURCE.md)**。  
-> 装进 opencode 后同内容见 `skills/财务技能包_来源与更新.md`（给同事/agent 本地翻）。  
-> ⚠️ **git push 了 ≠ 同事本机已更新**；本机还要 `git pull` 同步或装新 zip。
+> 详细流程、白名单、config 铁律、可复制提示词 → 必读 **[SOURCE.md](./SOURCE.md)**。  
+> 装进 opencode 后精简版见 `skills/财务技能包_来源与更新.md`。  
+> ⚠️ **git push 了 ≠ 同事本机已更新**；同事要说一次「更新财务skills」。
 
 ## 技能清单（三层：业务技能 + 行为/环境 + 通用基座）
 
@@ -83,89 +85,94 @@
 
 ## 数据安全
 
-真实财务数据（源台账 / 回填源 / 成品 / 核销运行工作区等批量数据）**不进仓库**（见 `.gitignore`）；本库**私有**。各 skill 的维护表（如销售变化表）作为可长期维护的配置保留在库内。分发包 zip 只含技能源码，不含 `工作区/` 运行产物。
+真实财务数据（源台账 / 回填源 / 成品 / 核销运行工作区等批量数据）**不进仓库**（见 `.gitignore`）；本库**私有**。各 skill 的维护表（如销售变化表）作为可长期维护的配置保留在库内。
 
 ## 分发与版本
 
 | 项 | 说明 |
 |----|------|
-| **更新真相源** | **[SOURCE.md](./SOURCE.md)**（仓库地址 / 白名单 / pull vs zip / config 铁律） |
-| 源码仓（双端） | **GitHub** `EvanLee2004/finance-skills`（fetch 主）+ **Gitee** `Lee157/finance-skills`（国内）· 分支 **`main`** |
-| 同事安装 | 下 `财务技能包_vX.Y.Z.zip`（Gitee Release / 飞书）+《财务技能使用手册》；或 clone 本仓后同步 `skills/` |
-| 当前分发包 | **v1.0.22 / 15 技能**（zip 可能落后于 `main` 最新 commit，以 `git log -1` 为准） |
-| opencode 内说明 | 安装后应有 `skills/财务技能包_来源与更新.md`（与 SOURCE 同内容精简版） |
+| **更新真相源** | **[SOURCE.md](./SOURCE.md)**（仓库 / 白名单 / 一句话更新 / config 铁律） |
+| 源码仓（双端） | **GitHub** `EvanLee2004/finance-skills` + **Gitee** `Lee157/finance-skills` · 分支 **`main`** |
+| **开发交付** | `git push origin main` 即上云；**默认不打 zip** |
+| **同事更新** | 对 opencode 说 **「更新财务skills」**（从云端 main 白名单覆盖；保留 config；不动自装技能） |
+| 版本信号 | 远端 `main` 的 **git short SHA**（不以 zip 版本号为准） |
+| opencode 内说明 | 安装后应有 `skills/财务技能包_来源与更新.md` |
 
-## 同事本机：更新财务技能包
+## 同事本机：更新财务 skills（主路径）
 
-### 路径 0（优先·已 clone 本仓时）
+### 最短：一句话
+
+对 opencode 说：
+
+```
+更新财务skills
+```
+
+Agent 从 Gitee/GitHub `main` 拉最新 → 只覆盖财务包白名单 15 夹 → 保留本机 `config/` → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
+
+完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v19 第三节 B 段一致）。
+
+### 开发机已 clone 时（可选手工）
 
 ```bash
 cd <本机 finance-skills 路径>
-git pull origin main    # 国内可：git pull gitee main
-git log -1 --oneline    # 记下 SHA，确认是最新
-# 再把 skills/ 下白名单技能覆盖到 ~/.config/opencode/skills/（保留本机各 skill 的 config/）
+git pull origin main    # 国内：git pull gitee main
+git log -1 --oneline
+# 再把 skills/ 下白名单覆盖到 ~/.config/opencode/skills/（保留本机各 skill 的 config/）
 # 重启 opencode
 ```
 
-完整规则见 **[SOURCE.md](./SOURCE.md)**。
-
-### 路径 1（zip · 复制整段粘进 opencode）
-
-> **用途**：已装过旧版、收到新 zip、本机没有 git 副本时用。整段复制 → 粘进本机 opencode → 允许访问 → 跑完后**重启 opencode**。  
-> **铁律**：只更新下面白名单里的「财务技能包」技能；你本机自己装的其他 skill **一律不删、不改、不挪**。首次安装请看使用手册第三节 A 段（飞书那份）。
-
-**使用前**：把新的 `财务技能包_vX.Y.Z.zip` 放到桌面（不用解压）。
+### 可复制长提示词（与 SOURCE 第四节相同）
 
 ```
-我要更新已经装过的「财务技能包」（官方包，共 15 个技能）。请你全程自动完成，要点「允许访问」就允许。
+更新财务skills
 
-【先读来源·别装错包】
-- 官方唯一源码仓：GitHub EvanLee2004/finance-skills 与 Gitee Lee157/finance-skills，分支 main。
-- 若本机 skills 目录里已有「财务技能包_来源与更新.md」或仓库 SOURCE.md，先打开确认地址一致。
-- 若本机已 clone 上述仓库：优先 git pull main，再用仓内 skills/ 白名单覆盖安装目录（比 zip 更准）；没有 git 再用桌面 zip。
+请按官方 monorepo 把本机财务部官方技能更新到云端最新，全程自动完成，要点「允许访问」就允许。
+
+【唯一源】
+- Gitee（优先）: https://gitee.com/Lee157/finance-skills  分支 main
+- GitHub（备）: https://github.com/EvanLee2004/finance-skills  分支 main
+- 仓内路径: skills/<技能id>/
+- 若本机已有「财务技能包_来源与更新.md」或 SOURCE.md，先读确认。
 
 【红线·只动财务包，别碰我别的技能】
-- 本机 opencode 的 skills 目录里可能还有我自己装的其他技能（不是财务技能包的）。
-- 你只能更新 / 新增下面「财务包白名单」里的文件夹；白名单以外的任何技能文件夹一律不删、不改、不移动、不覆盖。
-- 禁止清空整个 skills 目录；禁止「只保留这 15 个」；禁止为了对齐名单去删其他技能；禁止重命名我白名单外的夹。
+- 只能更新/新增下面白名单文件夹；白名单以外一律不删、不改、不移动、不覆盖。
+- 禁止清空整个 skills 目录；禁止「只保留这 15 个」；禁止重命名白名单外的夹。
 
-【财务包白名单】（仅这些可覆盖 / 新增）
+【财务包白名单】
 receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
-（另：把「财务技能包_来源与更新.md」一并放到 skills 目录根下，方便下次更新还能找到仓库地址。）
-
-【新包在哪】
-桌面上以「财务技能包」开头的 zip（可能带版本号，如 财务技能包_v1.0.22.zip）。桌面可能在「我的用户目录\Desktop」，也可能被 OneDrive 接管在「...\OneDrive\Desktop」，两处都找。是 zip 先解压到临时目录，是文件夹直接用（里面应有上述白名单子文件夹）。
+（另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
 
 【装到哪】
-opencode 技能目录一般是「我的用户目录\.config\opencode\skills\」（Windows 上 = %USERPROFILE%\.config\opencode\skills\）。没有就新建；位置不对就你自己定位本机 opencode 实际加载技能的 skills 目录。
+~/.config/opencode/skills/（Windows = %USERPROFILE%\.config\opencode\skills\）
+
+【怎么取源】
+优先 git clone/pull 上述仓库 main（国内优先 Gitee）。不要问我要 zip；不要等我发压缩包。
 
 【步骤】
-1）只对白名单内技能：用新版覆盖 SKILL.md、scripts、README 等源码文件；白名单里本机还没有的新技能（如 order-daily-summary）整夹复制进去。
-2）⚠ 保留我本地的 config：若某白名单技能里已有 config 文件夹（例如 receivables-merge 的销售归属表、order-daily-summary 的组织架构 / config.local.json），保留我原来的 config，绝不覆盖；只有该技能本机还没有 config 时才从新包复制。
-3）可选清理（仅当存在时才删，且只删这些已下线旧夹，绝不扩删）：payroll-info-match、insurance-fund-merge、bank-income-extract；以及名字带 -manipulation 或 -extraction 的旧财务技能夹。
-4）顺手补装依赖（国内镜像，慢就等）：
+1）git 拉到最新 main，记下 short SHA。
+2）只对白名单：用仓内 skills/ 覆盖安装目录源码；新技能整夹复制。
+3）⚠ 保留我本地 config：某技能本机已有 config/ 则绝不覆盖；没有才从仓库复制。
+4）可选：若存在已下线旧夹 payroll-info-match / insurance-fund-merge / bank-income-extract 才删它们。
+5）依赖可顺手补（国内镜像）：
    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pandas openpyxl xlrd pypdf pdfplumber pdf2image python-docx python-pptx markitdown lxml defusedxml Pillow requests playwright
-   再跑：playwright install chromium
-   （清华不通就换 https://mirrors.aliyun.com/pypi/simple 再装一次。）
+   playwright install chromium
 
-【汇报·必须逐条说清】
-- 更新来源（git SHA 或 zip 文件名）
-- 更新 / 新增了哪些财务技能（列名）
-- 白名单外的其他技能有没有动到（必须明确写「未动」；若误动了立刻说明并道歉）
-- 我的 config / 维护表保住没
-- 「财务技能包_来源与更新.md」是否已放在 skills 目录
-- 然后提醒我重启 opencode 生效
+【汇报·必须逐条】
+- 更新到的 git short SHA + 远端（Gitee/GitHub）
+- 更新/新增了哪些财务技能
+- 白名单外其他技能：必须写「未动」
+- 我的 config/维护表保住没
+- 提醒我重启 opencode
 ```
 
-### 双端 push（本机已配好）
+### 双端 push（开发侧 · 本机已配好）
 
 ```bash
 # origin：fetch 走 GitHub；push 同时推 GitHub + Gitee
-git push origin main          # 一键双端
-git push origin v1.0.xx       # tag 同样一键双端
+git push origin main          # 一键双端 = 交付完成
 
 # 只推某一端时：
-git push github-only  # 若未单独建名，用：
 git push https://github.com/EvanLee2004/finance-skills.git main
 git push gitee main
 ```
@@ -176,4 +183,4 @@ git push gitee main
 - `origin` push → GitHub **和** Gitee  
 - `gitee` → 仅 Gitee（备用）
 
-改 skill 后：本地测绿 → `git push origin main`（双端）→ 按上级 `发布/` 规程重打 zip → 两边 Release 挂附件（GitHub + Gitee）。
+改 skill 后：本地测绿 → **`git push origin main`（双端）即交付**。默认**不**再打 zip、不挂 Release 附件。
