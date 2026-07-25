@@ -76,3 +76,47 @@ def test_load_suffix_words_nonempty():
     words = rename.load_suffix_words()
     assert isinstance(words, list) and len(words) >= 5
     assert any(w == "LIMITED" or w == "TECHNOLOGY" for w in words)
+
+
+def test_plans_cover_inputs_ok_when_1to1():
+    """正常：每个 PDF 一条计划且 src 一致 → 过闸。"""
+    pdfs = ["/tmp/a.pdf", "/tmp/b.pdf"]
+    plans = [
+        {"src": "/tmp/a.pdf", "status": "ok", "newbase": "A1"},
+        {"src": "/tmp/b.pdf", "status": "manual", "newbase": ""},
+    ]
+    ok, why = rename.plans_cover_inputs(pdfs, plans)
+    assert ok is True, why
+
+
+def test_plans_cover_inputs_fails_when_plan_missing_one():
+    """静默丢文件：plans 少一条 → 闸失败（可失败真闸）。"""
+    pdfs = ["/tmp/a.pdf", "/tmp/b.pdf"]
+    plans = [{"src": "/tmp/a.pdf", "status": "ok", "newbase": "A1"}]
+    ok, why = rename.plans_cover_inputs(pdfs, plans)
+    assert ok is False
+    assert "≠" in why or "missing" in why or "条数" in why
+
+
+def test_plans_cover_inputs_fails_when_src_wrong():
+    """计划 src 与输入集合不一致 → 闸失败。"""
+    pdfs = ["/tmp/a.pdf", "/tmp/b.pdf"]
+    plans = [
+        {"src": "/tmp/a.pdf", "status": "ok", "newbase": "A1"},
+        {"src": "/tmp/c.pdf", "status": "ok", "newbase": "C1"},  # 不是 b
+    ]
+    ok, why = rename.plans_cover_inputs(pdfs, plans)
+    assert ok is False
+    assert "missing" in why or "extra" in why or "覆盖" in why
+
+
+def test_plans_cover_inputs_fails_on_duplicate_src():
+    """重复 src → 闸失败。"""
+    pdfs = ["/tmp/a.pdf", "/tmp/b.pdf"]
+    plans = [
+        {"src": "/tmp/a.pdf", "status": "ok", "newbase": "A1"},
+        {"src": "/tmp/a.pdf", "status": "ok", "newbase": "A2"},
+    ]
+    ok, why = rename.plans_cover_inputs(pdfs, plans)
+    assert ok is False
+    assert "重复" in why

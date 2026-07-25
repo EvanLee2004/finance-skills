@@ -270,6 +270,31 @@ def dedup(plans):
             used[nb] = 0
 
 
+def plans_cover_inputs(pdfs, plans):
+    """E3 真闸：plans 的 src 集合必须与输入 PDF 集合一一对应（可失败）。
+
+    禁止只靠 ok+manual 二分长度——那在 plans 由 pdfs 列表推导时恒真。
+    返回 (ok: bool, reason: str)。
+    """
+    if len(plans) != len(pdfs):
+        return False, f"计划条数 {len(plans)} ≠ 输入 PDF {len(pdfs)}"
+    pdf_set = {os.path.abspath(p) for p in pdfs}
+    plan_srcs = []
+    for i, rec in enumerate(plans):
+        src = rec.get("src")
+        if not src:
+            return False, f"计划[{i}] 缺 src"
+        plan_srcs.append(os.path.abspath(src))
+    plan_set = set(plan_srcs)
+    if len(plan_srcs) != len(plan_set):
+        return False, "计划 src 有重复，可能丢文件或重复计入"
+    if plan_set != pdf_set:
+        missing = sorted(pdf_set - plan_set)
+        extra = sorted(plan_set - pdf_set)
+        return False, f"计划未覆盖输入 missing={len(missing)} extra={len(extra)}"
+    return True, ""
+
+
 # ── 主流程 ─────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="代扣代缴申报表 PDF 批量重命名")
@@ -299,12 +324,13 @@ def main():
     plans = [plan_one(p, suffix_pattern, overrides) for p in pdfs]
     dedup(plans)
 
+    covered, why = plans_cover_inputs(pdfs, plans)
+    if not covered:
+        log(f"✗ 计划未覆盖输入 PDF：{why}")
+        sys.exit(1)
+
     ok = [p for p in plans if p["status"] == "ok"]
     manual = [p for p in plans if p["status"] != "ok"]
-    # E3：每个输入 PDF 必须进计划（ok 或待人工），禁止静默丢文件
-    if len(ok) + len(manual) != len(pdfs) or len(plans) != len(pdfs):
-        log(f"✗ 计划条数 {len(plans)}（ok={len(ok)} manual={len(manual)}）≠ 输入 PDF {len(pdfs)}")
-        sys.exit(1)
 
     log(f"共 {len(plans)} 个 PDF：可重命名 {len(ok)}，待人工确认 {len(manual)}")
     for p in plans:
