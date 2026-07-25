@@ -315,3 +315,41 @@ def test_first_use_has_no_gaps(tmp_path):
     """第一次用不该从年初开始报一堆空档。"""
     info = BL.find_gaps(tmp_path, through=dt.date(2026, 7, 24))
     assert info["first_use"] is True and info["gaps"] == []
+
+
+# ══════════════════════════════════════════════════════════
+# C. 补多天：agent 多跑几遍（不并批），顺序从早到晚
+# ══════════════════════════════════════════════════════════
+
+def test_gaps_are_sorted_earliest_first(tmp_path):
+    """
+    补多天必须**从早到晚**：同一订单可能分两天核销、填她表里同一行，
+    先写早的、晚的那天才看得到"已填一半"接着算；顺序反了两笔会抢同一行双双挂起。
+    """
+    BL.record(tmp_path, dt.date(2026, 7, 20), "applied", payments=1)
+    info = BL.find_gaps(tmp_path, through=dt.date(2026, 7, 24))
+    gaps = info["gaps"]
+    assert gaps == sorted(gaps)
+    assert gaps[0] == dt.date(2026, 7, 21)
+
+
+def test_run_days_one_by_one_clears_gaps(tmp_path):
+    """一天一天跑完，空档逐个消失；中途停下剩余的仍留在台账里（不会丢）。"""
+    BL.record(tmp_path, dt.date(2026, 7, 20), "applied", payments=1)
+    assert len(BL.find_gaps(tmp_path, through=dt.date(2026, 7, 23))["gaps"]) == 3
+
+    BL.record(tmp_path, dt.date(2026, 7, 21), "applied", payments=2)  # 跑第 1 天
+    left = BL.find_gaps(tmp_path, through=dt.date(2026, 7, 23))["gaps"]
+    assert [d.isoformat() for d in left] == ["2026-07-22", "2026-07-23"]
+
+    BL.record(tmp_path, dt.date(2026, 7, 22), "classified", payments=0)  # 第 2 天空批也算跑过
+    left = BL.find_gaps(tmp_path, through=dt.date(2026, 7, 23))["gaps"]
+    assert [d.isoformat() for d in left] == ["2026-07-23"]
+
+
+def test_suggest_walks_forward_day_by_day(tmp_path):
+    """suggest_date 每次都指向"还没跑的最早一天"，正好就是 agent 下一遍该跑的那天。"""
+    BL.record(tmp_path, dt.date(2026, 7, 20), "applied", payments=1)
+    assert BL.suggest_date(tmp_path, today=dt.date(2026, 7, 24))["date"] == dt.date(2026, 7, 21)
+    BL.record(tmp_path, dt.date(2026, 7, 21), "applied", payments=1)
+    assert BL.suggest_date(tmp_path, today=dt.date(2026, 7, 24))["date"] == dt.date(2026, 7, 22)

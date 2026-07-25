@@ -220,6 +220,12 @@ def _cmd_gaps(args) -> int:
     if info["skipped_weekend"] and not args.all_days:
         print(f"（另有 {len(info['skipped_weekend'])} 个周末未计入；要连周末一起补加 --all-days）")
     print("→ 一天一批，从最早的那天开始补；别把几天合成一批跑。")
+    # 给 agent 一句可直接说给她听的短话（她要的是短，不是解释）
+    short = "、".join(f"{d.month}-{d.day}" for d in gaps[:6]) + ("…" if len(gaps) > 6 else "")
+    print(
+        f'\n【照说这句】有 {len(gaps)} 天没跑：{short}。'
+        f"我从早到晚一天一天来，每天出一份清单你点头我再写。开始？"
+    )
     return 1
 
 
