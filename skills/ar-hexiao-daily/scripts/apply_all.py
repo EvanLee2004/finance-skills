@@ -52,6 +52,20 @@ def _record_done(args, *, ledger_written: bool, flow_written: bool) -> None:
         print(f"WARN: 跑批台账登记失败（不影响已写入的数据）：{type(e).__name__}", file=sys.stderr)
 
 
+def _resnapshot_sources(workspace) -> None:
+    """统一写入全部成功并登记台账后，把合法新状态登记为下一轮源文件基线。"""
+    try:
+        import verify_sources
+
+        ws = common.resolve_workspace(workspace, quiet=True)
+        verify_sources.do_snapshot(ws)
+    except Exception as e:
+        print(
+            f"WARN: 最终源文件指纹刷新失败（不影响已验证的写入）：{type(e).__name__}",
+            file=sys.stderr,
+        )
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="确认后：盈亏 → 流转")
     ap.add_argument("--checked", required=True, help="盈亏 写入计划_校验后.json")
@@ -100,6 +114,7 @@ def main(argv=None) -> int:
     if not flow_plan or not Path(flow_plan).is_file():
         print("WARN: 无流转写入计划，跳过流转写入（盈亏已成功）。")
         _record_done(args, ledger_written=True, flow_written=False)
+        _resnapshot_sources(args.workspace)
         return 0
 
     flow_args = [
@@ -119,6 +134,7 @@ def main(argv=None) -> int:
         return rc2
     print("统一写入完成：盈亏 + 流转")
     _record_done(args, ledger_written=True, flow_written=True)
+    _resnapshot_sources(args.workspace)
     return 0
 
 

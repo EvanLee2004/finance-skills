@@ -134,6 +134,34 @@ def test_plan_strong_write_weak_hand():
     assert plan["counts"]["hand"] >= 3
 
 
+def test_flow_plan_always_covers_all_results_without_named_so_filter():
+    result = _result_with_flow_items([
+        {
+            "ar": "AR1",
+            "so": "SO_KEEP",
+            "flow_hits": 1,
+            "flow_matched_by": "三键",
+            "flow_file": "流转A.xlsx",
+            "flow_sheet": "明细",
+            "flow_row_no": 2,
+        },
+        {
+            "ar": "AR2",
+            "so": "SO_OTHER",
+            "flow_hits": 1,
+            "flow_matched_by": "三键",
+            "flow_file": "流转A.xlsx",
+            "flow_sheet": "明细",
+            "flow_row_no": 3,
+        },
+    ])
+    plan = BFP.build_plan(result)
+    assert {it["ar"] for it in plan["items"]} == {"AR1", "AR2"}
+    assert plan["selection"] == {
+        "mode": "all_results",
+    }
+
+
 def test_apply_flow_rejects_without_confirmed(tmp_path):
     plan = {"items": [{"ar": "AR1", "verdict": "write", "file": "x.xlsx", "sheet": "明细", "row_no": 2,
                        "order_suggest": "SO1", "updated_suggest": "是"}], "counts": {"write": 1}}
@@ -248,6 +276,38 @@ def test_apply_all_rejects_without_confirmed(tmp_path):
         "--checked", str(checked), "--ledger", str(led), "--workspace", str(tmp_path),
     ])
     assert rc == 2
+
+
+def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):
+    """最终指纹必须在盈亏、流转和跑批台账都成功后统一刷新。"""
+    checked = tmp_path / "checked.json"
+    checked.write_text(
+        json.dumps({"hexiao_date": "2026-07-27", "write": [], "skip": [], "conflict": []}),
+        encoding="utf-8",
+    )
+    flow_plan = tmp_path / "flow.json"
+    flow_plan.write_text(json.dumps({"items": []}), encoding="utf-8")
+    ledger = tmp_path / "ledger.xlsx"
+    ledger.write_bytes(b"placeholder")
+    calls = []
+
+    monkeypatch.setattr(AA.apply_to_copy, "main", lambda _args: 0)
+    monkeypatch.setattr(AA.apply_flow, "main", lambda _args: 0)
+    monkeypatch.setattr(AA, "_record_done", lambda *args, **kwargs: None)
+    monkeypatch.setattr(AA, "_resnapshot_sources", lambda workspace: calls.append(Path(workspace)))
+
+    rc = AA.main([
+        "--checked", str(checked),
+        "--flow-plan", str(flow_plan),
+        "--ledger", str(ledger),
+        "--workspace", str(tmp_path),
+        "--confirmed",
+        "--in-place",
+        "--flow-in-place",
+    ])
+
+    assert rc == 0
+    assert calls == [tmp_path]
 
 
 def test_plan_empty_so_preserves_existing_order_and_exact_strong():

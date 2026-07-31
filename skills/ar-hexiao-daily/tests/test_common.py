@@ -96,7 +96,7 @@ def test_mask_customer():
 
 
 def test_tail_threshold_default():
-    assert common.tail_threshold() == 0.0
+    assert common.tail_threshold() == 0.01
 
 
 def test_parse_rate_args():

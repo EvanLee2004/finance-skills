@@ -43,10 +43,11 @@ def _mk_exports(root: Path, *, with_writeoff=True, with_sod=True):
            [["AR26079999", "SO26070111", 250, 1, "某单"]])
     if with_writeoff:
         _write(exp / "核销明细_test.xlsx",
-               ["回款记录NUM", "核销日期", "本次核销金额", "币种", "汇率", "SO", "订单名称"],
-               [["AR26079999", "2026-07-22", 100, "人民币CNY", 1, "SO26070111", "某单"],
-                # 上个月的旧核销：累积子表里会有，必须被日期过滤掉，否则重复回填
-                ["AR26079999", "2026-06-15", 500, "人民币CNY", 1, "SO26070111", "某单"]])
+               ["核销记录NUM", "rowid", "回款记录NUM", "核销日期",
+                "本次核销金额", "本次核销金额/本币", "币种", "汇率",
+                "SO", "订单名称", "是否已撤销"],
+               [["HX26070001", "", "AR26079999", "2026-07-22", 100, 100,
+                 "人民币CNY", 1, "SO26070111", "某单", "否"]])
     if with_sod:
         _write(exp / "订单明细_test.xlsx",
                ["SO", "SOD", "交付额/原币"],
@@ -64,7 +65,7 @@ def test_load_exports_reads_four_tables(tmp_path):
     assert p["ar"] == "AR26079999"
     assert p["orders"] == [{"so": "SO26070111", "deliver": 250.0, "rate": 1.0,
                             "currency": "", "name": "某单"}]
-    # 累积子表按核销日期过滤：只留本次的 100，不含 6-15 的 500
+    # 当前核销记录按物理记录号保留。
     assert p["writeoffs"] == {"SO26070111": 100.0}
     assert len(p["sod_lines"]["SO26070111"]) == 3
 

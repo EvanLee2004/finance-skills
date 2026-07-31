@@ -29,7 +29,7 @@ from typing import Dict, List
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
-from validate_plan import FIVE, _norm, check_one, read_ledger_rows  # noqa: E402
+from validate_plan import DERIVED, FIVE, _norm, check_one, read_ledger_rows  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -39,7 +39,7 @@ except Exception:
 
 
 def locate_columns(ws, aliases) -> Dict[str, int]:
-    """找到『明细』的表头行与五列（+SO/SOD 用于写后核对）。返回 1-based 列号。"""
+    """找到『明细』的表头行、应收与五列（+SO/SOD）。返回 1-based 列号。"""
     all_rows = list(ws.iter_rows(values_only=True))
     hrow, headers = common.find_header_row(
         all_rows, "盈亏明细", ["SO", "SOD", "计提", "回款明细", "是否结账"], aliases
@@ -50,6 +50,17 @@ def locate_columns(ws, aliases) -> Dict[str, int]:
         ["SO", "SOD", "计提", "回款明细", "是否结账", "收款时间", "收款方式"],
         aliases,
     )
+    diff_idx = common.fuzzy_find_col(
+        headers, (aliases.get("盈亏明细", {}) or {}).get("差异", ["差异"])
+    )
+    if diff_idx is not None:
+        cols["差异"] = diff_idx
+    yidx = common.fuzzy_find_col(
+        headers, (aliases.get("盈亏明细", {}) or {}).get("应收", ["应收金额", "应收"])
+    )
+    if yidx is None:
+        raise ValueError("盈亏『明细』找不到应收金额列，无法执行部分回款拆行")
+    cols["应收"] = yidx
     return {k: v + 1 for k, v in cols.items()}  # openpyxl 是 1-based
 
 
@@ -80,9 +91,22 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
     before_rows = read_ledger_rows(src)
     changes: List[dict] = []
     edits: List = []
+    insertions: List = []
+    source_rows = sorted(
+        int(it["ledger_row_ref"])
+        for it in items
+        if (it.get("row_operation") or {}).get("type") == "split_below"
+    )
+
+    def final_original_row(row: int) -> int:
+        return int(row) + sum(1 for source in source_rows if source < int(row))
+
     for it in items:
         r = int(it["ledger_row_ref"])
+        applied_r = final_original_row(r)
+        it["_applied_row_ref"] = applied_r
         five = it.get("five_cols") or {}
+        derived = it.get("derived_cols") or {}
         before = before_rows.get(r, {})
         for k in FIVE:
             v = five.get(k)
@@ -93,20 +117,61 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
             elif k in ("计提", "回款明细"):
                 v = float(v)
             edits.append((r, cols[k], v))
+        if "差异" in derived:
+            if "差异" not in cols:
+                raise ValueError("本次需要写差异，但盈亏『明细』找不到“差异”列")
+            target_diff = float(derived["差异"])
+            formula = (
+                f"={xlsx_patch.col_letter(cols['应收'])}{applied_r}"
+                f"-{xlsx_patch.col_letter(cols['计提'])}{applied_r}"
+            )
+            edits.append(
+                (r, cols["差异"], xlsx_patch.FormulaValue(formula, target_diff))
+            )
         sod = five.get("实收SOD") or it.get("sod")
         if sod:
             edits.append((r, cols["SOD"], sod))
+        op = it.get("row_operation") or {}
+        if op.get("type") == "split_below":
+            edits.append((r, cols["应收"], float(op["paid_receivable"])))
+            # 部分回款阶段两侧计提与业务值差异都必须留空。旧版测试表可以没有
+            # “差异”列；存在时显式把源行和复制出的未回款行保持为空。
+            if "差异" in cols:
+                edits.append((r, cols["差异"], None))
+            inserted_five = op.get("inserted_five_cols") or {}
+            overrides = {
+                cols["应收"]: float(op["unpaid_receivable"]),
+                cols["计提"]: None,
+                cols["回款明细"]: None,
+                cols["是否结账"]: "否",
+                cols["收款时间"]: None,
+                cols["收款方式"]: None,
+            }
+            if "差异" in cols:
+                overrides[cols["差异"]] = None
+            inserted_sod = inserted_five.get("实收SOD") or sod
+            if inserted_sod:
+                overrides[cols["SOD"]] = inserted_sod
+            insertions.append((r, overrides))
+            it["_inserted_row_ref"] = applied_r + 1
         changes.append(
             {
                 "案例ID": it.get("case_id"),
-                "行号": r,
+                "行号": applied_r,
                 "SO": it.get("so"),
                 "SOD": sod,
                 "改前": {k: _norm(before.get(k)) for k in FIVE},
                 "改后": {k: _norm(five.get(k)) for k in FIVE},
+                "派生列_改前": {k: _norm(before.get(k)) for k in DERIVED if k in derived},
+                "派生列_改后": {k: _norm(derived.get(k)) for k in DERIVED if k in derived},
+                "派生列_公式": {
+                    "差异": formula if "差异" in derived else "",
+                },
+                "操作": "拆分并在下方新增未回款行" if op else "更新",
+                "新增行号": applied_r + 1 if op else "",
             }
         )
-    xlsx_patch.patch_cells(src, out, target_sheet, edits)
+    xlsx_patch.patch_cells(src, out, target_sheet, edits, insertions=insertions)
 
     # 写完立刻自证没搞坏她的表：少一个部件都算失败
     lost = xlsx_patch.parts_diff(src, out)
@@ -179,10 +244,16 @@ def precheck_before_write(plan: dict, items: List[dict], src: Path) -> List[str]
 
 def verify_written(out: Path, items: List[dict]) -> List[str]:
     """回读逐格比对——写完必须证明真写对了，而不是"保存没报错就算成"。"""
+    import openpyxl
+    import xlsx_patch
+
     rows = read_ledger_rows(out)
     problems: List[str] = []
+    formula_wb = openpyxl.load_workbook(str(out), read_only=True, data_only=False)
+    formula_ws = formula_wb["明细"]
+    formula_cols = locate_columns(formula_ws, common.load_aliases())
     for it in items:
-        r = int(it["ledger_row_ref"])
+        r = int(it.get("_applied_row_ref") or it["ledger_row_ref"])
         five = it.get("five_cols") or {}
         row = rows.get(r)
         if row is None:
@@ -195,6 +266,25 @@ def verify_written(out: Path, items: List[dict]) -> List[str]:
                 problems.append(
                     f"第 {r} 行 {k}：期望 {_norm(five.get(k))!r} 实际 {_norm(row.get(k))!r}"
                 )
+        derived = it.get("derived_cols") or {}
+        for k in DERIVED:
+            if k not in derived:
+                continue
+            if _norm(row.get(k)) != _norm(derived[k]):
+                problems.append(
+                    f"第 {r} 行 {k}：期望 {_norm(derived[k])!r} 实际 {_norm(row.get(k))!r}"
+                )
+            if k == "差异":
+                expected_formula = (
+                    f"={xlsx_patch.col_letter(formula_cols['应收'])}{r}"
+                    f"-{xlsx_patch.col_letter(formula_cols['计提'])}{r}"
+                )
+                actual_formula = formula_ws.cell(r, formula_cols["差异"]).value
+                if actual_formula != expected_formula:
+                    problems.append(
+                        f"第 {r} 行 差异公式：期望 {expected_formula!r} "
+                        f"实际 {actual_formula!r}"
+                    )
         # SOD 也是我们写进去的一列（write_plan 会写），必须一起回读证明。
         # 2026-07-25 补：旧版只比五列，SOD 写歪了回读照样报「全部一致 ✓」。
         sod = (five.get("实收SOD") or it.get("sod") or "").strip()
@@ -202,6 +292,27 @@ def verify_written(out: Path, items: List[dict]) -> List[str]:
             problems.append(
                 f"第 {r} 行 SOD：期望 {sod!r} 实际 {_norm(row.get('SOD'))!r}"
             )
+        op = it.get("row_operation") or {}
+        if op.get("type") == "split_below":
+            inserted_r = int(it.get("_inserted_row_ref") or (r + 1))
+            inserted = rows.get(inserted_r)
+            if inserted is None:
+                problems.append(f"第 {inserted_r} 行应为新增未回款行，但写完读不到")
+                continue
+            expected = {
+                "应收金额": op.get("unpaid_receivable"),
+                "计提": None, "回款明细": None, "是否结账": "否",
+                "收款时间": None, "收款方式": None, "SOD": sod,
+            }
+            if "差异" in formula_cols:
+                expected["差异"] = None
+            for key, want in expected.items():
+                got = inserted.get(key)
+                if _norm(got) != _norm(want):
+                    problems.append(
+                        f"第 {inserted_r} 行 {key}：期望 {_norm(want)!r} 实际 {_norm(got)!r}"
+                    )
+    formula_wb.close()
     return problems
 
 
@@ -212,15 +323,25 @@ def write_change_report(changes: List[dict], path: Path) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "变更清单"
-    headers = ["案例ID", "行号", "SO", "SOD"] + [f"改前_{k}" for k in FIVE] + [f"改后_{k}" for k in FIVE]
+    headers = (
+        ["案例ID", "行号", "SO", "SOD", "操作", "新增行号"]
+        + [f"改前_{k}" for k in FIVE]
+        + [f"改后_{k}" for k in FIVE]
+        + [f"改前_{k}" for k in DERIVED]
+        + [f"改后_{k}" for k in DERIVED]
+        + [f"公式_{k}" for k in DERIVED]
+    )
     ws.append(headers)
     for c in ws[1]:
         c.font = Font(bold=True)
     for ch in changes:
         ws.append(
-            [ch["案例ID"], ch["行号"], ch["SO"], ch["SOD"]]
+            [ch["案例ID"], ch["行号"], ch["SO"], ch["SOD"], ch["操作"], ch["新增行号"]]
             + [ch["改前"][k] for k in FIVE]
             + [ch["改后"][k] for k in FIVE]
+            + [ch.get("派生列_改前", {}).get(k, "") for k in DERIVED]
+            + [ch.get("派生列_改后", {}).get(k, "") for k in DERIVED]
+            + [ch.get("派生列_公式", {}).get(k, "") for k in DERIVED]
         )
     ws.freeze_panes = "A2"
     path.parent.mkdir(parents=True, exist_ok=True)

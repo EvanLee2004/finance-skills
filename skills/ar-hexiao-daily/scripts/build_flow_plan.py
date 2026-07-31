@@ -161,6 +161,9 @@ def build_plan(result: dict) -> dict:
         "items": plan_items,
         "counts": counts,
         "payment_count": result.get("payment_count") or len(by_ar),
+        "selection": {
+            "mode": "all_results",
+        },
     }
 
 

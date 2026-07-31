@@ -19,9 +19,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
 import shutil
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape
@@ -32,6 +34,14 @@ _EXCEL_EPOCH = dt.date(1899, 12, 30)
 
 _CELL_RE_TMPL = r'<c r="{ref}"(?P<attrs>[^>]*?)(?:/>|>(?P<inner>.*?)</c>)'
 _ROW_RE_TMPL = r'<row[^>]*\br="{row}"[^>]*(?:/>|>.*?</row>)'
+
+
+@dataclass(frozen=True)
+class FormulaValue:
+    """需要同时保留 Excel 公式与缓存显示值的单元格。"""
+
+    formula: str
+    cached: float
 
 
 def col_letter(idx1: int) -> str:
@@ -48,6 +58,15 @@ def to_serial(d) -> float:
     if isinstance(d, dt.datetime):
         d = d.date()
     return float((d - _EXCEL_EPOCH).days)
+
+
+def _formula_cache_text(value) -> str:
+    """把公式缓存写成最短无损浮点文本，保留财务金额的分位精度。"""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"公式缓存值必须是有限数字：{value!r}")
+    # 不可使用 ``:g``：其默认只有 6 位有效数字，会把 15479.75 写成 15479.8。
+    return repr(number)
 
 
 def sheet_path_for(zf: zipfile.ZipFile, sheet_name: str) -> str:
@@ -133,6 +152,12 @@ def _render_cell(ref: str, value, style: Optional[str]) -> str:
     s_attr = f' s="{style}"' if style else ""
     if value is None:
         return f'<c r="{ref}"{s_attr}/>'
+    if isinstance(value, FormulaValue):
+        formula = value.formula.lstrip("=")
+        return (
+            f'<c r="{ref}"{s_attr}><f>{escape(formula)}</f>'
+            f'<v>{_formula_cache_text(value.cached)}</v></c>'
+        )
     if isinstance(value, (dt.date, dt.datetime)):
         return f'<c r="{ref}"{s_attr}><v>{to_serial(value):g}</v></c>'
     if isinstance(value, bool):
@@ -186,14 +211,145 @@ def _col_index(letters: str) -> int:
     return n
 
 
+def _translate_formula_self_row(formula: str, old_row: int, new_row: int) -> str:
+    """复制/下移整行时，只平移公式中指向本行的相对行号；绝对行号保持不变。"""
+    pat = re.compile(rf'(?<![A-Z0-9_])(\$?[A-Z]{{1,3}})(?![A-Z])(\$?){old_row}(?!\d)')
+
+    def repl(m):
+        return m.group(0) if m.group(2) == "$" else f"{m.group(1)}{new_row}"
+
+    return pat.sub(repl, formula)
+
+
+def _renumber_row_xml(row_xml: str, old_row: int, new_row: int) -> str:
+    """把一整行的 r=、单元格地址和普通公式从 old_row 平移到 new_row。"""
+    out = re.sub(rf'(<row\b[^>]*\br="){old_row}(")', rf'\g<1>{new_row}\2', row_xml, count=1)
+    out = re.sub(
+        rf'(<c\b[^>]*\br=")([A-Z]+){old_row}(")',
+        lambda m: f'{m.group(1)}{m.group(2)}{new_row}{m.group(3)}',
+        out,
+    )
+    out = re.sub(
+        r'(<f\b[^>]*>)(.*?)(</f>)',
+        lambda m: m.group(1)
+        + _translate_formula_self_row(m.group(2), old_row, new_row)
+        + m.group(3),
+        out,
+        flags=re.S,
+    )
+    return out
+
+
+def _shift_a1_token(token: str, after_row: int, include_inserted: bool = False) -> str:
+    """把本 sheet 的 A1 / A1:B2 / 多段 sqref 按“在 after_row 后插一行”平移。"""
+    cell_re = re.compile(r'^(?P<col>\$?[A-Z]{1,3})(?P<abs>\$?)(?P<row>\d+)$')
+
+    def one_cell(cell: str, *, is_end: bool = False) -> str:
+        m = cell_re.match(cell)
+        if not m:
+            return cell
+        row = int(m.group("row"))
+        should_shift = row > after_row or (include_inserted and is_end and row == after_row)
+        return f'{m.group("col")}{m.group("abs")}{row + 1}' if should_shift else cell
+
+    parts = []
+    for piece in token.split():
+        if ":" in piece:
+            left, right = piece.split(":", 1)
+            parts.append(f"{one_cell(left)}:{one_cell(right, is_end=True)}")
+        else:
+            parts.append(one_cell(piece))
+    return " ".join(parts)
+
+
+def _shift_sheet_ranges(xml: str, after_row: int) -> str:
+    """同步 sheet 内常见范围，避免插行后筛选、验证、合并范围仍停在旧行号。"""
+    tags = (
+        "dimension", "autoFilter", "mergeCell", "conditionalFormatting",
+        "dataValidation", "ignoredError", "hyperlink",
+    )
+    for tag in tags:
+        xml = re.sub(
+            rf'(<{tag}\b[^>]*\b(?:ref|sqref)=")([^"]+)(")',
+            lambda m: m.group(1)
+            + _shift_a1_token(m.group(2), after_row, include_inserted=True)
+            + m.group(3),
+            xml,
+        )
+    return xml
+
+
+def _shift_shared_formula_refs(xml: str, after_row: int) -> str:
+    """插行时同步 shared formula 主公式的 ref；跨过插入点的组扩展一行。"""
+    def repl(m):
+        tag = m.group(0)
+        if not re.search(r'\bt="shared"', tag) or not re.search(r'\bref="', tag):
+            return tag
+        return re.sub(
+            r'(\bref=")([^"]+)(")',
+            lambda x: x.group(1)
+            + _shift_a1_token(x.group(2), after_row, include_inserted=True)
+            + x.group(3),
+            tag,
+            count=1,
+        )
+
+    return re.sub(r"<f\b[^>]*>", repl, xml)
+
+
+def _demote_copied_shared_masters(row_xml: str) -> str:
+    """复制到新行的 shared master 改成同组 follower，避免同一 si 出现两个主公式。"""
+    def repl(m):
+        tag = m.group(1)
+        if not re.search(r'\bt="shared"', tag) or not re.search(r'\bref="', tag):
+            return m.group(0)
+        si = re.search(r'\bsi="([^"]+)"', tag)
+        if not si:
+            return m.group(0)
+        return f'<f t="shared" si="{si.group(1)}"/>'
+
+    return re.sub(
+        r'(<f\b[^>]*>).*?</f>',
+        repl,
+        row_xml,
+        flags=re.S,
+    )
+
+
+def _insert_row_copy(xml: str, source_row: int) -> str:
+    """在 source_row 正下方复制一行；共享公式保留同一 si，并扩展主公式 ref。"""
+    source_match = re.search(_ROW_RE_TMPL.format(row=source_row), xml, re.S)
+    if not source_match:
+        raise ValueError(f"sheet 里找不到待拆分的第 {source_row} 行")
+    def shift_row(m):
+        row_xml = m.group(0)
+        rm = re.search(r'<row\b[^>]*\br="(\d+)"', row_xml)
+        if not rm:
+            return row_xml
+        old = int(rm.group(1))
+        return _renumber_row_xml(row_xml, old, old + 1) if old > source_row else row_xml
+
+    xml = re.sub(r'<row\b[^>]*\br="\d+"[^>]*(?:/>|>.*?</row>)', shift_row, xml, flags=re.S)
+    source_match = re.search(_ROW_RE_TMPL.format(row=source_row), xml, re.S)
+    source_xml = source_match.group(0)
+    inserted = _renumber_row_xml(source_xml, source_row, source_row + 1)
+    inserted = _demote_copied_shared_masters(inserted)
+    xml = xml[: source_match.end()] + inserted + xml[source_match.end() :]
+    xml = _shift_shared_formula_refs(xml, source_row)
+    return _shift_sheet_ranges(xml, source_row)
+
+
 def patch_cells(
     src: Path,
     out: Path,
     sheet_name: str,
     edits: List[Tuple[int, int, object]],
+    insertions: Optional[List[Tuple[int, Dict[int, object]]]] = None,
 ) -> int:
     """
-    edits = [(行号1基, 列号1基, 值)]。返回改动的格数。
+    edits = [(原始行号1基, 列号1基, 值)]。
+    insertions = [(原始源行号, {列号1基: 新行覆盖值})]，表示在源行下复制一行。
+    返回改动格数 + 插入行数。
     src 不动；out 是新文件，除目标 sheet 外**每个部件按原始字节复制**。
     """
     src, out = Path(src), Path(out)
@@ -203,9 +359,23 @@ def patch_cells(
         xml = zin.read(target).decode("utf-8", "replace")
         infos = zin.infolist()
         payload = {i.filename: zin.read(i.filename) for i in infos}
+        insertion_specs = list(insertions or [])
+        source_rows = [int(x[0]) for x in insertion_specs]
+        if len(source_rows) != len(set(source_rows)):
+            raise ValueError("同一原始行不能在一批计划里拆分两次")
+        for source_row in sorted(source_rows, reverse=True):
+            xml = _insert_row_copy(xml, source_row)
+
+        def final_original_row(row: int) -> int:
+            return int(row) + sum(1 for source in source_rows if source < int(row))
+
         by_row: Dict[int, Dict[str, object]] = {}
         for r, c, v in edits:
-            by_row.setdefault(r, {})[col_letter(c)] = v
+            by_row.setdefault(final_original_row(int(r)), {})[col_letter(c)] = v
+        for source_row, overrides in insertion_specs:
+            inserted_row = final_original_row(int(source_row)) + 1
+            for c, v in overrides.items():
+                by_row.setdefault(inserted_row, {})[col_letter(int(c))] = v
 
         # 日期值若在同列借不到日期样式，就往 styles.xml 追加一个（不删任何东西）
         date_style = None
@@ -223,11 +393,28 @@ def patch_cells(
 
         for r, cells in sorted(by_row.items()):
             xml = _patch_row(xml, r, cells, date_style=date_style)
+        workbook_name = "xl/workbook.xml"
+        if workbook_name in payload:
+            wb_xml = payload[workbook_name].decode("utf-8", "replace")
+            attrs = 'calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1" calcId="0"'
+            if re.search(r"<calcPr\b[^>]*/>", wb_xml):
+                wb_xml = re.sub(r"<calcPr\b[^>]*/>", f"<calcPr {attrs}/>", wb_xml, count=1)
+            elif re.search(r"<calcPr\b[^>]*>.*?</calcPr>", wb_xml, flags=re.S):
+                wb_xml = re.sub(
+                    r"<calcPr\b[^>]*>.*?</calcPr>",
+                    f"<calcPr {attrs}/>",
+                    wb_xml,
+                    count=1,
+                    flags=re.S,
+                )
+            else:
+                wb_xml = wb_xml.replace("</workbook>", f"<calcPr {attrs}/></workbook>")
+            payload[workbook_name] = wb_xml.encode("utf-8")
     payload[target] = xml.encode("utf-8")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zo:
         for i in infos:
             zo.writestr(i, payload[i.filename])
-    return sum(len(c) for c in by_row.values())
+    return sum(len(c) for c in by_row.values()) + len(insertion_specs)
 
 
 def parts_diff(a: Path, b: Path) -> List[str]:
