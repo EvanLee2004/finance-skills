@@ -47,9 +47,9 @@ STATUS = {
 HEADERS = [
     "单号", "状态", "怎么办",
     "SO", "到账号(AR)", "客户(打码)", "本次金额",
-    "应填_计提", "应填_回款明细", "应填_是否结账", "应填_收款时间", "应填_收款方式", "应填_实收SOD",
-    "当前_计提", "当前_回款明细", "当前_是否结账", "当前_收款时间", "当前_收款方式", "当前_实收SOD",
-    "差异(一眼扫)", "怎么找到这行", "这笔到账在流转表哪一行", "流转表单号列建议填",
+    "应填_计提", "应填_回款明细", "应填_业务值差异", "应填_是否结账", "应填_收款时间", "应填_收款方式", "应填_实收SOD",
+    "当前_计提", "当前_回款明细", "当前_业务值差异", "当前_是否结账", "当前_收款时间", "当前_收款方式", "当前_实收SOD",
+    "当前值与计划值的比较差异", "怎么找到这行", "这笔到账在流转表哪一行", "流转表单号列建议填",
     "判定依据", "码",
 ]
 
@@ -68,12 +68,16 @@ def _norm(v) -> str:
         return s
 
 
-def _diff_text(five: dict, cur: dict) -> str:
+def _diff_text(five: dict, cur: dict, derived: dict) -> str:
     parts = []
     for k in FIVE + ["实收SOD"]:
         if five.get(k) is None:
             continue
         a, b = _norm(cur.get(k)), _norm(five.get(k))
+        if a != b:
+            parts.append(f"{k}：表里={a or '(空)'} → 这次算={b}")
+    for k, want in derived.items():
+        a, b = _norm(cur.get(k)), _norm(want)
         if a != b:
             parts.append(f"{k}：表里={a or '(空)'} → 这次算={b}")
     return "；".join(parts)
@@ -86,6 +90,7 @@ SPECIFIC_CODES = {"E4", "E5", "E7", "E8"}
 
 def _row(item: dict, status: str, codes: dict, action_override: str = "") -> List[Any]:
     five = item.get("five_cols") or {}
+    derived = item.get("derived_cols") or {}
     cur = item.get("current_values") or {}
     code = item.get("code") or ""
     info = codes.get(code) or {}
@@ -111,11 +116,11 @@ def _row(item: dict, status: str, codes: dict, action_override: str = "") -> Lis
         item.get("ar") or "",
         item.get("customer_masked") or "",
         five.get("回款明细"),
-        five.get("计提"), five.get("回款明细"), five.get("是否结账"),
+        five.get("计提"), five.get("回款明细"), derived.get("差异"), five.get("是否结账"),
         five.get("收款时间"), five.get("收款方式"), five.get("实收SOD"),
-        cur.get("计提"), cur.get("回款明细"), cur.get("是否结账"),
+        cur.get("计提"), cur.get("回款明细"), cur.get("差异"), cur.get("是否结账"),
         cur.get("收款时间"), cur.get("收款方式"), cur.get("实收SOD"),
-        _diff_text(five, cur) if status == "冲突·需你定" else "",
+        _diff_text(five, cur, derived),
         item.get("locate_hint") or "",
         item.get("flow_locate") or "",
         item.get("flow_order_suggest") or "",
@@ -172,6 +177,11 @@ def build_workbook(
     fc = (flow_plan or {}).get("counts") or {}
     m_write = int(fc.get("write") or 0)
     m_hand = int(fc.get("hand") or 0)
+    coverage = result.get("source_coverage") or {}
+    pending_shifted = {
+        day: info for day, info in (result.get("shifted_detail_dates") or {}).items()
+        if info.get("needs_rerun") and day != result.get("hexiao_date")
+    }
     # 日期抬头：她可能今天补跑上周三的批次，也可能隔天才回来确认。
     # 不把「这是哪一天的」印在最显眼的地方，她核对的就可能是另一天的账。
     hx = result.get("hexiao_date") or ""
@@ -182,6 +192,21 @@ def build_workbook(
         [f"  清单生成时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"],
         [""],
         [f"这次一共 {result.get('payment_count', '?')} 笔到账，拆成 {counts.get('total', 0)} 个订单行。"],
+        [
+            f"来源完整性：AR/SO {coverage.get('produced_order_keys', '?')}/"
+            f"{coverage.get('expected_order_keys', '?')}；"
+            f"历史子核销还原 {coverage.get('historical_detail_rows', 0)} 行；"
+            f"SOD 回补交付额 {coverage.get('recovered_delivery_orders', 0)} 单。"
+        ],
+        [
+            "历史增补提醒：" + (
+                "；".join(
+                    f"{day} 尚缺 {len(info.get('missing_order_keys') or [])} 个 AR/SO"
+                    for day, info in pending_shifted.items()
+                )
+                if pending_shifted else "无"
+            )
+        ],
         [""],
         ["【盈亏明细】"],
         [f"① 今天要填     {n.get('今天要填', 0):>4} 行  ← 确认后程序可写"],

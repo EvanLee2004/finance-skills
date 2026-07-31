@@ -33,6 +33,7 @@ except Exception:
     pass
 
 FIVE = ["计提", "回款明细", "是否结账", "收款时间", "收款方式"]
+DERIVED = ["差异"]
 VALID_JIEZHANG = {"是", "否"}
 VALID_WAY = {"汇", "冲预收", "支", "现"}
 
@@ -72,6 +73,17 @@ def read_ledger_rows(path: Path) -> Dict[int, dict]:
         ["SO", "SOD", "计提", "回款明细", "是否结账", "收款时间", "收款方式"],
         aliases,
     )
+    diff_idx = common.fuzzy_find_col(
+        headers, (aliases.get("盈亏明细", {}) or {}).get("差异", ["差异"])
+    )
+    if diff_idx is not None:
+        cols["差异"] = diff_idx
+    yidx = common.fuzzy_find_col(
+        headers, (aliases.get("盈亏明细", {}) or {}).get("应收", ["应收金额", "应收"])
+    )
+    if yidx is None:
+        raise ValueError("盈亏『明细』找不到应收金额列，无法校验部分回款拆行")
+    cols["应收"] = yidx
     out: Dict[int, dict] = {}
     for i, row in enumerate(all_rows, start=1):
         if i <= hrow + 1:
@@ -87,9 +99,12 @@ def read_ledger_rows(path: Path) -> Dict[int, dict]:
             "SOD": str(cell("SOD") or "").strip(),
             "计提": cell("计提"),
             "回款明细": cell("回款明细"),
+            "差异": cell("差异"),
+            "_差异列存在": "差异" in cols,
             "是否结账": cell("是否结账"),
             "收款时间": cell("收款时间"),
             "收款方式": cell("收款方式"),
+            "应收金额": cell("应收"),
         }
     return out
 
@@ -103,6 +118,7 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     """
     ref = item.get("ledger_row_ref")
     five = item.get("five_cols") or {}
+    derived = item.get("derived_cols") or {}
     so, sod = (item.get("so") or "").strip(), (item.get("sod") or "").strip()
 
     if not ref:
@@ -136,6 +152,54 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             float(v)
         except (TypeError, ValueError):
             return {"verdict": "conflict", "reason": f"{k} 不是数字：{v!r}"}
+    for k in DERIVED:
+        if k not in derived:
+            continue
+        if not row.get("_差异列存在"):
+            return {"verdict": "conflict", "reason": "本次需要写差异，但盈亏明细没有“差异”列"}
+        try:
+            float(derived[k])
+        except (TypeError, ValueError):
+            return {"verdict": "conflict", "reason": f"{k} 不是数字：{derived[k]!r}"}
+
+    op = item.get("row_operation") or {}
+    if op:
+        if op.get("type") != "split_below":
+            return {"verdict": "conflict", "reason": f"未知行操作：{op.get('type')!r}"}
+        if row.get("_差异列存在") and _norm(row.get("差异")) not in ("", "None"):
+            return {
+                "verdict": "conflict",
+                "reason": (
+                    "部分回款阶段计提和业务值差异都必须留空，"
+                    f"但当前差异={_norm(row.get('差异'))!r}；禁止覆盖"
+                ),
+            }
+        try:
+            source = round(float(op["source_receivable"]), 2)
+            paid = round(float(op["paid_receivable"]), 2)
+            unpaid = round(float(op["unpaid_receivable"]), 2)
+            latest = round(float(op["latest_delivery"]), 2)
+            cumulative = round(float(op["cumulative_received"]), 2)
+        except (KeyError, TypeError, ValueError):
+            return {"verdict": "conflict", "reason": "部分回款拆行参数缺失或不是数字"}
+        if paid < 0 or unpaid <= 0:
+            return {"verdict": "conflict", "reason": f"拆行应收异常：已收侧={paid} 未收侧={unpaid}"}
+        if abs((paid + unpaid) - source) > 0.011:
+            return {"verdict": "conflict", "reason": f"拆行不守恒：{paid}+{unpaid}!={source}"}
+        if abs((latest - cumulative) - unpaid) > 0.011:
+            return {"verdict": "conflict", "reason": f"未回款公式不成立：{latest}-{cumulative}!={unpaid}"}
+        current_receivable = common.to_number(row.get("应收金额"))
+        if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
+            return {
+                "verdict": "conflict",
+                "reason": f"当前行应收已变化：表里={current_receivable} 计划基线={source}",
+            }
+        inserted = op.get("inserted_five_cols") or {}
+        if inserted.get("是否结账") != "否":
+            return {"verdict": "conflict", "reason": "拆出的未回款行必须是否结账=否"}
+        for key in ("计提", "回款明细", "收款时间", "收款方式"):
+            if inserted.get(key) is not None:
+                return {"verdict": "conflict", "reason": f"未回款行 {key} 必须留空"}
 
     # ③ 目标格现在是什么
     # ⚠「是否结账」是她盈亏表**预置的默认值**：单子交付了、钱还没到的行默认就是「否」
@@ -148,6 +212,12 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     evidence_cols = [k for k in FIVE if k != "是否结账"]
     filled = [k for k in evidence_cols if _norm(row.get(k)) not in ("", "None")]
     if not filled:
+        for k in DERIVED:
+            if k in derived and _norm(row.get(k)) not in ("", "None", _norm(derived[k])):
+                return {
+                    "verdict": "conflict",
+                    "reason": f"{k}: 表里={_norm(row.get(k))!r} 计划={_norm(derived[k])!r}",
+                }
         return {"verdict": "write", "reason": "回款列为空，可写（是否结账为她表预置默认，不计入已填证据）"}
 
     # 这行她已经填过了 → 逐列比对。**两种不一致都算不一致**：
@@ -165,15 +235,35 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             continue
         if got != _norm(want):
             diff.append(f"{k}: 表里={got!r} 计划={_norm(want)!r}")
+    derived_missing: List[str] = []
+    for k in DERIVED:
+        if k not in derived:
+            continue
+        want, got = derived[k], _norm(row.get(k))
+        if got in ("", "None"):
+            derived_missing.append(k)
+        elif got != _norm(want):
+            diff.append(f"{k}: 表里={got!r} 计划={_norm(want)!r}")
+    if diff:
+        return {
+            "verdict": "conflict",
+            "reason": "这行已经填过，且和本次算的不一样 → " + "；".join(diff),
+        }
+    if derived_missing:
+        return {
+            "verdict": "write",
+            "reason": "五项回款字段已一致，仅补业务值差异公式：" + "、".join(derived_missing),
+        }
     if not diff:
         return {"verdict": "skip", "reason": "已经填过且与本次一致（幂等跳过）"}
-    return {
-        "verdict": "conflict",
-        "reason": "这行已经填过，且和本次算的不一样 → " + "；".join(diff),
-    }
+    raise AssertionError("不可达")
 
 
-def validate(plan: dict, rows: Dict[int, dict], ledger_path: Optional[Path] = None) -> dict:
+def validate(
+    plan: dict,
+    rows: Dict[int, dict],
+    ledger_path: Optional[Path] = None,
+) -> dict:
     items = list(plan.get("auto") or [])
     checked: List[dict] = []
     seen_rows: Dict[int, str] = {}
@@ -202,6 +292,11 @@ def validate(plan: dict, rows: Dict[int, dict], ledger_path: Optional[Path] = No
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "hexiao_date": plan.get("hexiao_date") or "",
         "counts": {k: len(v) for k, v in buckets.items()},
+        "selection": {
+            "mode": "all_auto",
+            "selected": len(items),
+            "total_auto": len(items),
+        },
         **buckets,
     }
     if ledger_path is not None:

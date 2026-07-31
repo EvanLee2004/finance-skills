@@ -424,12 +424,16 @@ def test_stray_hexiao_date_arg_does_not_crash_chain():
 # ══════════════════════════════════════════════════════════
 
 def test_already_fetched_detects_full_set(tmp_path):
-    """她手导过、或上一轮取过 → 四件套齐了就该跳过取数，不该卡在输密码上。"""
+    """只有带当前取数版本标记的完整四件套才允许跳过。"""
     import fetch_zhiyun as FZ
     d = tmp_path / "01_智云导出"
     d.mkdir(parents=True)
     for k in ("回款记录", "订单交付", "核销明细", "订单明细"):
         (d / f"{k}_20260722.xlsx").write_bytes(b"x")
+    (d / "取数摘要_20260722.json").write_text(
+        '{"export_schema_version":"' + FZ.EXPORT_SCHEMA_VERSION + '"}',
+        encoding="utf-8",
+    )
     assert len(FZ.already_fetched(d, "2026-07-22")) == 4
 
 

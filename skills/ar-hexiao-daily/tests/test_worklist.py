@@ -19,7 +19,7 @@ def _auto_item(so="SO2601", sod="SOD2601", ar="AR1"):
             "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
             "收款时间": "2026-07-21", "收款方式": "汇", "实收SOD": sod,
         },
-        "current_values": {"计提": None, "回款明细": None, "是否结账": "",
+        "current_values": {"计提": None, "回款明细": None, "差异": None, "是否结账": "",
                            "收款时间": "", "收款方式": None, "实收SOD": None},
         "reason": "全额核销/全部SOD · 定位=SO+应收金额",
         "ledger_row_ref": 100,
@@ -57,6 +57,9 @@ def test_single_sheet_with_status_column():
     ws = wb["今日清单"]
     headers, col = _cols(ws)
     assert headers[0] == "单号" and headers[1] == "状态"
+    assert "应填_业务值差异" in headers
+    assert "当前_业务值差异" in headers
+    assert "当前值与计划值的比较差异" in headers
     assert "行号" not in headers  # 她会插行，行号隔天就失效
     rows = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)]
     assert len(rows) == 3
@@ -101,7 +104,29 @@ def test_conflict_shows_diff():
     _, col = _cols(ws)
     row2 = [c.value for c in ws[2]]
     assert row2[col["状态"]] == "冲突·需你定"
-    assert "收款方式" in str(row2[col["差异(一眼扫)"]])
+    assert "收款方式" in str(row2[col["当前值与计划值的比较差异"]])
+
+
+def test_write_row_shows_business_difference_separately_from_comparison():
+    item = _auto_item()
+    item["derived_cols"] = {"差异": -10.0}
+    item["five_cols"]["计提"] = 110.0
+    item["five_cols"]["回款明细"] = 110.0
+    checked = {
+        "counts": {"write": 1, "skip": 0, "conflict": 0},
+        "write": [{**item, "_check": {"verdict": "write", "reason": "可写"}}],
+        "skip": [], "conflict": [],
+    }
+    out = Path(tempfile.mkdtemp()) / "日清_业务值差异.xlsx"
+    W.build_workbook(_sample_result(), checked, out)
+    ws = openpyxl.load_workbook(out)["今日清单"]
+    _, col = _cols(ws)
+    row2 = [c.value for c in ws[2]]
+    assert row2[col["应填_业务值差异"]] == -10.0
+    assert row2[col["当前_业务值差异"]] is None
+    assert "差异：表里=(空) → 这次算=-10.00" in str(
+        row2[col["当前值与计划值的比较差异"]]
+    )
 
 
 def test_flow_sheet_has_policy():
@@ -130,6 +155,9 @@ def test_hold_row_carries_action():
 
 
 def test_main_from_result_json(tmp_path):
+    input_dir = tmp_path / "01_智云导出"
+    input_dir.mkdir(parents=True)
+    (input_dir / "测试输入.txt").write_text("test", encoding="utf-8")
     (tmp_path / "04_产出").mkdir(parents=True)
     res = tmp_path / "04_产出" / "判定结果_20260722.json"
     res.write_text(json.dumps(_sample_result(), ensure_ascii=False), encoding="utf-8")

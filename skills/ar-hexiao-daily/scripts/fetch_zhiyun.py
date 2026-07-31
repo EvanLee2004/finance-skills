@@ -50,6 +50,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ── 常量（表 ID / 字段 ID 来自 2026-07-09/22/23 勘探，非密钥）────────────────
 BASE_DEFAULT = "http://192.168.10.167:18880"
 APP_ID = "6ff4fb2e-e68c-4ee9-83a0-836de8f72c11"
+EXPORT_SCHEMA_VERSION = "2026-07-30-direct-writeoff-v1"
+CREDENTIAL_SERVICE = "codex.ar-hexiao-daily.zhiyun"
 
 WS_HUIKUAN = "6555d2b1f9460e517040ba6c"  # 回款记录（唯一入口）
 
@@ -79,7 +81,7 @@ XIADAN_COLS = ["SO", "交付额/原币", "汇率", "结算币种", "订单名称
 #   （2026-07-23 实调：该表字段 = 核销记录NUM/回款记录NUM/订单NUM/本次核销金额/…）。
 #   旧版靠"按金额跟下单栏配对"猜 SO，金额一撞就配错；这一版直接从订单NUM读，不猜。
 MINGXI_COLS = [
-    "订单NUM", "本次核销金额", "本次核销金额本币", "核销日期",
+    "回款记录NUM", "订单NUM", "本次核销金额", "本次核销金额本币", "核销日期",
     "币种", "汇率", "订单名称", "是否已撤销",
 ]
 SODLINE_COLS = ["SO", "SOD", "交付额/原币", "币种", "项目状态"]
@@ -91,6 +93,17 @@ class LoginError(RuntimeError):
 
 class FetchError(RuntimeError):
     pass
+
+
+def _repair_mojibake(s: str) -> str:
+    """修复智云部分选项标签按 GBK 字节误解成 Latin-1 的文本。"""
+    try:
+        repaired = s.encode("latin1").decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+    has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in repaired)
+    original_has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in s)
+    return repaired if has_cjk and not original_has_cjk else s
 
 
 def _plain(v: Any, options: Optional[Dict[str, str]] = None) -> str:
@@ -121,10 +134,10 @@ def _plain(v: Any, options: Optional[Dict[str, str]] = None) -> str:
                 out.append(options[str(item)])
             else:
                 out.append(str(item))
-        return "、".join(x for x in out if x)
+        return _repair_mojibake("、".join(x for x in out if x))
     if options and s in options:
-        return options[s]
-    return s
+        return _repair_mojibake(options[s])
+    return _repair_mojibake(s)
 
 
 def extract_so(text: str) -> str:
@@ -133,6 +146,16 @@ def extract_so(text: str) -> str:
     for token in s.replace("\n", " ").replace("、", " ").replace(",", " ").split():
         t = token.strip().upper()
         if t.startswith("SO") and not t.startswith("SOD") and len(t) >= 8:
+            return token.strip()
+    return ""
+
+
+def extract_ar(text: str) -> str:
+    """从关联字段文本中提取 AR 号。"""
+    s = _plain(text)
+    for token in s.replace("\n", " ").replace("、", " ").replace(",", " ").split():
+        t = token.strip().upper()
+        if t.startswith("AR") and len(t) >= 8:
             return token.strip()
     return ""
 
@@ -433,6 +456,70 @@ def write_xlsx(path: Path, headers: List[str], rows: List[List[Any]]) -> None:
     wb.save(str(path))
 
 
+def historical_writeoffs_for_sos(
+    client: ZhiyunClient,
+    worksheet_id: str,
+    sos: Sequence[str],
+    target_day: str,
+) -> List[List[Any]]:
+    """
+    从全局“订单同币种核销明细信息”补取本批 SO 在目标日前的历史核销。
+
+    关联父回款只会给出当前父 AR 自己的子明细；同一 SO 的首款、尾款若分别落在
+    不同 AR，单靠当前父记录会漏掉历史回款。这里按 SO 精确检索全局明细，且只补
+    `核销日期 < target_day` 的未撤销行；目标日当前行仍由父回款关联子表提供。
+    """
+    if not worksheet_id or not sos:
+        return []
+    ctrls = client.controls(worksheet_id)
+    names, opts = client.name_map(ctrls), client.option_maps(ctrls)
+    out: List[List[Any]] = []
+    seen = set()
+    for wanted_so in sorted({str(x or "").strip() for x in sos if str(x or "").strip()}):
+        try:
+            hits = client.search_rows(worksheet_id, wanted_so)
+        except Exception as exc:
+            raise FetchError(
+                f"全局核销明细检索失败 SO={wanted_so}: {type(exc).__name__}"
+            ) from exc
+        for row in hits:
+            v = pick_named(row, names, opts, MINGXI_COLS)
+            if (v.get("是否已撤销") or "").strip() == "是":
+                continue
+            so = extract_so(v.get("订单NUM") or "")
+            if so != wanted_so:
+                continue
+            hx_day = (v.get("核销日期") or "").strip()[:10]
+            if not hx_day or hx_day >= target_day:
+                continue
+            ar = extract_ar(v.get("回款记录NUM") or "")
+            if not ar:
+                raise FetchError(
+                    f"全局核销明细读不到父回款号：SO={wanted_so} 核销日期={hx_day}"
+                )
+            key = (
+                ar,
+                hx_day,
+                so,
+                v.get("本次核销金额"),
+                v.get("本次核销金额本币"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append([
+                ar,
+                hx_day,
+                v.get("本次核销金额"),
+                v.get("本次核销金额本币"),
+                v.get("币种"),
+                v.get("汇率"),
+                so,
+                v.get("订单名称"),
+            ])
+    return out
+
+
 def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     """拉一天的四张表 + 摘要 json。返回计数摘要（无客户名/金额明细）。"""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -441,6 +528,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     hk_opts = client.option_maps(hk_ctrls)
     cid_xiadan = client.id_by_name(hk_ctrls, REL_XIADAN)
     cid_mingxi = client.id_by_name(hk_ctrls, REL_HEXIAO_MINGXI)
+    ws_mingxi = client.datasource_of(WS_HUIKUAN, REL_HEXIAO_MINGXI)
     ws_sodline = client.datasource_of(WS_HUIKUAN, REL_SODLINE)
     if not cid_xiadan:
         raise FetchError(f"回款记录里找不到「{REL_XIADAN}」关联字段——智云表结构变了，停下别猜")
@@ -483,6 +571,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     # ── ② 下单栏（每笔 → SO + 交付额）+ ③ 同币种核销明细 ───────
     xd_out: List[List[Any]] = []
     mx_out: List[List[Any]] = []
+    mx_seen = set()
     all_so: List[str] = []
     ars_without_orders: List[str] = []
 
@@ -526,11 +615,32 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
                     )
                 if so and so not in all_so:
                     all_so.append(so)
-                mx_out.append([
+                out_row = [
                     rec["ar"], v.get("核销日期") or rec["hexiao_date"],
                     v.get("本次核销金额"), v.get("本次核销金额本币"),
                     v.get("币种") or rec["currency"], v.get("汇率"), so, v.get("订单名称"),
-                ])
+                ]
+                key = tuple(out_row[:7])
+                if key not in mx_seen:
+                    mx_seen.add(key)
+                    mx_out.append(out_row)
+
+    if all_so and not ws_mingxi:
+        raise FetchError(
+            "回款记录里找不到「订单同币种核销明细信息」的全局数据源，"
+            "无法按 SO 补取跨父回款历史核销，停下别猜累计回款"
+        )
+    historical_rows = historical_writeoffs_for_sos(
+        client, ws_mingxi, all_so, day
+    )
+    historical_added = 0
+    for out_row in historical_rows:
+        key = tuple(out_row[:7])
+        if key in mx_seen:
+            continue
+        mx_seen.add(key)
+        mx_out.append(out_row)
+        historical_added += 1
 
     write_xlsx(
         out_dir / f"订单交付_{day_tag}.xlsx",
@@ -581,12 +691,15 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
 
     summary = {
         "day": day,
+        "export_schema_version": EXPORT_SCHEMA_VERSION,
+        "business_amount_policy": "ignore_fee_use_zhiyun_writeoff_directly",
         "架构": "单入口(回款记录·核销日期=T-1)+关联子表",
         "回款记录笔数": len(hk_rows),
         "回款记录_接口报总数": hk_total,
         "下单行数": len(xd_out),
         "涉及SO数": len(all_so),
         "核销明细行数": len(mx_out),
+        "跨父回款历史核销补取行数": historical_added,
         "订单明细SOD行数": len(sod_out),
         "回款类型分布": type_counts,
         "无下单行的AR": ars_without_orders,
@@ -605,13 +718,17 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     return summary
 
 
-def already_fetched(out_dir: Path, day: str) -> List[str]:
+def already_fetched(
+    out_dir: Path,
+    day: str,
+    *,
+    accept_unversioned: bool = False,
+) -> List[str]:
     """
-    这天的智云四件套是不是已经在 01_智云导出/ 里了。
+    这天的智云四件套是否齐全且带当前取数版本标记。
 
-    为什么要查（2026-07-25 opencode 实测踩到）：她也可能**自己从智云手导**再放进来，
-    或者上一轮已经取过。旧版不管三七二十一先登录，结果在没有终端的环境里
-    卡死在输密码上（EOFError），整条链断在第一步。
+    默认不接受无版本摘要或旧版本摘要，避免代码更新后继续复用旧核销明细。
+    明确确认是本次新手导文件时，调用方可设置 accept_unversioned=True。
     """
     stamp = day.replace("-", "")
     need = ("回款记录", "订单交付", "核销明细", "订单明细")
@@ -625,7 +742,31 @@ def already_fetched(out_dir: Path, day: str) -> List[str]:
             if key in p.name and (stamp in p.name or day in p.name):
                 got.append(p.name)
                 break
+    if len(got) != 4:
+        return got
+
+    summary_path = out_dir / f"取数摘要_{stamp}.json"
+    if not summary_path.is_file():
+        return got if accept_unversioned else []
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return got if accept_unversioned else []
+    if summary.get("export_schema_version") != EXPORT_SCHEMA_VERSION:
+        return got if accept_unversioned else []
     return got
+
+
+def _saved_credentials() -> Tuple[str, str]:
+    """从 Windows 凭据库读取本机保存的智云测试账号。"""
+    try:
+        import keyring
+
+        user = (keyring.get_password(CREDENTIAL_SERVICE, "__default_username__") or "").strip()
+        pwd = (keyring.get_password(CREDENTIAL_SERVICE, user) or "").strip() if user else ""
+        return user, pwd
+    except Exception:
+        return "", ""
 
 
 def resolve_credentials(args) -> Tuple[str, str]:
@@ -633,19 +774,20 @@ def resolve_credentials(args) -> Tuple[str, str]:
     pwd = (args.password or os.environ.get("ZHIYUN_PASS") or "").strip()
     if args.cookie_only:
         return "", ""
+    saved_user, saved_pwd = _saved_credentials()
+    if not user:
+        user = saved_user
+    if not pwd and user == saved_user:
+        pwd = saved_pwd
     try:
         if not user:
             user = input("智云账号（邮箱/手机）: ").strip()
         if not pwd:
-            pwd = getpass.getpass("智云密码（不回显、不落盘）: ")
+            pwd = getpass.getpass("智云密码（不回显）: ")
     except (EOFError, KeyboardInterrupt):
-        # 非交互环境（AI 自动跑、CI、后台）——说清怎么办，别甩个 traceback
         raise SystemExit(
-            "ERROR: 这里没法交互输密码（不是终端）。三选一：\n"
-            "  ① 她本人在终端里跑这条命令，当场输一次账密（推荐，密码不落盘）\n"
-            "  ② 她从智云手导那四张表放进 01_智云导出/，然后**跳过取数**直接判定\n"
-            "  ③ 已有 MD_PSS_ID 时用 --cookie-only\n"
-            "  ⛔ 绝不要把密码写进命令行或环境变量传给 AI（会进日志/会话记录）"
+            "ERROR: 没有可用的智云登录凭据。请先把测试账号保存到 Windows 凭据库，"
+            "或在交互终端输入一次。"
         )
     if not user or not pwd:
         raise SystemExit("ERROR: 需要账号和密码（或改用 --cookie-only + MD_PSS_ID）")
@@ -667,6 +809,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument(
         "--force", action="store_true",
         help="这天的四件套已在 01_智云导出/ 里也强制重新取一遍",
+    )
+    ap.add_argument(
+        "--accept-unversioned-existing",
+        action="store_true",
+        help="明确接受没有当前取数版本标记的手工四件套；默认禁止复用旧取数文件",
     )
     ap.add_argument("--workspace", default="", help="技能工作区根（含 01_智云导出）")
     ap.add_argument("--out", default="", help="直接指定导出目录（优先于 workspace）")
@@ -713,8 +860,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as e:
             print(f"WARN: 漏天检查跳过（{type(e).__name__}）", file=sys.stderr)
 
-    # ③ 这天的数据已经在了就别再登录取一遍（她手导的、或上一轮取过的）
-    have = already_fetched(out_dir, day)
+    # ③ 只有当前版本四件套才跳过；旧版/无版本文件默认重新抓取。
+    existing_any_version = already_fetched(
+        out_dir,
+        day,
+        accept_unversioned=True,
+    )
+    have = already_fetched(
+        out_dir,
+        day,
+        accept_unversioned=args.accept_unversioned_existing,
+    )
+    if (
+        len(existing_any_version) == 4
+        and len(have) != 4
+        and not args.accept_unversioned_existing
+    ):
+        print(
+            f"⚠ {day} 已有四件套，但没有当前取数版本 "
+            f"{EXPORT_SCHEMA_VERSION}；本次禁止复用，立即重新抓取。"
+        )
     if len(have) == 4 and not args.force:
         print(
             f"✅ {day} 的智云四件套已经在 {out_dir} 里了，**不用再取数**：\n   "
@@ -792,6 +957,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"（{summary['涉及SO数']} 个 SO）· 核销明细 {summary['核销明细行数']} 行"
         f" · 订单明细 {summary['订单明细SOD行数']} 个 SOD"
     )
+    if summary.get("跨父回款历史核销补取行数"):
+        print(
+            f"   历史累计：跨父回款补取 "
+            f"{summary['跨父回款历史核销补取行数']} 行"
+        )
     print(f"   回款类型分布: {summary['回款类型分布']}")
     if summary["无下单行的AR"]:
         print(f"   ⚠ 有 {len(summary['无下单行的AR'])} 笔到账没抓到下单行，判定会报异常不会漏")
