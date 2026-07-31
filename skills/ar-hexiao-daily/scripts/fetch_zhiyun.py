@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ── 常量（表 ID / 字段 ID 来自 2026-07-09/22/23 勘探，非密钥）────────────────
 BASE_DEFAULT = "http://192.168.10.167:18880"
 APP_ID = "6ff4fb2e-e68c-4ee9-83a0-836de8f72c11"
-EXPORT_SCHEMA_VERSION = "2026-07-30-direct-writeoff-v1"
+EXPORT_SCHEMA_VERSION = "2026-07-31-writeoff-record-identity-v1"
 CREDENTIAL_SERVICE = "codex.ar-hexiao-daily.zhiyun"
 
 WS_HUIKUAN = "6555d2b1f9460e517040ba6c"  # 回款记录（唯一入口）
@@ -81,7 +81,7 @@ XIADAN_COLS = ["SO", "交付额/原币", "汇率", "结算币种", "订单名称
 #   （2026-07-23 实调：该表字段 = 核销记录NUM/回款记录NUM/订单NUM/本次核销金额/…）。
 #   旧版靠"按金额跟下单栏配对"猜 SO，金额一撞就配错；这一版直接从订单NUM读，不猜。
 MINGXI_COLS = [
-    "回款记录NUM", "订单NUM", "本次核销金额", "本次核销金额本币", "核销日期",
+    "核销记录NUM", "回款记录NUM", "订单NUM", "本次核销金额", "本次核销金额本币", "核销日期",
     "币种", "汇率", "订单名称", "是否已撤销",
 ]
 SODLINE_COLS = ["SO", "SOD", "交付额/原币", "币种", "项目状态"]
@@ -467,14 +467,14 @@ def historical_writeoffs_for_sos(
 
     关联父回款只会给出当前父 AR 自己的子明细；同一 SO 的首款、尾款若分别落在
     不同 AR，单靠当前父记录会漏掉历史回款。这里按 SO 精确检索全局明细，且只补
-    `核销日期 < target_day` 的未撤销行；目标日当前行仍由父回款关联子表提供。
+    `核销日期 < target_day` 的原始行（含撤销行供审计）；目标日当前行仍由父回款关联子表提供。
     """
     if not worksheet_id or not sos:
         return []
     ctrls = client.controls(worksheet_id)
     names, opts = client.name_map(ctrls), client.option_maps(ctrls)
     out: List[List[Any]] = []
-    seen = set()
+    seen_record_ids = set()
     for wanted_so in sorted({str(x or "").strip() for x in sos if str(x or "").strip()}):
         try:
             hits = client.search_rows(worksheet_id, wanted_so)
@@ -484,8 +484,6 @@ def historical_writeoffs_for_sos(
             ) from exc
         for row in hits:
             v = pick_named(row, names, opts, MINGXI_COLS)
-            if (v.get("是否已撤销") or "").strip() == "是":
-                continue
             so = extract_so(v.get("订单NUM") or "")
             if so != wanted_so:
                 continue
@@ -497,17 +495,14 @@ def historical_writeoffs_for_sos(
                 raise FetchError(
                     f"全局核销明细读不到父回款号：SO={wanted_so} 核销日期={hx_day}"
                 )
-            key = (
-                ar,
-                hx_day,
-                so,
-                v.get("本次核销金额"),
-                v.get("本次核销金额本币"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
+            record_id = (v.get("核销记录NUM") or "").strip()
+            if record_id:
+                if record_id in seen_record_ids:
+                    continue
+                seen_record_ids.add(record_id)
             out.append([
+                record_id,
+                row.get("rowid") or "",
                 ar,
                 hx_day,
                 v.get("本次核销金额"),
@@ -516,6 +511,7 @@ def historical_writeoffs_for_sos(
                 v.get("汇率"),
                 so,
                 v.get("订单名称"),
+                v.get("是否已撤销"),
             ])
     return out
 
@@ -539,6 +535,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     hk_headers = [
         "回款记录ID", "核销日期", "到账日期", "到账金额/原币", "到账金额/本币",
         "手续费/原币", "原币币种", "回款类型", "核销状态", "开票客户", "rowid",
+        "仅历史累计父记录",
     ]
     hk_out: List[List[Any]] = []
     type_counts: Dict[str, int] = {}
@@ -563,15 +560,13 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
         payments.append(rec)
         hk_out.append([rec[k] for k in (
             "ar", "hexiao_date", "arrival_date", "amount_orig", "amount_local",
-            "fee", "currency", "huikuan_type", "status", "customer", "rowid")])
+            "fee", "currency", "huikuan_type", "status", "customer", "rowid")] + ["否"])
 
     day_tag = day.replace("-", "")
-    write_xlsx(out_dir / f"回款记录_{day_tag}.xlsx", hk_headers, hk_out)
-
     # ── ② 下单栏（每笔 → SO + 交付额）+ ③ 同币种核销明细 ───────
     xd_out: List[List[Any]] = []
     mx_out: List[List[Any]] = []
-    mx_seen = set()
+    mx_seen_record_ids = set()
     all_so: List[str] = []
     ars_without_orders: List[str] = []
 
@@ -604,26 +599,28 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
             mx_names, mx_opts = client.name_map(mx_ctrls), client.option_maps(mx_ctrls)
             for r in mx_rows:
                 v = pick_named(r, mx_names, mx_opts, MINGXI_COLS)
-                if (v.get("是否已撤销") or "").strip() == "是":
-                    continue  # 撤销掉的核销不算数
                 so = extract_so(v.get("订单NUM") or "")
                 if not so:
                     print(
-                        f"WARN: 核销明细有一行读不出 SO（AR={rec['ar']} 订单={v.get('订单名称')}）"
-                        "，判定会把这笔挂起不会瞎填",
+                        "WARN: 核销明细有一行读不出 SO；判定会把对应父回款挂起，不会猜测",
                         file=sys.stderr,
                     )
                 if so and so not in all_so:
                     all_so.append(so)
                 out_row = [
+                    v.get("核销记录NUM"),
+                    r.get("rowid") or "",
                     rec["ar"], v.get("核销日期") or rec["hexiao_date"],
                     v.get("本次核销金额"), v.get("本次核销金额本币"),
-                    v.get("币种") or rec["currency"], v.get("汇率"), so, v.get("订单名称"),
+                    v.get("币种") or rec["currency"], v.get("汇率"), so,
+                    v.get("订单名称"), v.get("是否已撤销"),
                 ]
-                key = tuple(out_row[:7])
-                if key not in mx_seen:
-                    mx_seen.add(key)
-                    mx_out.append(out_row)
+                record_id = str(v.get("核销记录NUM") or "").strip()
+                if record_id:
+                    if record_id in mx_seen_record_ids:
+                        continue
+                    mx_seen_record_ids.add(record_id)
+                mx_out.append(out_row)
 
     if all_so and not ws_mingxi:
         raise FetchError(
@@ -633,14 +630,50 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     historical_rows = historical_writeoffs_for_sos(
         client, ws_mingxi, all_so, day
     )
+    # 跨父AR历史核销也必须能按各自父到账额做超核销审计；把仅用于累计的
+    # 历史父记录一并保存，但分类器不会把它当目标日任务。
+    current_ars = {str(rec.get("ar") or "").strip() for rec in payments}
+    historical_ars = sorted({
+        str(row[2] or "").strip() for row in historical_rows
+        if str(row[2] or "").strip() and str(row[2] or "").strip() not in current_ars
+    })
+    for historical_ar in historical_ars:
+        hits = client.search_rows(WS_HUIKUAN, historical_ar)
+        exact = [
+            row for row in hits
+            if _plain(row.get(F_HK["ar"])) == historical_ar
+        ]
+        if len(exact) != 1:
+            raise FetchError(
+                f"历史核销父回款 {historical_ar} 无法唯一回读到账金额，"
+                "不能安全计算系统重复核销差额"
+            )
+        row = exact[0]
+        hk_out.append([
+            historical_ar,
+            _plain(row.get(F_HK["hexiao_date"])),
+            _plain(row.get(F_HK["arrival_date"])),
+            _plain(row.get(F_HK["amount_orig"])),
+            _plain(row.get(F_HK["amount_local"])),
+            _plain(row.get(F_HK["fee"])),
+            _plain(row.get(F_HK["currency"]), hk_opts.get(F_HK["currency"])),
+            _plain(row.get(F_HK["huikuan_type"]), hk_opts.get(F_HK["huikuan_type"])),
+            _plain(row.get(F_HK["status"]), hk_opts.get(F_HK["status"])),
+            _plain(row.get(F_HK["customer_txt"])) or _plain(row.get(F_HK["customer_rel"])),
+            row.get("rowid") or "",
+            "是",
+        ])
     historical_added = 0
     for out_row in historical_rows:
-        key = tuple(out_row[:7])
-        if key in mx_seen:
-            continue
-        mx_seen.add(key)
+        record_id = str(out_row[0] or "").strip()
+        if record_id:
+            if record_id in mx_seen_record_ids:
+                continue
+            mx_seen_record_ids.add(record_id)
         mx_out.append(out_row)
         historical_added += 1
+
+    write_xlsx(out_dir / f"回款记录_{day_tag}.xlsx", hk_headers, hk_out)
 
     write_xlsx(
         out_dir / f"订单交付_{day_tag}.xlsx",
@@ -649,8 +682,8 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     )
     write_xlsx(
         out_dir / f"核销明细_{day_tag}.xlsx",
-        ["回款记录NUM", "核销日期", "本次核销金额", "本次核销金额/本币",
-         "币种", "汇率", "SO", "订单名称"],
+        ["核销记录NUM", "rowid", "回款记录NUM", "核销日期", "本次核销金额",
+         "本次核销金额/本币", "币种", "汇率", "SO", "订单名称", "是否已撤销"],
         mx_out,
     )
 
@@ -692,7 +725,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     summary = {
         "day": day,
         "export_schema_version": EXPORT_SCHEMA_VERSION,
-        "business_amount_policy": "ignore_fee_use_zhiyun_writeoff_directly",
+        "business_amount_policy": "ignore_fee_conditional_duplicate_writeoff_correction",
         "架构": "单入口(回款记录·核销日期=T-1)+关联子表",
         "回款记录笔数": len(hk_rows),
         "回款记录_接口报总数": hk_total,

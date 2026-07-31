@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+import writeoff_duplicate_audit as WDA  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,6 +37,30 @@ FIVE = ["计提", "回款明细", "是否结账", "收款时间", "收款方式"
 DERIVED = ["差异"]
 VALID_JIEZHANG = {"是", "否"}
 VALID_WAY = {"汇", "冲预收", "支", "现"}
+
+
+def duplicate_audit_error(plan: dict) -> str:
+    """防止重复审计或逻辑记录在判定JSON到校验之间被手工改坏。"""
+    if "duplicate_writeoff_audits" not in plan:
+        return ""  # 兼容纯单测/旧夹具；当前版本四件套会始终带该字段
+    audits = plan.get("duplicate_writeoff_audits") or {}
+    expected = str(plan.get("duplicate_writeoff_audit_sha256") or "")
+    actual = WDA.audit_fingerprint(audits)
+    if not expected or expected != actual:
+        return "系统重复核销审计指纹不一致，计划可能被修改，必须重新判定"
+    for item in plan.get("auto") or []:
+        ar = str(item.get("ar") or "")
+        audit = audits.get(ar) or {}
+        status = audit.get("status")
+        warnings = set(item.get("warning_codes") or [])
+        if status == "unresolved":
+            return f"父回款 {ar} 的重复审计未解决，却进入了auto"
+        if status == "recovered":
+            if "W_SYSTEM_DUPLICATE_WRITEOFF_COLLAPSED" not in warnings:
+                return f"父回款 {ar} 已做系统重复纠正，但auto缺少警告码"
+            if item.get("duplicate_writeoff_audit") != audit:
+                return f"父回款 {ar} 的auto行与顶层重复审计不一致"
+    return ""
 
 
 def _norm(v) -> str:
@@ -267,8 +292,13 @@ def validate(
     items = list(plan.get("auto") or [])
     checked: List[dict] = []
     seen_rows: Dict[int, str] = {}
+    audit_error = duplicate_audit_error(plan)
     for it in items:
-        res = check_one(it, rows)
+        res = (
+            {"verdict": "conflict", "reason": audit_error}
+            if audit_error
+            else check_one(it, rows)
+        )
         ref = it.get("ledger_row_ref")
         # 同一行被两条计划命中 → 都不写（谁对谁错要人定）
         if res["verdict"] == "write" and ref in seen_rows:
@@ -297,6 +327,8 @@ def validate(
             "selected": len(items),
             "total_auto": len(items),
         },
+        "duplicate_writeoff_audits": plan.get("duplicate_writeoff_audits") or {},
+        "duplicate_writeoff_audit_sha256": plan.get("duplicate_writeoff_audit_sha256") or "",
         **buckets,
     }
     if ledger_path is not None:

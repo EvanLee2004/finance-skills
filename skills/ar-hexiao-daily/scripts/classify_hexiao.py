@@ -43,6 +43,7 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+import writeoff_duplicate_audit as WDA  # noqa: E402
 
 TOL = 0.005  # 金额比较容差（分以下）
 ROUNDING_TAIL_TOL = 0.011  # 多 SO 合计与父回款相差 1 分：作为分位尾差，不判部分回款
@@ -264,6 +265,106 @@ def assess_shifted_detail_dates(
     return out
 
 
+def reconcile_writeoff_details(
+    payments: List[dict],
+    parent_references: Dict[str, dict],
+    raw_detail_rows: List[dict],
+    target_date: Optional[dt.date],
+) -> Tuple[List[dict], Dict[str, dict]]:
+    """先按父AR纠正物理/系统重复，再形成目标日H和跨父AR累计R。"""
+    raw_by_ar: Dict[str, List[dict]] = {}
+    for row in raw_detail_rows:
+        raw_by_ar.setdefault(row["ar"], []).append(row)
+
+    audits: Dict[str, dict] = {}
+    logical_rows: List[dict] = []
+    unresolved_sos: Dict[str, List[str]] = {}
+    for ar in sorted(set(parent_references) | set(raw_by_ar)):
+        parent = parent_references.get(ar) or {
+            "ar": ar, "amount_orig": None, "amount_local": None, "currency": ""
+        }
+        logical, audit = WDA.audit_parent_writeoffs(parent, raw_by_ar.get(ar, []))
+        audit["ar"] = ar
+        audits[ar] = audit
+        if audit["status"] == "unresolved":
+            for so in {
+                str(row.get("so") or "").strip()
+                for row in raw_by_ar.get(ar, [])
+                if str(row.get("so") or "").strip()
+            }:
+                unresolved_sos.setdefault(so, []).append(ar)
+            continue
+        logical_rows.extend(logical)
+
+    by_ar = {p["ar"]: p for p in payments}
+    for p in payments:
+        audit = audits.get(p["ar"]) or {
+            "ar": p["ar"], "status": "normal", "comparison_basis": "unavailable",
+            "raw_input_count": 0, "raw_record_count": 0, "logical_record_count": 0,
+            "raw_total": 0.0, "logical_total": 0.0,
+            "delta_raw": p.get("amount_local") or p.get("amount_orig"),
+            "delta_dedup": p.get("amount_local") or p.get("amount_orig"),
+            "duplicate_groups": [], "records": [], "ignored_record_count": 0,
+            "physical_snapshot_duplicate_count": 0, "revoked_count": 0,
+            "reason": "没有逐SO核销明细，沿用现有全额核销语义",
+        }
+        p["duplicate_writeoff_audit"] = audit
+        p["writeoffs"] = {}
+        p["writeoffs_local"] = {}
+        p["cumulative_writeoffs"] = {}
+        p["cumulative_writeoffs_local"] = {}
+        p["_source_meta"]["raw_writeoff_rows"] = int(audit.get("raw_input_count") or 0)
+        p["_source_meta"]["accounted_writeoff_rows"] = len(audit.get("records") or [])
+        if audit.get("status") == "unresolved":
+            p["_system_over_writeoff_unresolved"] = audit.get("reason") or "系统超核销无法解释"
+
+    current_rows: List[dict] = []
+    for item in logical_rows:
+        p = by_ar.get(item["ar"])
+        current_day = target_date if target_date is not None else (p or {}).get("hexiao_date")
+        if p is not None and (current_day is None or item.get("date") == current_day):
+            current_rows.append(item)
+            w = p["writeoffs"]
+            w[item["so"]] = round(w.get(item["so"], 0.0) + float(item["amount"]), 2)
+            if item.get("amount_local") is not None:
+                wl = p["writeoffs_local"]
+                wl[item["so"]] = round(
+                    wl.get(item["so"], 0.0) + float(item["amount_local"]), 2
+                )
+            if item.get("snapshot_date") and target_date and item["snapshot_date"] > target_date:
+                p["_source_meta"]["historical_detail_rows"] += 1
+
+    global_cumulative: Dict[str, float] = {}
+    global_cumulative_local: Dict[str, float] = {}
+    for item in logical_rows:
+        so = item["so"]
+        global_cumulative[so] = round(
+            global_cumulative.get(so, 0.0) + float(item["amount"]), 2
+        )
+        if item.get("amount_local") is not None:
+            global_cumulative_local[so] = round(
+                global_cumulative_local.get(so, 0.0) + float(item["amount_local"]), 2
+            )
+    for p in payments:
+        p_sos = {
+            str(item.get("so") or "").strip()
+            for item in raw_by_ar.get(p["ar"], [])
+            if str(item.get("so") or "").strip()
+        }
+        inherited = sorted({ar for so in p_sos for ar in unresolved_sos.get(so, [])})
+        if inherited and not p.get("_system_over_writeoff_unresolved"):
+            p["_system_over_writeoff_unresolved"] = (
+                "同一SO的跨父AR历史核销存在未解决超核销，累计回款不可安全计算："
+                + ",".join(inherited)
+            )
+        for so in p_sos:
+            if so in global_cumulative:
+                p["cumulative_writeoffs"][so] = global_cumulative[so]
+            if so in global_cumulative_local:
+                p["cumulative_writeoffs_local"][so] = global_cumulative_local[so]
+    return current_rows, audits
+
+
 def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List[dict]:
     """
     01_智云导出/ 四张表 → payments。缺件直接 InputError（不凑合、不猜）。
@@ -298,58 +399,55 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
             "  请重新跑 fetch_zhiyun.py 取一次数。"
         )
 
-    # ① 先读所有可用核销子表，锁定真实核销日=T 的行。
-    detail_rows: List[dict] = []
-    cumulative_detail_rows: List[dict] = []
-    seen_details = set()
-    seen_cumulative_details = set()
+    # ① 读取全部原始核销记录。不同核销记录NUM必须先保留；同一NUM跨快照
+    #    的物理去重和明显超核销后的条件性业务纠正在父AR层统一完成。
+    raw_detail_rows: List[dict] = []
     for path in _eligible_snapshots(mx_files, target_date, p_mx):
         h, body = _sheet_rows(path)
         c = _need(h, "核销明细", ["回款记录NUM", "核销日期", "本次核销金额"], aliases)
+        i_record = _col(h, "核销明细", "核销记录NUM", aliases)
+        i_rowid = _col(h, "核销明细", "rowid", aliases)
         i_so = _col(h, "核销明细", "SO", aliases)
         i_local = _col(h, "核销明细", "本次核销金额本币", aliases)
         i_currency = _col(h, "核销明细", "币种", aliases)
         i_rate = _col(h, "核销明细", "汇率", aliases)
+        i_revoked = _col(h, "核销明细", "是否已撤销", aliases)
         snapshot_date = _export_date(path)
-        for vals in body:
+        for row_number, vals in enumerate(body, start=2):
             ar = str(_get(vals, c["回款记录NUM"]) or "").strip()
             hd = common.norm_date(_get(vals, c["核销日期"]))
             so = str(_get(vals, i_so) or "").strip()
             amt = common.to_number(_get(vals, c["本次核销金额"]))
             amt_local = common.to_number(_get(vals, i_local))
             if not ar or not so or amt is None:
+                raise InputError(
+                    f"核销明细原始行缺AR/SO/金额：{path.name} 第{row_number}行，禁止静默丢弃"
+                )
+            if target_date is not None and hd is not None and hd > target_date:
                 continue
-            item = {
+            raw_detail_rows.append({
+                "record_id": str(_get(vals, i_record) or "").strip(),
+                "rowid": str(_get(vals, i_rowid) or "").strip(),
                 "ar": ar, "date": hd, "so": so, "amount": round(float(amt), 2),
                 "amount_local": round(float(amt_local), 2) if amt_local is not None else None,
                 "currency": str(_get(vals, i_currency) or "").strip(),
                 "rate": common.to_number(_get(vals, i_rate)),
+                "revoked": str(_get(vals, i_revoked) or "").strip(),
                 "source": path.name, "snapshot_date": snapshot_date,
-            }
-            cumulative_key = (
-                ar, hd, so, item["amount"], item["amount_local"],
-            )
-            if (
-                (target_date is None or hd is None or hd <= target_date)
-                and cumulative_key not in seen_cumulative_details
-            ):
-                seen_cumulative_details.add(cumulative_key)
-                cumulative_detail_rows.append(item)
-            if target_date is not None and hd != target_date:
-                continue
-            key = cumulative_key
-            if key in seen_details:
-                continue
-            seen_details.add(key)
-            detail_rows.append(item)
-    detail_ars = {x["ar"] for x in detail_rows}
-    if p_hk is None and not detail_rows:
+                "_input_index": len(raw_detail_rows),
+            })
+    detail_ars = {
+        x["ar"] for x in raw_detail_rows
+        if target_date is None or x.get("date") == target_date
+    }
+    if p_hk is None and not detail_ars:
         raise InputError(
             f"没有目标日 {target_date} 的回款主快照，也没有后续快照中的同日核销子明细"
         )
 
     # ② 回款记录：当天父记录 + 后续核销日文件中承载历史同日子明细的父记录。
     payments: List[dict] = []
+    parent_references: Dict[str, dict] = {}
     seen_payments = set()
     for path in _eligible_snapshots(hk_files, target_date, p_hk):
         h, body = _sheet_rows(path)
@@ -363,12 +461,9 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
         for vals in body:
             ar = str(_get(vals, c["AR"]) or "").strip()
             parent_date = common.norm_date(_get(vals, c["核销日期"]))
-            if not ar or ar in seen_payments:
+            if not ar:
                 continue
-            if target_date is not None and parent_date != target_date and ar not in detail_ars:
-                continue
-            seen_payments.add(ar)
-            payments.append({
+            info = {
                 "ar": ar,
                 "hexiao_date": target_date or parent_date,
                 "parent_hexiao_date": parent_date,
@@ -388,15 +483,25 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                 "_source_meta": {
                     "payment_source": path.name,
                     "payment_snapshot_date": snapshot_date,
-                "historical_detail_rows": 0,
+                    "historical_detail_rows": 0,
                     "recovered_deliveries": 0,
                 },
-            })
+            }
+            parent_references[ar] = info
+            if ar in seen_payments:
+                continue
+            if target_date is not None and parent_date != target_date and ar not in detail_ars:
+                continue
+            seen_payments.add(ar)
+            payments.append(info)
     if not payments:
         raise InputError(
             f"目标核销日没有可处理的回款记录：{target_date or (p_hk.name if p_hk else '')}"
         )
     by_ar = {p["ar"]: p for p in payments}
+    detail_rows, duplicate_audits = reconcile_writeoff_details(
+        payments, parent_references, raw_detail_rows, target_date
+    )
 
     # ③ 订单交付：按快照时间更新，同一 AR/SO 取最新非空交付额。
     order_map: Dict[Tuple[str, str], dict] = {}
@@ -422,7 +527,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                     "name": str(_get(vals, i_name) or "").strip(),
                 }
 
-    # ④ 同日核销明细：父记录后来移到最新核销日，历史子行仍归自己的真实核销日。
+    # ④ 逻辑核销明细：物理跨快照重复和系统重复纠正均已完成。
     for item in detail_rows:
         if item["ar"] not in by_ar:
             raise CoverageError(
@@ -432,55 +537,13 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
         if target_date is None and item["date"] is not None and p.get("hexiao_date") is not None:
             if item["date"] != p["hexiao_date"]:
                 continue
-        w = p["writeoffs"]
-        w[item["so"]] = round(w.get(item["so"], 0.0) + item["amount"], 2)
-        if item.get("amount_local") is not None:
-            wl = p["writeoffs_local"]
-            wl[item["so"]] = round(
-                wl.get(item["so"], 0.0) + float(item["amount_local"]), 2
-            )
-        if item["snapshot_date"] and target_date and item["snapshot_date"] > target_date:
-            p["_source_meta"]["historical_detail_rows"] += 1
         if (item["ar"], item["so"]) not in order_map:
             order_map[(item["ar"], item["so"])] = {
                 "so": item["so"], "deliver": None, "rate": None,
                 "currency": "", "name": "",
             }
-    # 同一 SO 截至目标日的累计核销：最终结清判断必须看累计，不能只拿本次金额对交付额。
-    #
-    # 不能再按父回款 AR 各算各的。同一 SO 的首款、尾款可能分别落在不同 AR；
-    # 旧实现 `by_ar[item["ar"]]` 会把另一个 AR 下的历史回款漏掉，导致已经结清的
-    # SO 被误判成部分回款。先按 SO 做全局累计，再把累计值挂到本批涉及该 SO 的父回款。
-    global_cumulative: Dict[str, float] = {}
-    global_cumulative_local: Dict[str, float] = {}
-    for item in cumulative_detail_rows:
-        so = item["so"]
-        global_cumulative[so] = round(
-            global_cumulative.get(so, 0.0) + item["amount"], 2
-        )
-        if item.get("amount_local") is not None:
-            global_cumulative_local[so] = round(
-                global_cumulative_local.get(so, 0.0)
-                + float(item["amount_local"]),
-                2,
-            )
     for (ar, _so), order in order_map.items():
         by_ar[ar]["orders"].append(order)
-    for p in payments:
-        payment_sos = {
-            str(o.get("so") or "").strip()
-            for o in (p.get("orders") or [])
-            if str(o.get("so") or "").strip()
-        } | {
-            str(so or "").strip()
-            for so in (p.get("writeoffs") or {})
-            if str(so or "").strip()
-        }
-        for so in payment_sos:
-            if so in global_cumulative:
-                p["cumulative_writeoffs"][so] = global_cumulative[so]
-            if so in global_cumulative_local:
-                p["cumulative_writeoffs_local"][so] = global_cumulative_local[so]
 
     # ⑤ 订单明细（SO → SOD + 逐 SOD 交付额）；同一 SOD 取后续快照最新非空值。
     sod_map: Dict[Tuple[str, str], dict] = {}
@@ -515,6 +578,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                     p["_source_meta"]["recovered_deliveries"] += 1
     for p in payments:
         p["sod_lines"] = sod_lines
+        p["_duplicate_writeoff_audits"] = duplicate_audits
     return payments
 
 
@@ -732,16 +796,35 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
     """一笔到账 → 若干 SOD 级 record。**任何情况下至少产出一条**（不许静默丢）。"""
     sod_lines: Dict[str, List[dict]] = p.get("sod_lines") or {}
     orders = p.get("orders") or []
+    duplicate_audit = p.get("duplicate_writeoff_audit") or {}
+
+    def finish(items: List[dict]) -> List[dict]:
+        if duplicate_audit:
+            for item in items:
+                item["duplicate_writeoff_audit"] = duplicate_audit
+                if duplicate_audit.get("status") == "recovered":
+                    item.setdefault("warning_codes", []).append(
+                        "W_SYSTEM_DUPLICATE_WRITEOFF_COLLAPSED"
+                    )
+        return items
+
+    unresolved = p.get("_system_over_writeoff_unresolved")
+    if unresolved:
+        return finish(_hold_each_source_order(
+            p,
+            "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED",
+            f"智云核销记录需人工检查：{unresolved}",
+        ))
 
     # 分笔回款：系统没有逐单金额，铁律一律 hold（禁止比例分摊）
     if "分笔" in (p.get("huikuan_type") or ""):
-        return _hold_each_source_order(p, "E1", "分笔回款：系统无逐单金额，禁止比例分摊")
+        return finish(_hold_each_source_order(p, "E1", "分笔回款：系统无逐单金额，禁止比例分摊"))
 
     if not orders:
-        return [_hold(
+        return finish([_hold(
             p, "E7",
             "这笔到账在智云没关联任何下单（下单栏为空）——先去智云看看这笔回款建对了没",
-        )]
+        )])
 
     # 逐 SO 本次核销额是业务真相源。手续费字段完全不参与判定、不扣减、不分配。
     # 核销明细无行仍沿用智云业务语义：该父回款关联订单为全额核销。
@@ -757,7 +840,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
             if o.get("deliver") is None and o.get("so")
         })
         if missing_delivery_sos:
-            return [
+            return finish([
                 _hold(
                     p, "E7",
                     (
@@ -768,7 +851,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     so=so,
                 )
                 for so in sorted({str(o.get("so") or "").strip() for o in orders if o.get("so")})
-            ]
+            ])
         for o in orders:
             H[o["so"]] = round(H.get(o["so"], 0.0) + float(o["deliver"]), 2)
         basis = "智云无逐SO明细=全额核销(手续费忽略)"
@@ -935,7 +1018,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
 
     if not out:  # 兜底：绝不静默丢单
         out.append(_hold(p, "E7", "这笔到账展开不出任何订单行（请把这条截图发给明昊）"))
-    return out
+    return finish(out)
 
 
 def source_coverage(payments: List[dict], records: List[dict]) -> dict:
@@ -969,12 +1052,29 @@ def source_coverage(payments: List[dict], records: List[dict]) -> dict:
         int((p.get("_source_meta") or {}).get("recovered_deliveries") or 0)
         for p in payments
     )
+    all_audits = next(
+        (p.get("_duplicate_writeoff_audits") for p in payments if p.get("_duplicate_writeoff_audits")),
+        {},
+    )
+    raw_writeoff_rows = sum(
+        int(audit.get("raw_input_count") or 0) for audit in all_audits.values()
+    )
+    accounted_writeoff_rows = sum(
+        len(audit.get("records") or []) for audit in all_audits.values()
+    )
+    if raw_writeoff_rows != accounted_writeoff_rows:
+        raise CoverageError(
+            "原始核销记录处置覆盖不完整："
+            f"读取{raw_writeoff_rows}条，只有{accounted_writeoff_rows}条有明确处置"
+        )
     return {
         "expected_order_keys": len(expected),
         "produced_order_keys": len(expected) - len(missing),
         "missing_order_keys": [f"{ar}|{so}" for ar, so in missing],
         "historical_detail_rows": historical_rows,
         "recovered_delivery_orders": recovered,
+        "raw_writeoff_rows": raw_writeoff_rows,
+        "accounted_writeoff_rows": accounted_writeoff_rows,
         "complete": not missing,
     }
 
@@ -1292,6 +1392,8 @@ def classify_one(
         "locate_hint": "",
         "current_values": {},
         "candidates": [],
+        "warning_codes": list(rec.get("warning_codes") or []),
+        "duplicate_writeoff_audit": rec.get("duplicate_writeoff_audit") or {},
     }
     if rec.get("so"):
         result["locate_hint"] = (
@@ -1618,7 +1720,18 @@ def classify_one(
 
     result["bucket"] = "auto"
     result["code"] = ""
-    tail = align_note or disc_note
+    duplicate_note = ""
+    audit = rec.get("duplicate_writeoff_audit") or {}
+    if audit.get("status") == "recovered":
+        duplicate_note = (
+            "⚠ 智云疑似系统重复核销，本次每组只按一次处理；"
+            f"重复组{len(audit.get('duplicate_groups') or [])}个，"
+            f"原始{audit.get('raw_record_count', 0)}条，"
+            f"保留{audit.get('logical_record_count', 0)}条，"
+            f"忽略{audit.get('ignored_record_count', 0)}条，"
+            f"折叠前差额{audit.get('delta_raw')}，折叠后差额{audit.get('delta_dedup')}"
+        )
+    tail = "；".join(x for x in (align_note, disc_note, duplicate_note) if x)
     result["reason"] = f"{rec.get('match_basis') or '判定'} · 定位={how}" + (
         f"；{tail}" if tail else ""
     )
@@ -1876,6 +1989,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         hexiao_date = hexiao_date or requested_date
 
     result = classify_records(records, ledger, rates)
+    duplicate_audits = next(
+        (
+            p.get("_duplicate_writeoff_audits")
+            for p in payments if p.get("_duplicate_writeoff_audits")
+        ),
+        {},
+    )
+    result["duplicate_writeoff_audits"] = duplicate_audits
+    result["duplicate_writeoff_audit_sha256"] = WDA.audit_fingerprint(duplicate_audits)
     result["flow_sources"] = flow.sources
     result["business_rules"] = {
         "fee_basis": "ignored",
@@ -1894,6 +2016,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     out_path.write_text(
         json.dumps(serialize_result(result), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    audit_path = out_path.parent / f"核销明细重复审计_{stamp}.json"
+    audit_path.write_text(
+        json.dumps(
+            serialize_result({
+                "hexiao_date": result["hexiao_date"],
+                "fingerprint": result["duplicate_writeoff_audit_sha256"],
+                "parents": duplicate_audits,
+            }),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     c = result["counts"]
     print(f"核销日期：{common.date_cn(hexiao_date)}（这批算的是这一天核销的到账）")
@@ -1905,8 +2040,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sc = result["source_coverage"]
     print(
         f"来源覆盖：AR/SO {sc['produced_order_keys']}/{sc['expected_order_keys']}，"
+        f"原始核销记录 {sc.get('raw_writeoff_rows', 0)}/"
+        f"{sc.get('accounted_writeoff_rows', 0)} 有处置，"
         f"历史子核销还原 {sc['historical_detail_rows']} 行，SOD回补交付额 {sc['recovered_delivery_orders']} 单"
     )
+    recovered = [a for a in duplicate_audits.values() if a.get("status") == "recovered"]
+    unresolved = [a for a in duplicate_audits.values() if a.get("status") == "unresolved"]
+    print(
+        "系统重复核销审计："
+        f"纠正父回款 {len(recovered)} 笔，"
+        f"重复组 {sum(len(a.get('duplicate_groups') or []) for a in recovered)} 个，"
+        f"忽略记录 {sum(int(a.get('ignored_record_count') or 0) for a in recovered)} 条，"
+        f"未解决父回款 {len(unresolved)} 笔"
+    )
+    print(f"重复审计: {audit_path}")
     print(f"结果: {out_path}")
 
     late_other = {

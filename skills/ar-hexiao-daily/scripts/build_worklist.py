@@ -50,7 +50,7 @@ HEADERS = [
     "应填_计提", "应填_回款明细", "应填_业务值差异", "应填_是否结账", "应填_收款时间", "应填_收款方式", "应填_实收SOD",
     "当前_计提", "当前_回款明细", "当前_业务值差异", "当前_是否结账", "当前_收款时间", "当前_收款方式", "当前_实收SOD",
     "当前值与计划值的比较差异", "怎么找到这行", "这笔到账在流转表哪一行", "流转表单号列建议填",
-    "判定依据", "码",
+    "判定依据", "码", "警告码",
 ]
 
 FIVE = ["计提", "回款明细", "是否结账", "收款时间", "收款方式"]
@@ -85,7 +85,7 @@ def _diff_text(five: dict, cur: dict, derived: dict) -> str:
 
 # 这些码的 reason 是**逐笔算出来的、自带操作指引**（插哪一行、候选 SOD 是哪几个…），
 # 比 config 里的通用建议有用得多 → 「怎么办」直接用 reason。
-SPECIFIC_CODES = {"E4", "E5", "E7", "E8"}
+SPECIFIC_CODES = {"E4", "E5", "E7", "E8", "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"}
 
 
 def _row(item: dict, status: str, codes: dict, action_override: str = "") -> List[Any]:
@@ -126,6 +126,7 @@ def _row(item: dict, status: str, codes: dict, action_override: str = "") -> Lis
         item.get("flow_order_suggest") or "",
         item.get("reason") or info.get("原因") or "",
         code,
+        "、".join(item.get("warning_codes") or []),
     ]
 
 
@@ -178,6 +179,11 @@ def build_workbook(
     m_write = int(fc.get("write") or 0)
     m_hand = int(fc.get("hand") or 0)
     coverage = result.get("source_coverage") or {}
+    duplicate_audits = result.get("duplicate_writeoff_audits") or {}
+    recovered_audits = [
+        audit for audit in duplicate_audits.values()
+        if audit.get("status") == "recovered"
+    ]
     pending_shifted = {
         day: info for day, info in (result.get("shifted_detail_dates") or {}).items()
         if info.get("needs_rerun") and day != result.get("hexiao_date")
@@ -195,8 +201,20 @@ def build_workbook(
         [
             f"来源完整性：AR/SO {coverage.get('produced_order_keys', '?')}/"
             f"{coverage.get('expected_order_keys', '?')}；"
+            f"原始核销记录处置 {coverage.get('accounted_writeoff_rows', 0)}/"
+            f"{coverage.get('raw_writeoff_rows', 0)}；"
             f"历史子核销还原 {coverage.get('historical_detail_rows', 0)} 行；"
             f"SOD 回补交付额 {coverage.get('recovered_delivery_orders', 0)} 单。"
+        ],
+        [
+            "系统重复纠正："
+            f"父回款 {len(recovered_audits)} 笔；"
+            f"重复组 {sum(len(a.get('duplicate_groups') or []) for a in recovered_audits)} 个；"
+            f"忽略核销记录 {sum(int(a.get('ignored_record_count') or 0) for a in recovered_audits)} 条。"
+            + (
+                " 智云疑似系统重复核销，本次每组只按一次处理。"
+                if recovered_audits else ""
+            )
         ],
         [
             "历史增补提醒：" + (

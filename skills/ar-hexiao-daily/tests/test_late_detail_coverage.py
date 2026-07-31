@@ -34,8 +34,14 @@ def _bundle(root: Path, day: str, payments, orders, details, sods):
     )
     _xlsx(
         d / f"核销明细_{day}.xlsx",
-        ["回款记录NUM", "核销日期", "本次核销金额", "SO"],
-        details,
+        ["核销记录NUM", "rowid", "回款记录NUM", "核销日期",
+         "本次核销金额", "本次核销金额/本币", "币种", "汇率",
+         "SO", "订单名称", "是否已撤销"],
+        [
+            [f"HX-{day}-{index}", "", item[0], item[1], item[2], item[2],
+             "人民币CNY", 1, item[3], "", "否"]
+            for index, item in enumerate(details, start=1)
+        ],
     )
     _xlsx(
         d / f"订单明细_{day}.xlsx",
