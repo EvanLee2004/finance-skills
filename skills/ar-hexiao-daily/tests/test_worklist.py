@@ -101,7 +101,7 @@ def test_conflict_shows_diff():
     _, col = _cols(ws)
     row2 = [c.value for c in ws[2]]
     assert row2[col["状态"]] == "冲突·需你定"
-    assert "收款方式" in str(row2[col["差异(一眼扫)"]])
+    assert "收款方式" in str(row2[col["当前值与计划值的比较差异"]])
 
 
 def test_flow_sheet_has_policy():
@@ -130,6 +130,9 @@ def test_hold_row_carries_action():
 
 
 def test_main_from_result_json(tmp_path):
+    input_dir = tmp_path / "01_智云导出"
+    input_dir.mkdir(parents=True)
+    (input_dir / "测试输入.txt").write_text("test", encoding="utf-8")
     (tmp_path / "04_产出").mkdir(parents=True)
     res = tmp_path / "04_产出" / "判定结果_20260722.json"
     res.write_text(json.dumps(_sample_result(), ensure_ascii=False), encoding="utf-8")

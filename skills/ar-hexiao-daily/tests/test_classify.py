@@ -94,7 +94,7 @@ def test_writeoff_overrides_deliver():
              writeoffs={"SO1": 700.0, "SO2": 300.0})
     recs = C.expand_payment(p, {})
     assert sum(r["amount_orig"] for r in recs) == 1000.0
-    assert all("核销明细" in r["match_basis"] for r in recs)
+    assert all("本次核销金额" in r["match_basis"] for r in recs)
 
 
 def test_sod_expansion_full():
@@ -141,10 +141,40 @@ def test_fenbi_always_hold_e1():
     assert len(recs) == 1 and recs[0]["forced_code"] == "E1"
 
 
-def test_fee_holds_whole_payment():
-    p = _pay(fee=1.62)
+def test_fee_without_provable_scope_is_ignored():
+    p = _pay(
+        amount=97.0,
+        fee=1.62,
+        orders=[{"so": "SO1", "deliver": 100.0}],
+    )
     recs = C.expand_payment(p, {})
-    assert recs[0]["forced_code"] == "E_FEE"
+    assert recs[0].get("forced_code") is None
+    assert recs[0]["amount_orig"] == 100.0
+    assert recs[0]["fee"] == 0.0
+
+
+def test_fee_does_not_reallocate_full_scope():
+    """没有核销子明细时按最新交付额全额核销，不按手续费比例重写。"""
+    p = _pay(
+        amount=298.38,
+        fee=1.62,
+        orders=[
+            {"so": "SO1", "deliver": 100.0},
+            {"so": "SO2", "deliver": 200.0},
+        ],
+        sod_lines={
+            "SO1": [{"sod": "SOD1", "deliver": 100.0}],
+            "SO2": [{"sod": "SOD2", "deliver": 200.0}],
+        },
+    )
+    recs = C.expand_payment(p, {})
+    assert {r["so"] for r in recs} == {"SO1", "SO2"}
+    assert all(r.get("forced_code") is None for r in recs)
+    assert round(sum(r["amount_orig"] for r in recs), 2) == 300.0
+    by_so = {r["so"]: r for r in recs}
+    assert by_so["SO1"]["amount_orig"] == 100.0
+    assert by_so["SO2"]["amount_orig"] == 200.0
+    assert all("手续费忽略" in r["match_basis"] for r in recs)
 
 
 def test_no_orders_is_e7_not_silent_drop():
@@ -153,32 +183,36 @@ def test_no_orders_is_e7_not_silent_drop():
     assert len(recs) == 1 and recs[0]["forced_code"] == "E7"
 
 
-def test_writeoff_over_arrival_is_e4():
+def test_explicit_writeoff_is_not_capped_by_parent_arrival():
     p = _pay(amount=100.0, orders=[{"so": "SO1", "deliver": 500.0}], writeoffs={"SO1": 500.0})
     recs = C.expand_payment(p, {})
-    assert recs[0]["forced_code"] == "E4"
+    assert recs[0].get("forced_code") is None
+    assert recs[0]["amount_local"] == 500.0
 
 
-def test_deliver_over_arrival_is_e5_split_row():
-    """AR26070105 那类：整单关联但钱没到齐 → E5，给出**带数字的两行拆分方案**。
-
-    2026-07-24 明妹口述那笔（8729.35/8946.89/差 217.54）：已收行结账「是」、计提留空；
-    未收行填差额、结账「否」。程序要把这两行的具体金额算给她，别只给一句"插一行"。
-    """
-    p = _pay(amount=8729.35, orders=[{"so": "SO1", "deliver": 8946.89}])
+def test_explicit_partial_writeoff_reaches_partial_settlement_logic():
+    """部分回款必须由逐 SO 核销明细证明，不能用父到账额代替。"""
+    p = _pay(
+        amount=8729.35,
+        orders=[{"so": "SO1", "deliver": 8946.89}],
+        writeoffs={"SO1": 8729.35},
+        cumulative_writeoffs={"SO1": 8729.35},
+        sod_lines={"SO1": [{"sod": "SOD1", "deliver": 8946.89}]},
+    )
     recs = C.expand_payment(p, {})
-    assert recs[0]["forced_code"] == "E5"
-    reason = recs[0]["forced_reason"]
-    assert "8729.35" in reason          # 已收额算给她
-    assert "217.54" in reason           # 未收额算给她
-    assert "结账填「是」" in reason and "结账填「否」" in reason
-    assert "计提留空" in reason          # 没回满不填计提
+    assert recs[0].get("forced_code") is None
+    assert recs[0]["amount_local"] == 8729.35
+    assert recs[0]["deliver_local"] == 8946.89
+    assert recs[0]["cumulative_received_local"] == 8729.35
 
 
-def test_fx_missing_rate_e6():
+def test_fx_order_delivery_without_rate_is_not_written_as_original_currency():
     p = _pay(currency="美元USD", amount_local=None)
     recs = C.expand_payment(p, {})
-    assert recs[0]["forced_code"] == "E6"
+    assert recs[0].get("forced_code") is None
+    # 盈亏表只写人民币。无逐SO本币金额且订单也没有汇率时，禁止把美元原币直接当本币。
+    assert recs[0]["amount_local"] is None
+    assert recs[0]["amount_orig"] == 100.0
 
 
 # ══════════════════════════════════════════════════════════
@@ -370,6 +404,25 @@ def test_settle_yes_but_jiti_empty_when_not_full():
     assert r["bucket"] == "auto"
     assert r["five_cols"]["是否结账"] == "是"
     assert r["five_cols"]["计提"] is None
+    assert r["row_operation"]["paid_receivable"] == 8.0
+    assert r["row_operation"]["unpaid_receivable"] == 2.0
+
+
+def test_repeated_partial_only_counts_current_sod():
+    """重复部分回款命中唯一未结清行，且不混入同 SO 的其它 SOD。"""
+    led = _led({
+        1: {"so": "SO1", "sod": "SOD1", "yingshou": 14000.0, "huikuan": 15000.0, "jiezhang": "是"},
+        2: {"so": "SO1", "sod": "SOD1", "yingshou": 16000.0, "huikuan": None, "jiezhang": "否"},
+        3: {"so": "SO1", "sod": "SOD2", "yingshou": 999.0, "huikuan": 999.0, "jiezhang": "是"},
+    })
+    r = C.classify_one(
+        _rec("SO1", "SOD1", 10000.0, deliver_local=31000.0),
+        led, {}, 0.0, 2026,
+    )
+    assert r["ledger_row_ref"] == 2
+    assert r["row_operation"]["existing_received"] == 15000.0
+    assert r["row_operation"]["paid_receivable"] == 10000.0
+    assert r["row_operation"]["unpaid_receivable"] == 6000.0
 
 
 def test_cross_year_only_after_ledger_miss():
@@ -456,13 +509,23 @@ def test_case_id_is_sod_level():
     assert r["case_id"] == "AR_T|SO1|SOD1"
 
 
-def test_no_proportion_in_source():
-    """静态红线：判定脚本源码不许出现分摊逻辑。"""
+def test_fee_is_completely_removed_from_business_amount_logic():
+    """手续费既不能触发挂账，也不能通过白名单或参考表改变核销金额。"""
     from pathlib import Path
 
     src = Path(C.__file__).read_text(encoding="utf-8")
-    for bad in ("均分", "按比例分摊", "proportion"):
+    for bad in (
+        "fee_gross_sos",
+        "--fee-gross-so",
+        "--fee-gross-ar",
+        "--authoritative-ledger",
+        "--authoritative-correct-so",
+    ):
         assert bad not in src
+    assert "_fee_net_payment" not in src
+    assert "_fee_net_writeoffs" not in src
+    assert "_allocate_weighted_cents" not in src
+    assert "手续费字段完全不参与判定" in src
 
 
 # ══════════════════════════════════════════════════════════
@@ -554,3 +617,30 @@ def test_jiti_basis_is_zhiyun_deliver_not_ledger_yingshou():
     r = C.classify_one(_rec("SO1", "SOD1", 477.61, deliver_local=477.61), led, {}, 0.0, 2026)
     assert r["bucket"] == "auto"
     assert r["five_cols"]["计提"] == 477.61
+    assert r["derived_cols"]["差异"] == 11.03
+
+
+def test_receivable_mismatch_uses_latest_delivery_and_cumulative_writeoff():
+    """原始应收只作基线；累计核销达到最新交付额时正常结清并生成业务值差异。"""
+    led = _led({1: {
+        "so": "SO1", "sod": "", "yingshou": 713.24,
+        "chayi": None,
+    }})
+    r = C.classify_one(
+        _rec(
+            "SO1",
+            "SOD1",
+            300.0,
+            deliver_local=765.77,
+            cumulative_received_local=765.77,
+        ),
+        led,
+        {},
+        0.0,
+        2026,
+    )
+    assert r["bucket"] == "auto"
+    assert r["five_cols"]["计提"] == 765.77
+    assert r["five_cols"]["回款明细"] == 300.0
+    assert r["five_cols"]["是否结账"] == "是"
+    assert r["derived_cols"]["差异"] == -52.53
