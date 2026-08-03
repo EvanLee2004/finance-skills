@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-确认后写到账流转表安全子集：仅「单号」「是否更新应收款」。
+写到账流转表安全子集：仅「单号」「是否更新应收款」。
 
-硬闸：必须 --confirmed；只处理 verdict=write。
-写前备份；优先 xlsx_patch；回读比对。
+日清与写前校验通过后直接执行；--confirmed 仅为旧命令兼容参数。
+只处理 verdict=write；写前备份；优先 xlsx_patch；回读比对。
 """
 from __future__ import annotations
 
@@ -75,8 +75,8 @@ def precheck_flow_identity(workspace: Path, items: List[dict]) -> List[str]:
     """
     写流转表之前复核每条 write 项的行身份（2026-07-25 立）。
 
-    准入（强三键唯一命中）是在 `build_flow_plan` 那一刻算的，到真正写入之间
-    隔着一次人工确认。她的到账流转表是**每天往里加行**的活表，中间插一行，
+    准入（强三键唯一命中）是在 `build_flow_plan` 那一刻算的，到真正写入之间，
+    她的到账流转表仍可能被其它进程或人工插入新行；中间插一行，
     row_no 之后的全部错位 → 单号会写到别人那笔到账上。
     所以这里拿计划里记的 (日期/公司名称/金额) 跟**当前**那一行再对一次。
 
@@ -388,21 +388,17 @@ def write_change_report(changes: List[dict], path: Path) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="确认后写流转表安全子集")
+    ap = argparse.ArgumentParser(description="写流转表安全子集")
     ap.add_argument("--plan", required=True, help="流转写入计划_校验后.json")
     ap.add_argument("--workspace", default=str(common.WORK))
-    ap.add_argument("--confirmed", action="store_true")
+    ap.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="已废弃的兼容参数；现在日清与写前校验通过后可直接写入",
+    )
     ap.add_argument("--in-place", action="store_true", help="就地写 02_ 里的流转副本")
     ap.add_argument("--report", default="")
     args = ap.parse_args(argv)
-
-    if not args.confirmed:
-        print(
-            "ERROR: 缺人工确认，拒绝写入流转表。\n"
-            "  她看过《核销日清》并说确认后，再加 --confirmed。",
-            file=sys.stderr,
-        )
-        return 2
 
     plan_p = Path(args.plan)
     if not plan_p.is_file():

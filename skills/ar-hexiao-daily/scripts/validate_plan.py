@@ -434,7 +434,7 @@ def validate(
     }
     if ledger_path is not None:
         # 盈亏副本在「校验」这一刻的指纹。apply 前会再算一次比对：
-        # 不一致 = 她在"看清单 → 说确认"这段时间动过表 → 拒写，让她重跑一遍（几十秒的事）。
+        # 不一致 = 工作副本在"校验 → 写入"之间发生变化 → 拒写并重新校验。
         out["ledger_path"] = str(ledger_path)
         out["ledger_sha256"] = common.sha256_file(ledger_path)
     return out

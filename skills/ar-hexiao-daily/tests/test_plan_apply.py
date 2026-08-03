@@ -558,8 +558,8 @@ def test_verify_catches_wrong_write(tmp_path):
     assert A.verify_written(out, [_item(2)]) != []
 
 
-def test_main_refuses_without_confirmed(tmp_path):
-    """人工审核闸：没 --confirmed 绝不能写（哪怕计划全绿）。"""
+def test_main_writes_without_confirmed(tmp_path):
+    """日清与计划校验通过后，无需 --confirmed 即可写工作副本。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     checked = tmp_path / "checked.json"
     checked.write_text(
@@ -569,8 +569,8 @@ def test_main_refuses_without_confirmed(tmp_path):
     )
     rc = A.main(["--checked", str(checked), "--ledger", str(led),
                  "--out", str(tmp_path / "o.xlsx"), "--report", str(tmp_path / "r.xlsx")])
-    assert rc == 2
-    assert not (tmp_path / "o.xlsx").exists()
+    assert rc == 0
+    assert (tmp_path / "o.xlsx").exists()
 
 
 def test_main_refuses_when_conflicts(tmp_path):
