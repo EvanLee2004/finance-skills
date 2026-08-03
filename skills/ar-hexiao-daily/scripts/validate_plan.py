@@ -134,6 +134,63 @@ def read_ledger_rows(path: Path) -> Dict[int, dict]:
     return out
 
 
+def _matches_identity(row: Optional[dict], so: str, sod: str) -> bool:
+    if row is None:
+        return False
+    if so and row.get("SO") != so:
+        return False
+    if sod and row.get("SOD") != sod:
+        return False
+    return bool(so or sod)
+
+
+def _matches_planned_fields(row: dict, expected: dict) -> bool:
+    """现有业务行是否已等于计划目标；用于插行后的唯一重定位与幂等复核。"""
+    for key in FIVE:
+        if _norm(row.get(key)) != _norm(expected.get(key)):
+            return False
+    expected_sod = str(expected.get("实收SOD") or "").strip()
+    if expected_sod and row.get("SOD") != expected_sod:
+        return False
+    return True
+
+
+def resolve_item_row(item: dict, rows: Dict[int, dict]) -> tuple[Optional[int], str]:
+    """
+    优先使用判定时行号；受控插行使行号失效时，按 SO/SOD 业务身份唯一重定位。
+
+    不允许仅按 SO 猜行。同一 SO/SOD 有多行时，只有其中恰有一行已等于计划目标，
+    才可用于写后幂等复核；否则继续冲突。
+    """
+    ref = item.get("ledger_row_ref")
+    if not ref:
+        return None, "判定结果里没有行号，无法定位"
+    ref = int(ref)
+    so = str(item.get("so") or "").strip()
+    sod = str(item.get("sod") or "").strip()
+    if _matches_identity(rows.get(ref), so, sod):
+        return ref, ""
+
+    candidates = [
+        row_no for row_no, row in rows.items()
+        if _matches_identity(row, so, sod)
+    ]
+    if len(candidates) == 1:
+        return candidates[0], ""
+    target_matches = [
+        row_no for row_no in candidates
+        if _matches_planned_fields(rows[row_no], item.get("five_cols") or {})
+    ]
+    if len(target_matches) == 1:
+        return target_matches[0], ""
+    if not candidates:
+        return None, f"按 SO/SOD 找不到原计划第 {ref} 行对应的业务行"
+    return None, (
+        f"按 SO/SOD 找到 {len(candidates)} 行，无法唯一重定位"
+        f"（候选行={candidates[:8]}）"
+    )
+
+
 def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     """
     单条复核 → {verdict: write|skip|conflict, reason}
@@ -213,18 +270,55 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             return {"verdict": "conflict", "reason": f"拆行不守恒：{paid}+{unpaid}!={source}"}
         if abs((latest - cumulative) - unpaid) > 0.011:
             return {"verdict": "conflict", "reason": f"未回款公式不成立：{latest}-{cumulative}!={unpaid}"}
-        current_receivable = common.to_number(row.get("应收金额"))
-        if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
-            return {
-                "verdict": "conflict",
-                "reason": f"当前行应收已变化：表里={current_receivable} 计划基线={source}",
-            }
         inserted = op.get("inserted_five_cols") or {}
         if inserted.get("是否结账") != "否":
             return {"verdict": "conflict", "reason": "拆出的未回款行必须是否结账=否"}
         for key in ("计提", "回款明细", "收款时间", "收款方式"):
             if inserted.get(key) is not None:
                 return {"verdict": "conflict", "reason": f"未回款行 {key} 必须留空"}
+
+        # 写后重跑：原行已变成已收侧、下一行已是未收侧时，识别为完整幂等状态。
+        # 不能继续拿拆前 source_receivable 要求当前行，否则受控拆行必然假报冲突。
+        current_receivable = common.to_number(row.get("应收金额"))
+        if (
+            current_receivable is not None
+            and abs(float(current_receivable) - paid) <= 0.011
+        ):
+            next_row = rows.get(int(ref) + 1)
+            next_receivable = (
+                common.to_number(next_row.get("应收金额"))
+                if next_row is not None else None
+            )
+            same_next_identity = _matches_identity(next_row, so, sod)
+            paid_matches = _matches_planned_fields(row, five)
+            unpaid_matches = (
+                next_row is not None
+                and _matches_planned_fields(next_row, inserted)
+                and (
+                    not next_row.get("_差异列存在")
+                    or _norm(next_row.get("差异")) in ("", "None")
+                )
+            )
+            if (
+                same_next_identity
+                and next_receivable is not None
+                and abs(float(next_receivable) - unpaid) <= 0.011
+                and paid_matches
+                and unpaid_matches
+            ):
+                return {
+                    "verdict": "skip",
+                    "reason": "部分回款拆行已完整写入（已收行+紧邻未收行），幂等跳过",
+                }
+            return {
+                "verdict": "conflict",
+                "reason": "当前行看似已拆分，但已收行或紧邻未收行与计划不一致",
+            }
+        if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
+            return {
+                "verdict": "conflict",
+                "reason": f"当前行应收已变化：表里={current_receivable} 计划基线={source}",
+            }
 
     # ③ 目标格现在是什么
     # ⚠「是否结账」是她盈亏表**预置的默认值**：单子交付了、钱还没到的行默认就是「否」
@@ -289,16 +383,23 @@ def validate(
     rows: Dict[int, dict],
     ledger_path: Optional[Path] = None,
 ) -> dict:
-    items = list(plan.get("auto") or [])
+    items = [dict(it) for it in (plan.get("auto") or [])]
     checked: List[dict] = []
     seen_rows: Dict[int, str] = {}
     audit_error = duplicate_audit_error(plan)
     for it in items:
-        res = (
-            {"verdict": "conflict", "reason": audit_error}
-            if audit_error
-            else check_one(it, rows)
-        )
+        original_ref = it.get("ledger_row_ref")
+        if audit_error:
+            res = {"verdict": "conflict", "reason": audit_error}
+        else:
+            resolved_ref, locate_error = resolve_item_row(it, rows)
+            if locate_error:
+                res = {"verdict": "conflict", "reason": locate_error}
+            else:
+                if int(resolved_ref) != int(original_ref):
+                    it["_relocated_from"] = int(original_ref)
+                    it["ledger_row_ref"] = int(resolved_ref)
+                res = check_one(it, rows)
         ref = it.get("ledger_row_ref")
         # 同一行被两条计划命中 → 都不写（谁对谁错要人定）
         if res["verdict"] == "write" and ref in seen_rows:

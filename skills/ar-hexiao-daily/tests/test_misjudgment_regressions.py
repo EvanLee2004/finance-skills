@@ -338,3 +338,56 @@ def test_xlsx_patch_forces_excel_formula_recalculation(tmp_path):
     assert 'calcMode="auto"' in workbook_xml
     assert 'fullCalcOnLoad="1"' in workbook_xml
     assert 'forceFullCalc="1"' in workbook_xml
+
+
+def test_xlsx_patch_cleanly_invalidates_stale_calc_chain(tmp_path):
+    """业务格或行坐标变化后，旧计算链必须连同关系声明一起移除。"""
+    src = tmp_path / "source_with_chain.xlsx"
+    rebuilt = tmp_path / "source_with_chain_rebuilt.xlsx"
+    out = tmp_path / "output.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "明细"
+    ws["A1"] = 1
+    ws["B1"] = "=A1*2"
+    wb.save(src)
+
+    with zipfile.ZipFile(src) as zin:
+        payload = {name: zin.read(name) for name in zin.namelist()}
+    rels_name = "xl/_rels/workbook.xml.rels"
+    rels = payload[rels_name].decode("utf-8")
+    rels = rels.replace(
+        "</Relationships>",
+        '<Relationship Id="rIdCalc" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" '
+        'Target="calcChain.xml"/></Relationships>',
+    )
+    payload[rels_name] = rels.encode("utf-8")
+    content_types = payload["[Content_Types].xml"].decode("utf-8")
+    content_types = content_types.replace(
+        "</Types>",
+        '<Override PartName="/xl/calcChain.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/>'
+        "</Types>",
+    )
+    payload["[Content_Types].xml"] = content_types.encode("utf-8")
+    payload["xl/calcChain.xml"] = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<c r="B1" i="1"/></calcChain>'
+    )
+    with zipfile.ZipFile(rebuilt, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in payload.items():
+            zout.writestr(name, data)
+    rebuilt.replace(src)
+
+    xlsx_patch.patch_cells(src, out, "明细", [(1, 1, 3)])
+
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        rels = zf.read(rels_name).decode("utf-8")
+        content_types = zf.read("[Content_Types].xml").decode("utf-8")
+    assert "xl/calcChain.xml" not in names
+    assert "calcChain" not in rels
+    assert "calcChain" not in content_types
+    assert xlsx_patch.parts_diff(src, out) == []

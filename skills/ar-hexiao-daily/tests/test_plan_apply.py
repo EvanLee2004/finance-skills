@@ -220,6 +220,89 @@ def test_row_shifted_is_conflict(tmp_path):
     assert res["verdict"] == "conflict" and "不是计划里的" in res["reason"]
 
 
+def test_validate_relocates_unique_shifted_identity_and_skips(tmp_path):
+    filled = {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
+    }
+    led = _ledger(
+        tmp_path,
+        [
+            ("SO_OTHER", "SOD_OTHER", None),
+            ("SO26010001", "SOD26010001", filled),
+        ],
+    )
+    result = V.validate({"auto": [_item(2)]}, V.read_ledger_rows(led))
+    assert result["counts"] == {"write": 0, "skip": 1, "conflict": 0}
+    assert result["skip"][0]["ledger_row_ref"] == 3
+    assert result["skip"][0]["_relocated_from"] == 2
+    assert result["skip"][0]["_identity"]["row"] == 3
+
+
+def test_validate_does_not_guess_between_duplicate_identity_rows(tmp_path):
+    led = _ledger(
+        tmp_path,
+        [
+            ("SO_OTHER", "SOD_OTHER", None),
+            ("SO26010001", "SOD26010001", None),
+            ("SO26010001", "SOD26010001", None),
+        ],
+    )
+    result = V.validate({"auto": [_item(2)]}, V.read_ledger_rows(led))
+    assert result["counts"]["conflict"] == 1
+    assert "无法唯一重定位" in result["conflict"][0]["_check"]["reason"]
+
+
+def test_completed_split_pair_is_idempotent_skip(tmp_path):
+    paid = {
+        "计提": None, "回款明细": 50.0, "是否结账": "是",
+        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
+    }
+    unpaid = {
+        "计提": None, "回款明细": None, "是否结账": "否",
+        "收款时间": None, "收款方式": None,
+    }
+    led = _ledger(
+        tmp_path,
+        [
+            ("SO26010001", "SOD26010001", paid),
+            ("SO26010001", "SOD26010001", unpaid),
+        ],
+    )
+    wb = openpyxl.load_workbook(led)
+    wb["明细"].cell(2, 6).value = 40.0
+    wb["明细"].cell(3, 6).value = 60.0
+    wb.save(led)
+    result = V.validate({"auto": [_split_item()]}, V.read_ledger_rows(led))
+    assert result["counts"] == {"write": 0, "skip": 1, "conflict": 0}
+    assert "拆行已完整写入" in result["skip"][0]["_check"]["reason"]
+
+
+def test_incomplete_existing_split_pair_remains_conflict(tmp_path):
+    paid = {
+        "计提": None, "回款明细": 50.0, "是否结账": "是",
+        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
+    }
+    unpaid = {
+        "计提": None, "回款明细": None, "是否结账": "否",
+        "收款时间": None, "收款方式": None,
+    }
+    led = _ledger(
+        tmp_path,
+        [
+            ("SO26010001", "SOD26010001", paid),
+            ("SO26010001", "SOD26010001", unpaid),
+        ],
+    )
+    wb = openpyxl.load_workbook(led)
+    wb["明细"].cell(2, 6).value = 40.0
+    wb["明细"].cell(3, 6).value = 59.0
+    wb.save(led)
+    result = V.validate({"auto": [_split_item()]}, V.read_ledger_rows(led))
+    assert result["counts"]["conflict"] == 1
+    assert "看似已拆分" in result["conflict"][0]["_check"]["reason"]
+
+
 def test_bad_value_is_conflict(tmp_path):
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     rows = V.read_ledger_rows(led)
@@ -331,6 +414,30 @@ def test_difference_formula_uses_final_row_after_earlier_split(tmp_path):
     value_wb.close()
 
 
+def test_split_translates_formulas_in_all_shifted_business_rows(tmp_path):
+    led = _ledger(tmp_path, [
+        ("SO_SPLIT", "SOD_SPLIT", None),
+        ("SO_FORMULA", "SOD_FORMULA", None),
+        ("SO_TAIL", "SOD_TAIL", None),
+    ])
+    wb = openpyxl.load_workbook(str(led))
+    ws = wb["明细"]
+    ws["G3"] = "=H3+H4"
+    ws["H3"] = 10.0
+    ws["H4"] = 20.0
+    wb.save(str(led))
+    wb.close()
+
+    split = _split_item(row=2, so="SO_SPLIT", sod="SOD_SPLIT")
+    out = tmp_path / "上方拆行后后续公式.xlsx"
+    A.write_plan(led, out, [split])
+
+    formula_wb = openpyxl.load_workbook(str(out), data_only=False)
+    assert formula_wb["明细"]["G4"].value == "=H4+H5"
+    assert formula_wb["明细"]["G4"].value != "=H4+H4"
+    formula_wb.close()
+
+
 def test_apply_never_touches_source(tmp_path):
     """写的是新文件，她给的副本必须一个字节都不动。"""
     import hashlib
@@ -352,8 +459,11 @@ def test_in_place_writes_into_copy_and_backs_up(tmp_path):
                    ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+    difference_report = tmp_path / "订单写入差异.xlsx"
     rc = A.main(["--checked", str(checked), "--ledger", str(led),
-                 "--report", str(tmp_path / "r.xlsx"), "--in-place", "--confirmed"])
+                 "--report", str(tmp_path / "r.xlsx"),
+                 "--difference-report", str(difference_report),
+                 "--in-place", "--confirmed"])
     assert rc == 0
     # 副本被就地改了
     ws = openpyxl.load_workbook(str(led))["明细"]
@@ -365,6 +475,8 @@ def test_in_place_writes_into_copy_and_backs_up(tmp_path):
     assert hashlib.sha256(backups[0].read_bytes()).hexdigest() == before
     # 成功后不留临时文件
     assert not list(led.parent.glob(".盈亏_写入中_*"))
+    diff_ws = openpyxl.load_workbook(difference_report, read_only=True)["汇总"]
+    assert diff_ws["B2"].value == led.name
 
 
 def test_partial_leaves_jiti_empty(tmp_path):
