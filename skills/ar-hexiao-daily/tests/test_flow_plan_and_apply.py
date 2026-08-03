@@ -162,13 +162,12 @@ def test_flow_plan_always_covers_all_results_without_named_so_filter():
     }
 
 
-def test_apply_flow_rejects_without_confirmed(tmp_path):
-    plan = {"items": [{"ar": "AR1", "verdict": "write", "file": "x.xlsx", "sheet": "明细", "row_no": 2,
-                       "order_suggest": "SO1", "updated_suggest": "是"}], "counts": {"write": 1}}
+def test_apply_flow_accepts_without_confirmed_when_nothing_to_write(tmp_path):
+    plan = {"items": [], "counts": {"write": 0}}
     p = tmp_path / "plan.json"
     p.write_text(json.dumps(plan), encoding="utf-8")
     rc = AF.main(["--plan", str(p), "--workspace", str(tmp_path)])
-    assert rc == 2
+    assert rc == 0
 
 
 def test_apply_flow_strong_write_and_readback(tmp_path):
@@ -197,14 +196,10 @@ def test_apply_flow_strong_write_and_readback(tmp_path):
     plan_p = ws / "04_产出" / "流转写入计划_校验后.json"
     plan_p.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
 
-    # 无 confirmed 哈希不变
-    rc = AF.main(["--plan", str(plan_p), "--workspace", str(ws)])
-    assert rc == 2
-    assert _sha(flow_path) == before
-
+    # 无需 confirmed，校验通过后直接写安全子集
     rc = AF.main([
         "--plan", str(plan_p), "--workspace", str(ws),
-        "--confirmed", "--in-place",
+        "--in-place",
     ])
     assert rc == 0
     assert _sha(flow_path) != before
@@ -253,7 +248,7 @@ def test_worklist_shows_flow_mk(tmp_path):
     text = "\n".join(
         str(r[0]) for r in wb["先看这里"].iter_rows(values_only=True) if r and r[0]
     )
-    assert "确认后将自动写" in text
+    assert "将自动写" in text
     assert "须你手填" in text
     assert "流转表怎么填" in wb.sheetnames
     headers = [c for c in next(wb["流转表怎么填"].iter_rows(min_row=1, max_row=1, values_only=True))]
@@ -261,7 +256,7 @@ def test_worklist_shows_flow_mk(tmp_path):
     wb.close()
 
 
-def test_apply_all_rejects_without_confirmed(tmp_path):
+def test_apply_all_accepts_without_confirmed(tmp_path):
     led = tmp_path / "盈亏.xlsx"
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -275,7 +270,7 @@ def test_apply_all_rejects_without_confirmed(tmp_path):
     rc = AA.main([
         "--checked", str(checked), "--ledger", str(led), "--workspace", str(tmp_path),
     ])
-    assert rc == 2
+    assert rc == 0
 
 
 def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):
@@ -290,9 +285,11 @@ def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.xlsx"
     ledger.write_bytes(b"placeholder")
     calls = []
+    ledger_calls = []
+    flow_calls = []
 
-    monkeypatch.setattr(AA.apply_to_copy, "main", lambda _args: 0)
-    monkeypatch.setattr(AA.apply_flow, "main", lambda _args: 0)
+    monkeypatch.setattr(AA.apply_to_copy, "main", lambda args: ledger_calls.append(args) or 0)
+    monkeypatch.setattr(AA.apply_flow, "main", lambda args: flow_calls.append(args) or 0)
     monkeypatch.setattr(AA, "_record_done", lambda *args, **kwargs: None)
     monkeypatch.setattr(AA, "_resnapshot_sources", lambda workspace: calls.append(Path(workspace)))
 
@@ -301,13 +298,14 @@ def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):
         "--flow-plan", str(flow_plan),
         "--ledger", str(ledger),
         "--workspace", str(tmp_path),
-        "--confirmed",
         "--in-place",
         "--flow-in-place",
     ])
 
     assert rc == 0
     assert calls == [tmp_path]
+    assert len(ledger_calls) == 1 and "--confirmed" not in ledger_calls[0]
+    assert len(flow_calls) == 1 and "--confirmed" not in flow_calls[0]
 
 
 def test_plan_empty_so_preserves_existing_order_and_exact_strong():

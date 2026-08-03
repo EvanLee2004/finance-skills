@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-确认后统一写入：先盈亏明细，成功后再流转安全子集。
+校验与《核销日清》生成后统一写入：先盈亏明细，成功后再流转安全子集。
 
-无 --confirmed → 拒绝任何写入。
+不再要求人工确认；--confirmed 仅为旧命令兼容参数。
 盈亏失败 → 不写流转。
 """
 from __future__ import annotations
@@ -67,30 +67,25 @@ def _resnapshot_sources(workspace) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="确认后：盈亏 → 流转")
+    ap = argparse.ArgumentParser(description="日清后直接写入：盈亏 → 流转")
     ap.add_argument("--checked", required=True, help="盈亏 写入计划_校验后.json")
     ap.add_argument("--flow-plan", default="", help="流转写入计划_校验后.json；空则跳过流转")
     ap.add_argument("--ledger", required=True, help="盈亏副本")
     ap.add_argument("--workspace", default=str(common.WORK))
-    ap.add_argument("--confirmed", action="store_true")
+    ap.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="已废弃的兼容参数；现在日清与写前校验通过后可直接写入",
+    )
     ap.add_argument("--in-place", action="store_true", help="盈亏就地写")
     ap.add_argument("--flow-in-place", action="store_true", help="流转就地写")
     ap.add_argument("--force", action="store_true", help="盈亏跳过冲突只写可写")
     args = ap.parse_args(argv)
 
-    if not args.confirmed:
-        print(
-            "ERROR: 缺人工确认，拒绝统一写入。\n"
-            "  先出《核销日清》→ 她确认 → 再加 --confirmed。",
-            file=sys.stderr,
-        )
-        return 2
-
     # 1) 盈亏
     ledger_args = [
         "--checked", str(args.checked),
         "--ledger", str(args.ledger),
-        "--confirmed",
     ]
     if args.in_place:
         ledger_args.append("--in-place")
@@ -120,7 +115,6 @@ def main(argv=None) -> int:
     flow_args = [
         "--plan", flow_plan,
         "--workspace", str(args.workspace),
-        "--confirmed",
     ]
     if args.flow_in_place:
         flow_args.append("--in-place")

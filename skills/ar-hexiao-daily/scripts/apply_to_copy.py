@@ -184,9 +184,8 @@ def precheck_before_write(plan: dict, items: List[dict], src: Path) -> List[str]
     """
     **写入前再复核一次**（2026-07-25 立）。
 
-    为什么非有不可：`validate_plan` 复核的是"校验那一刻"的表，而中间隔着一次
-    **人工确认**——她看《核销日清》可能看几分钟，也可能隔天才回你一句「确认」。
-    而 `--in-place` 写的正是她天天在用的那份表：
+    为什么非有不可：`validate_plan` 复核的是"校验那一刻"的表，即使主流程随后立即写入，
+    工作副本仍可能被其它进程或人工同时修改。而 `--in-place` 写的正是她天天在用的那份表：
       · 月初贴交付会**插行**、部分核销会在上方**插行** → 行号当场全部错位
       · 错位之后按旧行号写 = 把这一笔的五列写到**别人那一单**上
       · 更糟的是我们还会写 SOD 列，等于把那行的单号也覆盖掉
@@ -729,7 +728,7 @@ def _resnapshot_sources(ledger: Path) -> None:
     就地回填成功后重新打指纹。
 
     否则下一次 `verify_sources verify` 必然报「盈亏表被改动」——**那是我们自己
-    经她确认后合法写的**，却长得跟"程序偷偷改了她的表"一模一样。
+    经校验后合法写的**，却长得跟"程序偷偷改了她的表"一模一样。
     2026-07-23 opencode 实测就踩到：AI 照 SKILL 在 apply 后跑 verify，
     当场甩出一句吓人的「校验未通过」。新指纹＝新基线，之后再变才是真异常。
     """
@@ -746,7 +745,7 @@ def _resnapshot_sources(ledger: Path) -> None:
 
 
 def _mark_review_applied(checked_p: Path) -> None:
-    """写成功后把待确认标记改成已应用（若存在）。"""
+    """写成功后把旧版待确认标记改成已应用（若存在）。"""
     for folder in (checked_p.parent, checked_p.parent.parent / "04_产出"):
         stamp = folder / "回填审核_待确认.json"
         if stamp.is_file():
@@ -776,7 +775,7 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--confirmed",
         action="store_true",
-        help="人工审核闸：明妹看过回填审核单并口头确认后才允许加此开关。无此开关拒绝写入。",
+        help="已废弃的兼容参数；现在校验与日清生成后可直接写入。",
     )
     args = ap.parse_args(argv)
 
@@ -785,18 +784,6 @@ def main(argv=None) -> int:
         if not p.is_file():
             print(f"ERROR: 找不到{name} {p}", file=sys.stderr)
             return 2
-
-    # 硬闸：没人工确认绝不能写（明妹 7-23：回填前先 Excel 说明要回填啥）
-    if not args.confirmed:
-        print(
-            "ERROR: 缺人工确认，拒绝写入。\n"
-            "  1) 先跑 build_worklist.py 出《核销日清》给她看（含要填/跳过/冲突三态）\n"
-            "  2) 她说「确认 / OK / 可以写 / 按这个写」之后\n"
-            "  3) 再跑本命令并加上 --confirmed\n"
-            "  （头几次并排验收也不许跳过这一眼）",
-            file=sys.stderr,
-        )
-        return 2
 
     plan = json.loads(checked_p.read_text(encoding="utf-8"))
     writable = plan.get("write") or []
@@ -812,7 +799,7 @@ def main(argv=None) -> int:
         print("没有可写的笔（可能都已经填过了）。什么都没改。")
         return 0
 
-    # ★ 写入前最后一道闸：她的表在「校验 → 确认」这段时间里变了没有
+    # ★ 写入前最后一道闸：她的表在「校验 → 写入」之间是否发生变化
     try:
         stale = precheck_before_write(plan, writable, src)
     except ValueError as e:

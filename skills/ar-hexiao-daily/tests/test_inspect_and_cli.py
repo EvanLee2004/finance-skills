@@ -123,13 +123,13 @@ def test_scripts_exist():
         assert (SCRIPTS / name).is_file()
 
 
-def test_skill_md_has_review_gate():
-    """回填必须：日清 → 确认 → apply_all --confirmed；确认后可写流转安全子集。"""
+def test_skill_md_has_direct_write_flow_after_worklist():
+    """回填流程应为：日清与校验通过后直接 apply_all，仍保留写前安全复核。"""
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-    assert "--confirmed" in text and "确认" in text
     assert "核销日清" in text
-    assert "禁止跳过回填审核单" in text or "禁止未确认就 apply" in text
-    assert "apply_all" in text or "apply_flow" in text
+    assert "无需另行确认" in text
+    assert "apply_all" in text
+    assert "--confirmed --in-place" not in text
     # 不得再出现旧绝对禁令
     assert "禁止自动写到账流转表（只出建议）" not in text
     assert "流转表**不自动写**" not in text

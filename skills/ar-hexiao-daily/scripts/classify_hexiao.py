@@ -1501,7 +1501,7 @@ def classify_one(
                     initial_receivable=initial_receivable,
                     existing_received=existing_received,
                 )
-                + " 当前无法唯一命中 SOD，先指明承接回款的 SOD；唯一后才允许确认写入。"
+                + " 当前无法唯一命中 SOD，先指明承接回款的 SOD；唯一后才能安全写入。"
             )
         result["reason"] = reason
         result["bucket"] = "exception" if forced in ("E4", "E7", "E10", "E12", "E0") else "hold"
@@ -2149,7 +2149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(
             "\n⚠ 发现后续快照才出现的历史核销明细：" + summary
-            + "\n   必须逐日重跑这些真实核销日，生成增补《核销日清》；确认前仍禁止写表。",
+            + "\n   必须逐日重跑这些真实核销日，生成增补《核销日清》；日清与写前校验通过后直接写工作副本。",
             file=sys.stderr,
         )
 

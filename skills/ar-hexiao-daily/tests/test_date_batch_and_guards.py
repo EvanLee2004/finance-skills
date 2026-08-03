@@ -122,7 +122,7 @@ def test_precheck_passes_when_untouched(tmp_path):
 
 
 def test_precheck_blocks_when_table_changed_after_validate(tmp_path):
-    """她在「出清单 → 说确认」之间自己动了表 → 指纹对不上 → 整批拒写。"""
+    """工作副本在「校验 → 写入」之间被改动 → 指纹对不上 → 整批拒写。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     plan = _checked(led, [_item(2)])
     wb = openpyxl.load_workbook(str(led))
@@ -377,7 +377,7 @@ def test_resolve_workspace_corrects_parent_to_nested(tmp_path):
     """
     AI 会 cd 进技能目录再传 `--workspace .`。旧版就地新建四个空目录 →
     判定/校验落 `工作区/04_产出/`、日清和流转计划落技能根 `04_产出/` → **产出分家**。
-    真正的伤害在后面：她说「确认」时 apply_all 按默认工作区找流转计划找不到，
+    真正的伤害在后面：apply_all 按默认工作区找流转计划找不到，
     于是**只写盈亏、静默跳过流转还不报错**。所以必须自动纠正到真工作区。
     """
     _fake_ws(tmp_path)
