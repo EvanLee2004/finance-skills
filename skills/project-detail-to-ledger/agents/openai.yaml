@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目明细补录"
+  short_description: "自动把项目明细映射追加到盈亏核算表并生成完整校验报告"
+  default_prompt: "请使用项目明细补录 Skill 处理我上传的项目明细表和盈亏核算表，生成新表并校验映射结果。"
