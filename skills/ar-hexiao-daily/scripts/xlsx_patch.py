@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-无损写单元格：**只补丁目标 sheet 的那几个格，工作簿其余部件逐字节原样保留**。
+无损写单元格：**只补丁目标 sheet 的那几个格，工作簿其余业务部件逐字节原样保留**。
 
 为什么不用 openpyxl 保存：实测拿明妹的真表（`盈亏核算表2026全年`）用 openpyxl 载入再保存，
 74 个部件变 59 —— **5 个 drawing、1 张内嵌图片、若干 rels 全部丢失**。
@@ -10,7 +10,12 @@
 做法（与 `xlsx` 技能的 unpack/pack 同思路，OOXML 外科手术）：
   1. 把 xlsx 当 zip 打开，只取出目标 sheet 的 XML
   2. 在 XML 里就地改那几个 `<c>` 单元格
-  3. 重新打包：**除该 sheet 外的每个部件都按原始字节写回**
+  3. 重新打包：**除该 sheet 与可重建的 calcChain 外，每个部件都按原始字节写回**
+
+只要公式或行坐标发生变化，旧 `calcChain.xml` 就可能继续指向被覆盖或已下移的单元格。
+保留这种过期计算链会让 Excel 打开时进入“修复并删除公式”流程。因此写入时完整移除
+calcChain 部件、关系和 Content Type，并令 Excel 在打开时全量重建计算链；工作表公式本身
+和缓存值仍由本模块保留。
 
 样式沿用：空格子没有样式时，从**同一列另一个有值的行**借样式索引，
 这样日期/金额显示格式跟她表里其余行一致，不会出现"一列里有的显示日期有的显示数字"。
@@ -26,14 +31,24 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
+
+from openpyxl.formula.translate import Translator
 
 # Excel 日期序列号的零点。1900 历法有个著名的假闰日（1900-02-29），
 # 所以 1900-03-01 之后要 +1；用 1899-12-30 当基准正好把这个偏差吸收掉。
 _EXCEL_EPOCH = dt.date(1899, 12, 30)
 
 _CELL_RE_TMPL = r'<c r="{ref}"(?P<attrs>[^>]*?)(?:/>|>(?P<inner>.*?)</c>)'
-_ROW_RE_TMPL = r'<row[^>]*\br="{row}"[^>]*(?:/>|>.*?</row>)'
+# 自闭合元素必须作为独立分支优先匹配；若把自闭合与普通结束标签放在
+# 同一个贪婪尾部分支里，匹配会吞掉斜杠并跨到下一个结束标签。
+_CELL_ELEMENT_RE = re.compile(r'<c\b[^>]*/>|<c\b[^>]*>.*?</c>', re.S)
+_ROW_ELEMENT_RE = re.compile(r'<row\b[^>]*/>|<row\b[^>]*>.*?</row>', re.S)
+_FORMULA_ELEMENT_RE = re.compile(r'<f\b[^>]*/>|<f\b[^>]*>.*?</f>', re.S)
+_ROW_RE_TMPL = (
+    r'<row\b(?=[^>]*\br="{row}")[^>]*/>'
+    r'|<row\b(?=[^>]*\br="{row}")[^>]*>.*?</row>'
+)
 
 
 @dataclass(frozen=True)
@@ -211,33 +226,55 @@ def _col_index(letters: str) -> int:
     return n
 
 
-def _translate_formula_self_row(formula: str, old_row: int, new_row: int) -> str:
-    """复制/下移整行时，只平移公式中指向本行的相对行号；绝对行号保持不变。"""
-    pat = re.compile(rf'(?<![A-Z0-9_])(\$?[A-Z]{{1,3}})(?![A-Z])(\$?){old_row}(?!\d)')
-
-    def repl(m):
-        return m.group(0) if m.group(2) == "$" else f"{m.group(1)}{new_row}"
-
-    return pat.sub(repl, formula)
+def _translate_formula_between_cells(formula_xml: str, origin: str, target: str) -> str:
+    """按 Excel 复制语义完整平移 A1 公式；绝对行列引用由 Translator 自动保持。"""
+    formula = unescape(formula_xml, {"&quot;": '"', "&apos;": "'"})
+    try:
+        translated = Translator(f"={formula}", origin=origin).translate_formula(target)
+    except Exception as exc:
+        raise ValueError(
+            f"公式平移失败：{origin}->{target}，formula={formula!r}"
+        ) from exc
+    return escape(translated.lstrip("="))
 
 
 def _renumber_row_xml(row_xml: str, old_row: int, new_row: int) -> str:
-    """把一整行的 r=、单元格地址和普通公式从 old_row 平移到 new_row。"""
-    out = re.sub(rf'(<row\b[^>]*\br="){old_row}(")', rf'\g<1>{new_row}\2', row_xml, count=1)
-    out = re.sub(
-        rf'(<c\b[^>]*\br=")([A-Z]+){old_row}(")',
-        lambda m: f'{m.group(1)}{m.group(2)}{new_row}{m.group(3)}',
+    """把整行下移，并按每个单元格的原/新坐标完整平移其中的普通公式。"""
+
+    def shift_cell(match) -> str:
+        cell_xml = match.group(0)
+        ref_match = re.search(r'\br="([A-Z]{1,3})(\d+)"', cell_xml)
+        if not ref_match:
+            return cell_xml
+        col, row_text = ref_match.groups()
+        if int(row_text) != old_row:
+            return cell_xml
+        origin = f"{col}{old_row}"
+        target = f"{col}{new_row}"
+        shifted = re.sub(
+            rf'(\br="){re.escape(origin)}(")',
+            rf"\g<1>{target}\2",
+            cell_xml,
+            count=1,
+        )
+        return re.sub(
+            r'(<f\b[^>]*>)(.*?)(</f>)',
+            lambda formula_match: formula_match.group(1)
+            + _translate_formula_between_cells(
+                formula_match.group(2), origin, target
+            )
+            + formula_match.group(3),
+            shifted,
+            flags=re.S,
+        )
+
+    out = _CELL_ELEMENT_RE.sub(shift_cell, row_xml)
+    return re.sub(
+        rf'(<row\b[^>]*\br="){old_row}(")',
+        rf'\g<1>{new_row}\2',
         out,
+        count=1,
     )
-    out = re.sub(
-        r'(<f\b[^>]*>)(.*?)(</f>)',
-        lambda m: m.group(1)
-        + _translate_formula_self_row(m.group(2), old_row, new_row)
-        + m.group(3),
-        out,
-        flags=re.S,
-    )
-    return out
 
 
 def _shift_a1_token(token: str, after_row: int, include_inserted: bool = False) -> str:
@@ -288,7 +325,7 @@ def _shift_shared_formula_refs(xml: str, after_row: int) -> str:
         return re.sub(
             r'(\bref=")([^"]+)(")',
             lambda x: x.group(1)
-            + _shift_a1_token(x.group(2), after_row, include_inserted=True)
+            + _shift_shared_formula_ref(x.group(2), after_row)
             + x.group(3),
             tag,
             count=1,
@@ -297,23 +334,120 @@ def _shift_shared_formula_refs(xml: str, after_row: int) -> str:
     return re.sub(r"<f\b[^>]*>", repl, xml)
 
 
+def _shift_shared_formula_ref(ref: str, after_row: int) -> str:
+    """扩展/平移 shared master ref；单格 master 被复制时也必须覆盖新 follower。"""
+    if ":" not in ref and " " not in ref:
+        match = re.fullmatch(r'(?P<col>\$?[A-Z]{1,3})(?P<abs>\$?)(?P<row>\d+)', ref)
+        if match and int(match.group("row")) == after_row:
+            end = f'{match.group("col")}{match.group("abs")}{after_row + 1}'
+            return f"{ref}:{end}"
+    return _shift_a1_token(ref, after_row, include_inserted=True)
+
+
+def _cell_in_a1_range(cell: str, ref: str) -> bool:
+    def coordinate(value: str):
+        match = re.fullmatch(r'\$?([A-Z]{1,3})\$?(\d+)', value)
+        if not match:
+            return None
+        return _col_index(match.group(1)), int(match.group(2))
+
+    if " " in ref:
+        return any(_cell_in_a1_range(cell, piece) for piece in ref.split())
+    left, right = (ref.split(":", 1) + [ref])[:2] if ":" in ref else (ref, ref)
+    point = coordinate(cell)
+    start = coordinate(left)
+    end = coordinate(right)
+    if not point or not start or not end:
+        return False
+    return (
+        min(start[0], end[0]) <= point[0] <= max(start[0], end[0])
+        and min(start[1], end[1]) <= point[1] <= max(start[1], end[1])
+    )
+
+
+def _validate_shared_formula_integrity(xml: str) -> None:
+    """拒绝 master 缺失/重复或 follower 落在 ref 之外的共享公式结构。"""
+    groups: Dict[str, Dict[str, object]] = {}
+    for cell_match in _CELL_ELEMENT_RE.finditer(xml):
+        cell_xml = cell_match.group(0)
+        cell_ref_match = re.search(r'\br="([A-Z]{1,3}\d+)"', cell_xml)
+        if not cell_ref_match:
+            continue
+        formula_match = _FORMULA_ELEMENT_RE.search(cell_xml)
+        if not formula_match:
+            continue
+        formula_xml = formula_match.group(0)
+        tag_match = re.match(r'<f\b[^>]*?/?>', formula_xml)
+        if not tag_match or not re.search(r'\bt="shared"', tag_match.group(0)):
+            continue
+        si_match = re.search(r'\bsi="([^"]+)"', tag_match.group(0))
+        if not si_match:
+            raise ValueError(f"共享公式缺少 si：{cell_ref_match.group(1)}")
+        group = groups.setdefault(si_match.group(1), {"masters": [], "followers": []})
+        ref_match = re.search(r'\bref="([^"]+)"', tag_match.group(0))
+        if ref_match:
+            group["masters"].append((cell_ref_match.group(1), ref_match.group(1)))
+        else:
+            group["followers"].append(cell_ref_match.group(1))
+
+    problems: List[str] = []
+    for si, group in groups.items():
+        masters = group["masters"]
+        followers = group["followers"]
+        if len(masters) != 1:
+            problems.append(f"si={si} master_count={len(masters)}")
+            continue
+        master_cell, master_ref = masters[0]
+        if not _cell_in_a1_range(master_cell, master_ref):
+            problems.append(f"si={si} master={master_cell} outside ref={master_ref}")
+        for follower in followers:
+            if not _cell_in_a1_range(follower, master_ref):
+                problems.append(f"si={si} follower={follower} outside ref={master_ref}")
+    if problems:
+        raise ValueError("共享公式结构非法：" + "; ".join(problems[:10]))
+
+
+def _drop_calc_chain(payload: Dict[str, bytes]) -> None:
+    """公式/坐标变更后移除可重建的旧计算链，避免 Excel 打开时修复并删公式。"""
+    payload.pop("xl/calcChain.xml", None)
+
+    rels_name = "xl/_rels/workbook.xml.rels"
+    if rels_name in payload:
+        rels_xml = payload[rels_name].decode("utf-8", "replace")
+        rels_xml = re.sub(
+            r'<Relationship\b(?=[^>]*\bType="[^"]*/calcChain")(?=[^>]*\bTarget="calcChain\.xml")[^>]*/>',
+            "",
+            rels_xml,
+        )
+        payload[rels_name] = rels_xml.encode("utf-8")
+
+    content_types_name = "[Content_Types].xml"
+    if content_types_name in payload:
+        content_xml = payload[content_types_name].decode("utf-8", "replace")
+        content_xml = re.sub(
+            r'<Override\b(?=[^>]*\bPartName="/xl/calcChain\.xml")[^>]*/>',
+            "",
+            content_xml,
+        )
+        payload[content_types_name] = content_xml.encode("utf-8")
+
+
 def _demote_copied_shared_masters(row_xml: str) -> str:
     """复制到新行的 shared master 改成同组 follower，避免同一 si 出现两个主公式。"""
     def repl(m):
-        tag = m.group(1)
+        formula_xml = m.group(0)
+        tag_match = re.match(r'<f\b[^>]*>', formula_xml)
+        if not tag_match:
+            return formula_xml
+        tag = tag_match.group(0)
         if not re.search(r'\bt="shared"', tag) or not re.search(r'\bref="', tag):
-            return m.group(0)
+            return formula_xml
         si = re.search(r'\bsi="([^"]+)"', tag)
         if not si:
-            return m.group(0)
+            return formula_xml
         return f'<f t="shared" si="{si.group(1)}"/>'
 
-    return re.sub(
-        r'(<f\b[^>]*>).*?</f>',
-        repl,
-        row_xml,
-        flags=re.S,
-    )
+    return _FORMULA_ELEMENT_RE.sub(repl, row_xml)
 
 
 def _insert_row_copy(xml: str, source_row: int) -> str:
@@ -329,7 +463,7 @@ def _insert_row_copy(xml: str, source_row: int) -> str:
         old = int(rm.group(1))
         return _renumber_row_xml(row_xml, old, old + 1) if old > source_row else row_xml
 
-    xml = re.sub(r'<row\b[^>]*\br="\d+"[^>]*(?:/>|>.*?</row>)', shift_row, xml, flags=re.S)
+    xml = _ROW_ELEMENT_RE.sub(shift_row, xml)
     source_match = re.search(_ROW_RE_TMPL.format(row=source_row), xml, re.S)
     source_xml = source_match.group(0)
     inserted = _renumber_row_xml(source_xml, source_row, source_row + 1)
@@ -393,6 +527,8 @@ def patch_cells(
 
         for r, cells in sorted(by_row.items()):
             xml = _patch_row(xml, r, cells, date_style=date_style)
+        _validate_shared_formula_integrity(xml)
+        _drop_calc_chain(payload)
         workbook_name = "xl/workbook.xml"
         if workbook_name in payload:
             wb_xml = payload[workbook_name].decode("utf-8", "replace")
@@ -413,13 +549,14 @@ def patch_cells(
     payload[target] = xml.encode("utf-8")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zo:
         for i in infos:
-            zo.writestr(i, payload[i.filename])
+            if i.filename in payload:
+                zo.writestr(i, payload[i.filename])
     return sum(len(c) for c in by_row.values()) + len(insertion_specs)
 
 
 def parts_diff(a: Path, b: Path) -> List[str]:
-    """列出 b 相对 a 少掉的部件——用来证明"没搞坏她的表"。"""
+    """列出 b 相对 a 意外少掉的部件；可重建的 calcChain 允许被主动失效。"""
     def names(p):
         with zipfile.ZipFile(p) as z:
             return {n for n in z.namelist() if not n.endswith("/")}
-    return sorted(names(a) - names(b))
+    return sorted((names(a) - names(b)) - {"xl/calcChain.xml"})
