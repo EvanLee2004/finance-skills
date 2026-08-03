@@ -816,8 +816,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
             f"智云核销记录需人工检查：{unresolved}",
         ))
 
-    # 分笔回款：系统没有逐单金额，铁律一律 hold（禁止比例分摊）
-    if "分笔" in (p.get("huikuan_type") or ""):
+    # 分笔回款只有在智云确实缺少逐 SO 核销金额时才 hold；已有逐 SO 明细就按明细继续判。
+    if "分笔" in (p.get("huikuan_type") or "") and not (p.get("writeoffs") or {}):
         return finish(_hold_each_source_order(p, "E1", "分笔回款：系统无逐单金额，禁止比例分摊"))
 
     if not orders:
@@ -884,6 +884,30 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 cand = "、".join(
                     f"{x['sod']}={x['deliver']}" for x in lines[:12]
                 ) + ("…" if len(lines) > 12 else "")
+                order = order_by_so.get(so) or {}
+                current_local = None
+                if has_itemized_writeoff:
+                    current_local, _ = _writeoff_business_amount(
+                        h,
+                        explicit_local=(p.get("writeoffs_local") or {}).get(so),
+                        explicit_orig=h,
+                    )
+                else:
+                    current_local, _ = _order_delivery_local(h, p, rates, order)
+                default_lines = []
+                for one_line in lines:
+                    one = dict(one_line)
+                    if has_itemized_writeoff:
+                        one["deliver_local"], _ = _writeoff_business_amount(
+                            one.get("deliver"),
+                            explicit_local=(p.get("writeoffs_local") or {}).get(so),
+                            explicit_orig=h,
+                        )
+                    else:
+                        one["deliver_local"], _ = _order_delivery_local(
+                            one.get("deliver"), p, rates, order
+                        )
+                    default_lines.append(one)
                 out.append(_hold(
                     p, "E5",
                     f"{so} 本次核销 {h:.2f}，但它下面的 SOD 金额凑不出唯一组合"
@@ -892,8 +916,15 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     f"若你指的那个 SOD 交付额比 {h:.2f} 大，就是只回了一部分——"
                     "实际未收必须按「智云最新交付额 − 累计实际回款」算，不能拿盈亏表旧应收减；"
                     "回款明细填实际回款，计提目标更新为最新交付额，同时保持拆行后的原始应收合计不变。"
-                    "唯一指认后，程序按确认口径在对应行下方拆行。",
+                    "按已确认规则，程序将尝试选择盈亏表中该 SO 的首个未结清 SOD；"
+                    "若该行不能安全承接则继续挂账。",
                     so=so,
+                    default_first_sod=True,
+                    default_amount_orig=float(h),
+                    default_amount_local=current_local,
+                    default_sod_lines=default_lines,
+                    default_match_basis=basis,
+                    warning_codes=["W_DEFAULT_FIRST_SOD"],
                 ))
             else:
                 # 订单明细查不到 SOD → 退化成按 SO 匹配盈亏表（老路，仍可判）
@@ -1365,6 +1396,53 @@ def classify_one(
     thr: float,
     year_now: int,
 ) -> dict:
+    if rec.get("default_first_sod") and ledger is not None and rec.get("so"):
+        so = str(rec.get("so") or "").strip()
+        first_row = next(
+            (
+                row_no
+                for row_no in sorted(ledger.so_index.get(so, []))
+                if ledger._is_outstanding(ledger.row_snapshot.get(row_no) or {})
+            ),
+            None,
+        )
+        if first_row is not None:
+            snap = ledger.row_snapshot.get(first_row) or {}
+            target_sod = str(snap.get("sod") or "").strip()
+            target_line = next(
+                (
+                    line
+                    for line in (rec.get("default_sod_lines") or [])
+                    if str(line.get("sod") or "").strip() == target_sod
+                ),
+                None,
+            )
+            if target_sod and target_line is not None and target_line.get("deliver_local") is not None:
+                resolved = dict(rec)
+                resolved.pop("forced_code", None)
+                resolved.pop("forced_reason", None)
+                resolved.pop("default_first_sod", None)
+                resolved.update({
+                    "sod": target_sod,
+                    "amount_orig": rec.get("default_amount_orig"),
+                    "amount_local": rec.get("default_amount_local"),
+                    "deliver_local": target_line.get("deliver_local"),
+                    "currency": target_line.get("currency") or rec.get("currency"),
+                    "cumulative_received_local": None,
+                    "so_all_lines": rec.get("default_sod_lines") or [],
+                    "preferred_ledger_row": first_row,
+                    "match_basis": (
+                        f"{rec.get('default_match_basis') or '智云核销金额'}"
+                        "/同SO首个未结清SOD默认"
+                    ),
+                })
+                resolved_result = classify_one(resolved, ledger, rates, thr, year_now)
+                resolved_result["reason"] = (
+                    "按确认规则选择盈亏表中同 SO 的首个未结清 SOD。"
+                    + str(resolved_result.get("reason") or "")
+                )
+                return resolved_result
+
     result = {
         "ar": rec.get("ar") or "",
         "so": rec.get("so") or "",
@@ -1485,7 +1563,11 @@ def classify_one(
         return result
 
     so, sod = rec.get("so") or "", rec.get("sod") or ""
-    row, how, cands = ledger.match(so, sod, amount_orig)
+    preferred_row = rec.get("preferred_ledger_row")
+    if preferred_row is not None:
+        row, how, cands = int(preferred_row), "同SO首个未结清SOD默认", []
+    else:
+        row, how, cands = ledger.match(so, sod, amount_orig)
 
     # 定位不到唯一行 → 用「整段逐位对齐」严格消歧（对不齐就继续挂起）
     align_note = ""

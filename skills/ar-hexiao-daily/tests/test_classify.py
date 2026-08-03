@@ -128,6 +128,48 @@ def test_sod_ambiguous_holds_e5():
     assert "SOD1" in recs[0]["forced_reason"]  # 候选要摆出来给她挑
 
 
+def test_sod_ambiguous_defaults_to_first_outstanding_ledger_row():
+    """用户确认：无法唯一落 SOD 时，以盈亏表行号最小的未结清行承接。"""
+    p = _pay(amount=50.0, orders=[{"so": "SO1", "deliver": 200.0}], writeoffs={"SO1": 50.0})
+    p["sod_lines"] = {"SO1": [
+        {"sod": "SOD2", "deliver": 100.0},
+        {"sod": "SOD1", "deliver": 100.0},
+    ]}
+    rec = C.expand_payment(p, {})[0]
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0, "jiezhang": "否"},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0, "jiezhang": "否"},
+    })
+
+    got = C.classify_one(rec, led, {}, 0.0, 2026)
+
+    assert got["bucket"] == "auto"
+    assert got["code"] == "E5"
+    assert got["sod"] == "SOD1"
+    assert got["ledger_row_ref"] == 10
+    assert got["row_operation"]["type"] == "split_below"
+    assert "W_DEFAULT_FIRST_SOD" in got["warning_codes"]
+
+
+def test_sod_ambiguous_skips_closed_row_and_uses_first_outstanding():
+    p = _pay(amount=50.0, orders=[{"so": "SO1", "deliver": 200.0}], writeoffs={"SO1": 50.0})
+    p["sod_lines"] = {"SO1": [
+        {"sod": "SOD1", "deliver": 100.0},
+        {"sod": "SOD2", "deliver": 100.0},
+    ]}
+    rec = C.expand_payment(p, {})[0]
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0, "jiezhang": "是", "huikuan": 100.0},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0, "jiezhang": "否"},
+    })
+
+    got = C.classify_one(rec, led, {}, 0.0, 2026)
+
+    assert got["bucket"] == "auto"
+    assert got["sod"] == "SOD2"
+    assert got["ledger_row_ref"] == 11
+
+
 def test_no_sod_falls_back_to_so():
     """订单明细查不到 SOD → 退化按 SO 匹配，仍然可判，不是丢单。"""
     p = _pay(amount=50.0, orders=[{"so": "SO1", "deliver": 50.0}])
@@ -139,6 +181,25 @@ def test_fenbi_always_hold_e1():
     p = _pay(huikuan_type="分笔回款")
     recs = C.expand_payment(p, {})
     assert len(recs) == 1 and recs[0]["forced_code"] == "E1"
+
+
+def test_fenbi_with_itemized_writeoff_continues_normal_sod_classification():
+    """分笔已有逐 SO 核销金额时不能被回款类型文本误挡成 E1。"""
+    p = _pay(
+        amount=50.0,
+        huikuan_type="分笔回款",
+        orders=[{"so": "SO1", "deliver": 100.0}],
+        writeoffs={"SO1": 50.0},
+    )
+    p["sod_lines"] = {"SO1": [{"sod": "SOD1", "deliver": 100.0}]}
+
+    recs = C.expand_payment(p, {})
+
+    assert len(recs) == 1
+    assert recs[0].get("forced_code") is None
+    assert recs[0]["so"] == "SO1"
+    assert recs[0]["sod"] == "SOD1"
+    assert recs[0]["amount_orig"] == 50.0
 
 
 def test_fee_without_provable_scope_is_ignored():
