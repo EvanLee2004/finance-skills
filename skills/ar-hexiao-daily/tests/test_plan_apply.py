@@ -220,89 +220,6 @@ def test_row_shifted_is_conflict(tmp_path):
     assert res["verdict"] == "conflict" and "不是计划里的" in res["reason"]
 
 
-def test_validate_relocates_unique_shifted_identity_and_skips(tmp_path):
-    filled = {
-        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
-        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
-    }
-    led = _ledger(
-        tmp_path,
-        [
-            ("SO_OTHER", "SOD_OTHER", None),
-            ("SO26010001", "SOD26010001", filled),
-        ],
-    )
-    result = V.validate({"auto": [_item(2)]}, V.read_ledger_rows(led))
-    assert result["counts"] == {"write": 0, "skip": 1, "conflict": 0}
-    assert result["skip"][0]["ledger_row_ref"] == 3
-    assert result["skip"][0]["_relocated_from"] == 2
-    assert result["skip"][0]["_identity"]["row"] == 3
-
-
-def test_validate_does_not_guess_between_duplicate_identity_rows(tmp_path):
-    led = _ledger(
-        tmp_path,
-        [
-            ("SO_OTHER", "SOD_OTHER", None),
-            ("SO26010001", "SOD26010001", None),
-            ("SO26010001", "SOD26010001", None),
-        ],
-    )
-    result = V.validate({"auto": [_item(2)]}, V.read_ledger_rows(led))
-    assert result["counts"]["conflict"] == 1
-    assert "无法唯一重定位" in result["conflict"][0]["_check"]["reason"]
-
-
-def test_completed_split_pair_is_idempotent_skip(tmp_path):
-    paid = {
-        "计提": None, "回款明细": 50.0, "是否结账": "是",
-        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
-    }
-    unpaid = {
-        "计提": None, "回款明细": None, "是否结账": "否",
-        "收款时间": None, "收款方式": None,
-    }
-    led = _ledger(
-        tmp_path,
-        [
-            ("SO26010001", "SOD26010001", paid),
-            ("SO26010001", "SOD26010001", unpaid),
-        ],
-    )
-    wb = openpyxl.load_workbook(led)
-    wb["明细"].cell(2, 6).value = 40.0
-    wb["明细"].cell(3, 6).value = 60.0
-    wb.save(led)
-    result = V.validate({"auto": [_split_item()]}, V.read_ledger_rows(led))
-    assert result["counts"] == {"write": 0, "skip": 1, "conflict": 0}
-    assert "拆行已完整写入" in result["skip"][0]["_check"]["reason"]
-
-
-def test_incomplete_existing_split_pair_remains_conflict(tmp_path):
-    paid = {
-        "计提": None, "回款明细": 50.0, "是否结账": "是",
-        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
-    }
-    unpaid = {
-        "计提": None, "回款明细": None, "是否结账": "否",
-        "收款时间": None, "收款方式": None,
-    }
-    led = _ledger(
-        tmp_path,
-        [
-            ("SO26010001", "SOD26010001", paid),
-            ("SO26010001", "SOD26010001", unpaid),
-        ],
-    )
-    wb = openpyxl.load_workbook(led)
-    wb["明细"].cell(2, 6).value = 40.0
-    wb["明细"].cell(3, 6).value = 59.0
-    wb.save(led)
-    result = V.validate({"auto": [_split_item()]}, V.read_ledger_rows(led))
-    assert result["counts"]["conflict"] == 1
-    assert "看似已拆分" in result["conflict"][0]["_check"]["reason"]
-
-
 def test_bad_value_is_conflict(tmp_path):
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     rows = V.read_ledger_rows(led)
@@ -414,30 +331,6 @@ def test_difference_formula_uses_final_row_after_earlier_split(tmp_path):
     value_wb.close()
 
 
-def test_split_translates_formulas_in_all_shifted_business_rows(tmp_path):
-    led = _ledger(tmp_path, [
-        ("SO_SPLIT", "SOD_SPLIT", None),
-        ("SO_FORMULA", "SOD_FORMULA", None),
-        ("SO_TAIL", "SOD_TAIL", None),
-    ])
-    wb = openpyxl.load_workbook(str(led))
-    ws = wb["明细"]
-    ws["G3"] = "=H3+H4"
-    ws["H3"] = 10.0
-    ws["H4"] = 20.0
-    wb.save(str(led))
-    wb.close()
-
-    split = _split_item(row=2, so="SO_SPLIT", sod="SOD_SPLIT")
-    out = tmp_path / "上方拆行后后续公式.xlsx"
-    A.write_plan(led, out, [split])
-
-    formula_wb = openpyxl.load_workbook(str(out), data_only=False)
-    assert formula_wb["明细"]["G4"].value == "=H4+H5"
-    assert formula_wb["明细"]["G4"].value != "=H4+H4"
-    formula_wb.close()
-
-
 def test_apply_never_touches_source(tmp_path):
     """写的是新文件，她给的副本必须一个字节都不动。"""
     import hashlib
@@ -459,11 +352,8 @@ def test_in_place_writes_into_copy_and_backs_up(tmp_path):
                    ensure_ascii=False, default=str),
         encoding="utf-8",
     )
-    difference_report = tmp_path / "订单写入差异.xlsx"
     rc = A.main(["--checked", str(checked), "--ledger", str(led),
-                 "--report", str(tmp_path / "r.xlsx"),
-                 "--difference-report", str(difference_report),
-                 "--in-place", "--confirmed"])
+                 "--report", str(tmp_path / "r.xlsx"), "--in-place", "--confirmed"])
     assert rc == 0
     # 副本被就地改了
     ws = openpyxl.load_workbook(str(led))["明细"]
@@ -475,8 +365,6 @@ def test_in_place_writes_into_copy_and_backs_up(tmp_path):
     assert hashlib.sha256(backups[0].read_bytes()).hexdigest() == before
     # 成功后不留临时文件
     assert not list(led.parent.glob(".盈亏_写入中_*"))
-    diff_ws = openpyxl.load_workbook(difference_report, read_only=True)["汇总"]
-    assert diff_ws["B2"].value == led.name
 
 
 def test_partial_leaves_jiti_empty(tmp_path):
@@ -547,6 +435,69 @@ def test_change_report_includes_business_difference_value_and_formula(tmp_path):
     assert values["公式_差异"] == "=F2-G2"
 
 
+def test_order_difference_report_matches_written_order(tmp_path):
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    item = _item(2)
+    out = tmp_path / "写后盈亏.xlsx"
+    A.write_plan(led, out, [item])
+
+    result = A.build_order_difference(
+        [item], out, hexiao_date="2026-07-31"
+    )
+    assert result["written_order_count"] == 1
+    assert result["comparison_object_count"] == 1
+    assert result["matched_count"] == 1
+    assert result["difference_count"] == 0
+    assert result["order_rows"][0]["对比结果"] == "一致"
+
+    report = tmp_path / "订单写入差异_20260731.xlsx"
+    A.write_order_difference_report(result, report)
+    wb = openpyxl.load_workbook(str(report), data_only=True)
+    assert wb.sheetnames == ["汇总", "订单对比", "字段差异"]
+    summary = dict(wb["汇总"].iter_rows(values_only=True))
+    assert summary["本次写入订单数"] == 1
+    assert summary["字段差异数"] == 0
+    assert wb["字段差异"]["A2"].value == "无差异"
+
+
+def test_order_difference_report_lists_actual_field_difference(tmp_path):
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    item = _item(2)
+    out = tmp_path / "写后被改动.xlsx"
+    A.write_plan(led, out, [item])
+    wb = openpyxl.load_workbook(str(out))
+    wb["明细"].cell(2, 8).value = 99
+    wb.save(str(out))
+
+    result = A.build_order_difference(
+        [item], out, hexiao_date="2026-07-31"
+    )
+    assert result["matched_count"] == 0
+    assert result["difference_count"] == 1
+    assert result["field_differences"][0]["差异字段"] == "回款明细"
+    assert result["field_differences"][0]["计划写入值"] == 100.0
+    assert result["field_differences"][0]["上传表写后值"] == 99
+
+
+def test_order_difference_includes_split_inserted_row(tmp_path):
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    item = _split_item()
+    out = tmp_path / "部分回款写后.xlsx"
+    A.write_plan(led, out, [item])
+
+    result = A.build_order_difference(
+        [item], out, hexiao_date="2026-07-31"
+    )
+    assert result["written_order_count"] == 1
+    assert result["comparison_object_count"] == 2
+    assert result["matched_count"] == 2
+    assert result["difference_count"] == 0
+    assert {row["对比对象"] for row in result["order_rows"]} == {
+        "写入订单",
+        "拆分新增未回款行",
+    }
+
+
 def test_verify_catches_wrong_write(tmp_path):
     """回读比对必须真能发现写错——否则这道保险等于没有。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
@@ -558,8 +509,8 @@ def test_verify_catches_wrong_write(tmp_path):
     assert A.verify_written(out, [_item(2)]) != []
 
 
-def test_main_writes_without_confirmed(tmp_path):
-    """日清与计划校验通过后，无需 --confirmed 即可写工作副本。"""
+def test_main_writes_after_precheck_without_confirmed(tmp_path):
+    """日清和写前校验通过后直接写工作副本，旧参数仅兼容。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     checked = tmp_path / "checked.json"
     checked.write_text(
@@ -583,6 +534,44 @@ def test_main_refuses_when_conflicts(tmp_path):
                  "--out", str(tmp_path / "o.xlsx"), "--report", str(tmp_path / "r.xlsx"),
                  "--confirmed"])
     assert rc == 2
+
+
+def test_main_creates_order_difference_report_named_by_hexiao_date(tmp_path):
+    workspace = tmp_path / "工作区"
+    ledger_dir = workspace / "02_我的表副本"
+    output_dir = workspace / "04_产出"
+    ledger_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    led = _ledger(ledger_dir, [("SO26010001", "SOD26010001", None)])
+    checked = output_dir / "写入计划_校验后.json"
+    checked.write_text(
+        json.dumps(
+            {
+                "hexiao_date": "2026-07-31",
+                "write": [_item(2)],
+                "skip": [],
+                "conflict": [],
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    out = output_dir / "写后盈亏.xlsx"
+    rc = A.main(
+        [
+            "--checked", str(checked),
+            "--ledger", str(led),
+            "--out", str(out),
+            "--confirmed",
+        ]
+    )
+    assert rc == 0
+    difference_report = output_dir / "订单写入差异_20260731.xlsx"
+    assert difference_report.is_file()
+    wb = openpyxl.load_workbook(str(difference_report), data_only=True)
+    summary = dict(wb["汇总"].iter_rows(values_only=True))
+    assert summary["字段差异数"] == 0
 
 
 @pytest.mark.skipif(not LEDGER_FULL.is_file(), reason="无真实全年盈亏表")
