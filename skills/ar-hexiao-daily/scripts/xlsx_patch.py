@@ -10,12 +10,11 @@
 做法（与 `xlsx` 技能的 unpack/pack 同思路，OOXML 外科手术）：
   1. 把 xlsx 当 zip 打开，只取出目标 sheet 的 XML
   2. 在 XML 里就地改那几个 `<c>` 单元格
-  3. 重新打包：**除该 sheet 与可重建的 calcChain 外，每个部件都按原始字节写回**
+  3. 重新打包：**除目标 sheet 与确实失效的 calcChain 外，每个部件都按原始字节写回**
 
-只要公式或行坐标发生变化，旧 `calcChain.xml` 就可能继续指向被覆盖或已下移的单元格。
-保留这种过期计算链会让 Excel 打开时进入“修复并删除公式”流程。因此写入时完整移除
-calcChain 部件、关系和 Content Type，并令 Excel 在打开时全量重建计算链；工作表公式本身
-和缓存值仍由本模块保留。
+只有插行、写入新公式或覆盖原公式时，旧 `calcChain.xml` 才会失效；普通常量回填保留
+现有计算链和计算属性。结构或公式变化时完整移除 calcChain 部件、关系和 Content Type，
+再由写后模块根据公式格和缓存值重建；工作表公式本身和缓存值仍由本模块保留。
 
 样式沿用：空格子没有样式时，从**同一列另一个有值的行**借样式索引，
 这样日期/金额显示格式跟她表里其余行一致，不会出现"一列里有的显示日期有的显示数字"。
@@ -57,6 +56,16 @@ class FormulaValue:
 
     formula: str
     cached: float
+
+
+@dataclass(frozen=True)
+class PatchResult:
+    """补丁影响摘要，供写后模块判断是否需要重建计算链。"""
+
+    changed_count: int
+    dirty_cells: Tuple[str, ...]
+    requires_full_rebuild: bool
+    calc_chain_preserved: bool
 
 
 def col_letter(idx1: int) -> str:
@@ -432,6 +441,34 @@ def _drop_calc_chain(payload: Dict[str, bytes]) -> None:
         payload[content_types_name] = content_xml.encode("utf-8")
 
 
+def _cell_has_formula(xml: str, ref: str) -> bool:
+    """目标格原来含公式时，常量覆盖也必须失效旧计算链。"""
+    match = re.search(_CELL_RE_TMPL.format(ref=re.escape(ref)), xml, re.S)
+    return bool(match and re.search(r"<f\b", match.group(0)))
+
+
+def _request_full_recalculation(payload: Dict[str, bytes]) -> None:
+    """结构/公式变化后的故障回退标记；正常交付前会在生成端完成重建并关闭。"""
+    workbook_name = "xl/workbook.xml"
+    if workbook_name not in payload:
+        return
+    wb_xml = payload[workbook_name].decode("utf-8", "replace")
+    attrs = 'calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1" calcId="0"'
+    if re.search(r"<calcPr\b[^>]*/>", wb_xml):
+        wb_xml = re.sub(r"<calcPr\b[^>]*/>", f"<calcPr {attrs}/>", wb_xml, count=1)
+    elif re.search(r"<calcPr\b[^>]*>.*?</calcPr>", wb_xml, flags=re.S):
+        wb_xml = re.sub(
+            r"<calcPr\b[^>]*>.*?</calcPr>",
+            f"<calcPr {attrs}/>",
+            wb_xml,
+            count=1,
+            flags=re.S,
+        )
+    else:
+        wb_xml = wb_xml.replace("</workbook>", f"<calcPr {attrs}/></workbook>")
+    payload[workbook_name] = wb_xml.encode("utf-8")
+
+
 def _demote_copied_shared_masters(row_xml: str) -> str:
     """复制到新行的 shared master 改成同组 follower，避免同一 si 出现两个主公式。"""
     def repl(m):
@@ -479,11 +516,13 @@ def patch_cells(
     sheet_name: str,
     edits: List[Tuple[int, int, object]],
     insertions: Optional[List[Tuple[int, Dict[int, object]]]] = None,
-) -> int:
+    *,
+    return_result: bool = False,
+):
     """
     edits = [(原始行号1基, 列号1基, 值)]。
     insertions = [(原始源行号, {列号1基: 新行覆盖值})]，表示在源行下复制一行。
-    返回改动格数 + 插入行数。
+    默认返回改动格数 + 插入行数；`return_result=True` 返回 PatchResult。
     src 不动；out 是新文件，除目标 sheet 外**每个部件按原始字节复制**。
     """
     src, out = Path(src), Path(out)
@@ -494,6 +533,14 @@ def patch_cells(
         infos = zin.infolist()
         payload = {i.filename: zin.read(i.filename) for i in infos}
         insertion_specs = list(insertions or [])
+        has_calc_chain = "xl/calcChain.xml" in payload
+        requires_full_rebuild = bool(insertion_specs) or not has_calc_chain
+        if not requires_full_rebuild:
+            for row, col, value in edits:
+                ref = f"{col_letter(int(col))}{int(row)}"
+                if isinstance(value, FormulaValue) or _cell_has_formula(xml, ref):
+                    requires_full_rebuild = True
+                    break
         source_rows = [int(x[0]) for x in insertion_specs]
         for source_row in sorted(source_rows, reverse=True):
             xml = _insert_row_copy(xml, source_row)
@@ -530,30 +577,26 @@ def patch_cells(
         for r, cells in sorted(by_row.items()):
             xml = _patch_row(xml, r, cells, date_style=date_style)
         _validate_shared_formula_integrity(xml)
-        _drop_calc_chain(payload)
-        workbook_name = "xl/workbook.xml"
-        if workbook_name in payload:
-            wb_xml = payload[workbook_name].decode("utf-8", "replace")
-            attrs = 'calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1" calcId="0"'
-            if re.search(r"<calcPr\b[^>]*/>", wb_xml):
-                wb_xml = re.sub(r"<calcPr\b[^>]*/>", f"<calcPr {attrs}/>", wb_xml, count=1)
-            elif re.search(r"<calcPr\b[^>]*>.*?</calcPr>", wb_xml, flags=re.S):
-                wb_xml = re.sub(
-                    r"<calcPr\b[^>]*>.*?</calcPr>",
-                    f"<calcPr {attrs}/>",
-                    wb_xml,
-                    count=1,
-                    flags=re.S,
-                )
-            else:
-                wb_xml = wb_xml.replace("</workbook>", f"<calcPr {attrs}/></workbook>")
-            payload[workbook_name] = wb_xml.encode("utf-8")
+        if requires_full_rebuild:
+            _drop_calc_chain(payload)
+            _request_full_recalculation(payload)
     payload[target] = xml.encode("utf-8")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zo:
         for i in infos:
             if i.filename in payload:
                 zo.writestr(i, payload[i.filename])
-    return sum(len(c) for c in by_row.values()) + len(insertion_specs)
+    changed_count = sum(len(c) for c in by_row.values()) + len(insertion_specs)
+    result = PatchResult(
+        changed_count=changed_count,
+        dirty_cells=tuple(
+            f"{col}{row}"
+            for row, cells in sorted(by_row.items())
+            for col in sorted(cells, key=_col_index)
+        ),
+        requires_full_rebuild=requires_full_rebuild,
+        calc_chain_preserved=bool(has_calc_chain and not requires_full_rebuild),
+    )
+    return result if return_result else changed_count
 
 
 def parts_diff(a: Path, b: Path) -> List[str]:

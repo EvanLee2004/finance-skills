@@ -288,14 +288,27 @@ def write_flow_items(
         # 多 sheet：依次 patch，中间用 tmp 链
         current = src
         tmps: List[Path] = []
+        patch_results = {}
         try:
             for sheet_name, edits in all_edits_by_sheet.items():
                 tmp = src.with_name(f".{src.stem}_flow_{sheet_name}_{today}{src.suffix}")
-                xlsx_patch.patch_cells(current, tmp, sheet_name, edits)
+                patch_results[sheet_name] = xlsx_patch.patch_cells(
+                    current,
+                    tmp,
+                    sheet_name,
+                    edits,
+                    return_result=True,
+                )
                 if current != src and current in tmps:
                     pass
                 tmps.append(tmp)
                 current = tmp
+            import workbook_finalize
+
+            finalized = workbook_finalize.finalize_workbook(
+                current,
+                patch_results,
+            )
             # 回读校验（本文件局部问题）
             local_problems: List[str] = []
             wb2 = openpyxl.load_workbook(str(current), read_only=True, data_only=True)
@@ -357,12 +370,18 @@ def write_flow_items(
             else:
                 if in_place:
                     shutil.copy2(current, src)
-                    print(f"流转已就地写入 {n_ok} 笔 → {src}（备份 {backup}）")
+                    print(
+                        f"流转已就地写入 {n_ok} 笔 → {src}（备份 {backup}；"
+                        f"计算链处理={finalized.mode}）"
+                    )
                 else:
                     out = workspace / "04_产出" / f"到账流转_已回填_{src.stem}_{today[:8]}.xlsx"
                     out.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(current, out)
-                    print(f"流转已写入 {n_ok} 笔 → {out}（源未动 {src}；备份 {backup}）")
+                    print(
+                        f"流转已写入 {n_ok} 笔 → {out}（源未动 {src}；"
+                        f"备份 {backup}；计算链处理={finalized.mode}）"
+                    )
                 for t in tmps:
                     t.unlink(missing_ok=True)
         except Exception as e:

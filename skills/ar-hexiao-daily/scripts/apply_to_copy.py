@@ -88,7 +88,13 @@ def _prepare_split_payment_chains(items: List[dict]) -> None:
             member["_split_chain_primary"] = index == 0
 
 
-def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
+def write_plan(
+    src: Path,
+    out: Path,
+    items: List[dict],
+    *,
+    return_patch_result: bool = False,
+):
     """
     把 items 的五列写进 out（out 是 src 的无损副本）。返回变更明细。
 
@@ -327,13 +333,45 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
                 "新增行号": applied_r + 1 if op.get("type") == "split_below" else "",
             }
         )
-    xlsx_patch.patch_cells(src, out, target_sheet, edits, insertions=insertions)
+    patch_result = xlsx_patch.patch_cells(
+        src,
+        out,
+        target_sheet,
+        edits,
+        insertions=insertions,
+        return_result=True,
+    )
 
     # 写完立刻自证没搞坏她的表：少一个部件都算失败
     lost = xlsx_patch.parts_diff(src, out)
     if lost:
         raise ValueError(f"写入后工作簿部件缺失（不该发生）：{lost[:5]}")
-    return changes
+    return (changes, patch_result) if return_patch_result else changes
+
+
+def _finalize_output(
+    path: Path,
+    patch_result,
+    portable_out: Path,
+    *,
+    baseline: Path,
+):
+    """补齐计算链；有历史外链时再派生独立便携副本。"""
+    import workbook_finalize
+    import xlsx_patch
+
+    finalized = workbook_finalize.finalize_workbook(
+        path,
+        {"明细": patch_result},
+    )
+    lost = xlsx_patch.parts_diff(baseline, path)
+    if lost:
+        raise ValueError(f"计算链处理后工作簿部件缺失：{lost[:5]}")
+    portable = None
+    if workbook_finalize.external_link_count(path):
+        audit = workbook_finalize.create_portable_copy(path, portable_out)
+        portable = (portable_out, audit)
+    return finalized, portable
 
 
 def precheck_before_write(plan: dict, items: List[dict], src: Path) -> List[str]:
@@ -847,8 +885,17 @@ def _apply_new_file(
     """默认模式：写一份新文件，她给的副本一个字节不动（最安全，头几次现场用这个并排验）。"""
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        changes = write_plan(src, out, writable)
-    except ValueError as e:
+        changes, patch_result = write_plan(
+            src, out, writable, return_patch_result=True
+        )
+        portable_out = __import__("workbook_finalize").portable_path_for(out)
+        finalized, portable = _finalize_output(
+            out, patch_result, portable_out, baseline=src
+        )
+    except (ValueError, RuntimeError) as e:
+        out.unlink(missing_ok=True)
+        if "portable_out" in locals():
+            portable_out.unlink(missing_ok=True)
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
@@ -860,6 +907,9 @@ def _apply_new_file(
         )
         write_order_difference_report(difference_result, difference_report)
     except Exception as e:
+        out.unlink(missing_ok=True)
+        if portable:
+            portable[0].unlink(missing_ok=True)
         print(
             f"ERROR: 订单写入差异表生成失败：{type(e).__name__}"
             "（她给的副本没有改动）",
@@ -870,6 +920,16 @@ def _apply_new_file(
     print(f"已写入 {len(changes)} 笔 → {out}")
     print(f"变更清单 → {report}")
     print(f"订单写入差异表 → {difference_report}")
+    print(
+        f"计算链处理 → {finalized.mode}；计算链="
+        f"{'已生成' if finalized.calc_chain_present else '无公式无需生成'}"
+    )
+    if portable:
+        portable_path, audit = portable
+        print(
+            f"便携副本 → {portable_path}（固化历史外链公式 "
+            f"{audit.frozen_external_formulas} 格；显示值差异 0）"
+        )
     print(f"基线未动（她给的副本）→ {src}")
     if problems:
         print("⚠ 写后回读比对不符：", file=sys.stderr)
@@ -905,14 +965,29 @@ def _apply_in_place(
 
     tmp = src.with_name(f".{src.stem}_写入中_{ts}{src.suffix}")
     try:
-        changes = write_plan(src, tmp, writable)
-    except ValueError as e:
+        changes, patch_result = write_plan(
+            src, tmp, writable, return_patch_result=True
+        )
+        import workbook_finalize
+
+        portable = workbook_finalize.portable_path_for(src)
+        portable_tmp = src.with_name(
+            f".{portable.stem}_生成中_{ts}{portable.suffix}"
+        )
+        finalized, portable_result = _finalize_output(
+            tmp, patch_result, portable_tmp, baseline=src
+        )
+    except (ValueError, RuntimeError) as e:
         tmp.unlink(missing_ok=True)
+        if "portable_tmp" in locals():
+            portable_tmp.unlink(missing_ok=True)
         print(f"ERROR: {e}\n（原副本没动，备份在 {backup}）", file=sys.stderr)
         return 2
 
     problems = verify_written(tmp, writable)
     if problems:
+        if "portable_tmp" in locals():
+            portable_tmp.unlink(missing_ok=True)
         print(
             "⚠ 写后回读比对不符——**没有改动你的副本**（写坏的只是临时文件）：",
             file=sys.stderr,
@@ -931,6 +1006,8 @@ def _apply_in_place(
         write_order_difference_report(difference_result, difference_report)
     except Exception as e:
         tmp.unlink(missing_ok=True)
+        if "portable_tmp" in locals():
+            portable_tmp.unlink(missing_ok=True)
         print(
             f"ERROR: 订单写入差异表生成失败：{type(e).__name__}"
             f"（原副本没动，备份在 {backup}）",
@@ -938,22 +1015,48 @@ def _apply_in_place(
         )
         return 2
 
+    portable_backup = None
     try:
+        if portable_result:
+            if portable.exists():
+                portable_backup = portable.with_name(
+                    f".{portable.stem}_替换前_{ts}{portable.suffix}"
+                )
+                shutil.copy2(portable, portable_backup)
+            portable_tmp.replace(portable)
         tmp.replace(src)  # 要么整份换成新的，要么完全没换，不会写一半
     except OSError as e:
         difference_report.unlink(missing_ok=True)
+        portable_tmp.unlink(missing_ok=True)
+        if portable_result:
+            if portable_backup and portable_backup.exists():
+                portable_backup.replace(portable)
+            else:
+                portable.unlink(missing_ok=True)
         print(
             f"ERROR: 无法原子替换盈亏副本：{type(e).__name__}"
             f"（原副本没动，备份在 {backup}）",
             file=sys.stderr,
         )
         return 2
+    if portable_backup:
+        portable_backup.unlink(missing_ok=True)
     write_change_report(changes, report)
     _resnapshot_sources(src)
     print(f"已就地回填 {len(changes)} 笔 → {src}")
     print(f"写前备份 → {backup}")
     print(f"变更清单 → {report}")
     print(f"订单写入差异表 → {difference_report}")
+    print(
+        f"计算链处理 → {finalized.mode}；计算链="
+        f"{'已生成' if finalized.calc_chain_present else '无公式无需生成'}"
+    )
+    if portable_result:
+        _portable_path, audit = portable, portable_result[1]
+        print(
+            f"便携副本 → {_portable_path}（固化历史外链公式 "
+            f"{audit.frozen_external_formulas} 格；显示值差异 0）"
+        )
     print("写后回读逐格比对：全部一致 ✓")
     return 0
 

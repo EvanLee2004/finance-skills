@@ -470,6 +470,161 @@ def test_itemized_cumulative_rerun_skips_materialized_partial_slice():
     assert result["five_cols"]["回款明细"] == 50.0
 
 
+def test_fallback_history_is_added_when_later_parent_has_itemized_writeoff():
+    """SO26070160 类：前一父回款兜底已写，后续逐 SO 明细必须续加到同一累计。"""
+    fallback_state = {
+        "version": FAL.VERSION,
+        "parents": {
+            "AR_FALLBACK": {
+                "ar": "AR_FALLBACK",
+                "hexiao_date": "2026-07-13",
+                "basis": "local",
+                "parent_amount": 200.0,
+                "allocations": [{
+                    "so": "SO1",
+                    "allocated": 200.0,
+                    "allocated_orig": 200.0,
+                    "allocated_local": 200.0,
+                }],
+            }
+        },
+    }
+    payment = _payment(
+        ar="AR_ITEMIZED",
+        hexiao_date=dt.date(2026, 7, 16),
+        amount=94.6,
+        orders=[{"so": "SO1", "deliver": 300.0}],
+        writeoffs={"SO1": 94.6},
+        writeoffs_local={"SO1": 94.6},
+        cumulative_writeoffs={"SO1": 94.6},
+        cumulative_writeoffs_local={"SO1": 94.6},
+        sod_lines={"SO1": [{"sod": "SOD1", "deliver": 300.0}]},
+        _fallback_allocation_state=fallback_state,
+        _detailed_parent_ars=["AR_ITEMIZED"],
+    )
+
+    rec = C.expand_payment(payment, {})[0]
+    assert rec["cumulative_detail_local"] == 94.6
+    assert rec["cumulative_fallback_local"] == 200.0
+    assert rec["cumulative_received_local"] == 294.6
+
+    result = C.classify_one(
+        rec,
+        _ledger({
+            10: {
+                "so": "SO1", "sod": "SOD1", "yingshou": 200.0,
+                "jiti": None, "huikuan": 200.0, "jiezhang": "是",
+                "shoukuan_time": dt.date(2026, 7, 9), "shoukuan_way": "汇",
+            },
+            11: {
+                "so": "SO1", "sod": "SOD1", "yingshou": 100.0,
+                "jiti": None, "huikuan": None, "jiezhang": "否",
+            },
+        }),
+        {},
+        0.0,
+        2026,
+    )
+
+    assert result["bucket"] == "auto"
+    assert result["code"] == "E5"
+    assert result["code"] != "OK_ITEMIZED_CUMULATIVE_ALREADY_APPLIED"
+    assert result["row_operation"]["existing_received"] == 200.0
+    assert result["row_operation"]["current_received"] == 94.6
+    assert result["row_operation"]["cumulative_received"] == 294.6
+    assert result["row_operation"]["unpaid_receivable"] == 5.4
+
+
+def test_itemized_idempotence_does_not_borrow_different_payment_slice():
+    """表内累计较大但没有本次金额切片时，不得借用另一父回款行判幂等。"""
+    rec = {
+        "ar": "AR_ITEMIZED", "so": "SO1", "sod": "SOD1",
+        "amount_orig": 94.6, "amount_local": 94.6,
+        "deliver_local": 300.0, "cumulative_received_local": 94.6,
+        "itemized_cumulative_authoritative": True,
+        "currency": "人民币CNY", "status": "核销成功", "customer": "测试客户",
+        "hexiao_date": dt.date(2026, 7, 16),
+        "shoukuan_date": dt.date(2026, 7, 15),
+    }
+    ledger = _ledger({
+        20: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 200.0,
+            "jiti": None, "huikuan": 200.0, "jiezhang": "是",
+        },
+        21: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 100.0,
+            "jiti": None, "huikuan": None, "jiezhang": "否",
+        },
+    })
+
+    result = C.classify_one(rec, ledger, {}, 0.0, 2026)
+
+    assert result["code"] != "OK_ITEMIZED_CUMULATIVE_ALREADY_APPLIED"
+    assert result["bucket"] == "hold"
+
+
+def test_fallback_history_totals_ignore_entries_after_cutoff_date():
+    state = {
+        "version": FAL.VERSION,
+        "parents": {
+            "AR_OLD": {
+                "hexiao_date": "2026-07-13",
+                "allocations": [{
+                    "so": "SO1", "allocated_orig": 200.0, "allocated_local": 200.0,
+                }],
+            },
+            "AR_FUTURE": {
+                "hexiao_date": "2026-07-20",
+                "allocations": [{
+                    "so": "SO1", "allocated_orig": 50.0, "allocated_local": 50.0,
+                }],
+            },
+        },
+    }
+
+    original, local = FAL.history_totals(
+        state,
+        current_ar="AR_CURRENT",
+        as_of_date=dt.date(2026, 7, 16),
+    )
+
+    assert original == {"SO1": 200.0}
+    assert local == {"SO1": 200.0}
+
+
+def test_itemized_parent_excludes_its_own_old_fallback_allocation():
+    """同一父 AR 后来取得逐 SO 明细时，旧兜底只被替换一次，不得叠加双计。"""
+    state = {
+        "version": FAL.VERSION,
+        "parents": {
+            "AR_ITEMIZED": {
+                "hexiao_date": "2026-07-13",
+                "allocations": [{
+                    "so": "SO1", "allocated_orig": 200.0, "allocated_local": 200.0,
+                }],
+            },
+        },
+    }
+    payment = _payment(
+        ar="AR_ITEMIZED",
+        hexiao_date=dt.date(2026, 7, 16),
+        amount=94.6,
+        orders=[{"so": "SO1", "deliver": 300.0}],
+        writeoffs={"SO1": 94.6},
+        writeoffs_local={"SO1": 94.6},
+        cumulative_writeoffs={"SO1": 94.6},
+        cumulative_writeoffs_local={"SO1": 94.6},
+        sod_lines={"SO1": [{"sod": "SOD1", "deliver": 300.0}]},
+        _fallback_allocation_state=state,
+        _detailed_parent_ars=["AR_ITEMIZED"],
+    )
+
+    rec = C.expand_payment(payment, {})[0]
+
+    assert rec["cumulative_fallback_local"] is None
+    assert rec["cumulative_received_local"] == 94.6
+
+
 def test_tax_and_other_explicit_fees_are_included_in_gross_parent_amount():
     p = _payment(
         amount=95.0,

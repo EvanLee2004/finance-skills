@@ -379,6 +379,60 @@ def test_match_multi_same_amount_is_e8():
     assert how == "E8" and row is None and len(cands) == 2
 
 
+def test_match_multi_same_amount_uses_unique_sod_within_candidates():
+    """同 SO 同金额时，实收金额列已有唯一 SOD 就应安全消歧。"""
+    led = _led({
+        1: {"so": "SO1", "sod": "SOD1", "yingshou": 18.7},
+        2: {"so": "SO1", "sod": "SOD2", "yingshou": 18.7},
+    })
+    assert led.match("SO1", "SOD1", 18.7) == (1, "SO+应收金额+SOD", [1, 2])
+    assert led.match("SO1", "SOD2", 18.7) == (2, "SO+应收金额+SOD", [1, 2])
+
+
+def test_match_multi_same_amount_does_not_use_sod_outside_amount_candidates():
+    """SOD 即使存在，也不能跨出当前金额候选集选另一行。"""
+    led = _led({
+        1: {"so": "SO1", "sod": "SOD1", "yingshou": 18.7},
+        2: {"so": "SO1", "sod": "SOD2", "yingshou": 18.7},
+        3: {"so": "SO1", "sod": "SOD3", "yingshou": 99.0},
+    })
+    row, how, cands = led.match("SO1", "SOD3", 18.7)
+    assert row is None and how == "E8" and cands == [1, 2]
+
+
+def test_match_multi_same_amount_duplicate_sod_uses_only_outstanding_row():
+    """同金额同 SOD 的拆分行只有一个未结清承接行时，沿用既有安全规则。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": 18.7, "jiezhang": "是",
+        },
+        2: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": None, "jiezhang": "否",
+        },
+    })
+    assert led.match("SO1", "SOD1", 18.7) == (
+        2, "SO+应收金额+SOD未结清行", [1, 2]
+    )
+
+
+def test_match_multi_same_amount_duplicate_sod_multiple_open_rows_stays_e8():
+    """同金额同 SOD 仍有多个未结清候选时必须继续挂起。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": None, "jiezhang": "否",
+        },
+        2: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": None, "jiezhang": "否",
+        },
+    })
+    row, how, cands = led.match("SO1", "SOD1", 18.7)
+    assert row is None and how == "E8" and cands == [1, 2]
+
+
 def test_positional_alignment_resolves_equal_amounts():
     """整段逐位对齐（SOD 降序 ↔ 行号升序）能严格消掉等额歧义。"""
     led = _led({
@@ -450,6 +504,21 @@ def _rec(so="SO26010001", sod="SOD26010001", amount=100.0, **kw):
     }
     r.update(kw)
     return r
+
+
+def test_classify_equal_amount_rows_use_existing_unique_sod():
+    """SO26060458 类：同额 SOD 已在实收金额列时应分别定位，不得误报 E8。"""
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0},
+        12: {"so": "SO1", "sod": "SOD3", "yingshou": 50.0},
+    })
+    first = C.classify_one(_rec("SO1", "SOD1", 100.0), led, {}, 0.0, 2026)
+    second = C.classify_one(_rec("SO1", "SOD2", 100.0), led, {}, 0.0, 2026)
+    third = C.classify_one(_rec("SO1", "SOD3", 50.0), led, {}, 0.0, 2026)
+    assert (first["bucket"], first["ledger_row_ref"]) == ("auto", 10)
+    assert (second["bucket"], second["ledger_row_ref"]) == ("auto", 11)
+    assert (third["bucket"], third["ledger_row_ref"]) == ("auto", 12)
 
 
 def test_auto_happy_path():

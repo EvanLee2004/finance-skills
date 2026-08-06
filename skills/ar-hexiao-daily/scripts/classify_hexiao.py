@@ -692,7 +692,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
     )
 
     # ⑤ 逻辑核销明细：同一核销记录NUM的跨快照物理重复已去除；
-    # 不同记录NUM按逐 SO 明细真相源全部保留。
+    # 不同记录NUM先保留，明显超核销时按父AR条件重复规则纠正或整笔挂账。
     for item in detail_rows:
         if item["ar"] not in by_ar:
             raise CoverageError(
@@ -737,7 +737,15 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
     for p in payments:
         p["sod_lines"] = sod_lines
         p["_duplicate_writeoff_audits"] = duplicate_audits
-        p["_detailed_parent_ars"] = sorted({row["ar"] for row in raw_detail_rows})
+        p["_detailed_parent_ars"] = sorted({
+            row["ar"]
+            for row in raw_detail_rows
+            if (
+                target_date is None
+                or row.get("date") is None
+                or row.get("date") <= target_date
+            )
+        })
     return payments
 
 
@@ -1310,6 +1318,36 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
     # 缺逐 SO 金额时，总到账（净到账+明确费用）按剩余未收从小到大依次承接。
     writeoffs = dict(p.get("writeoffs") or {})
     has_itemized_writeoff = bool(writeoffs)
+    detail_cumulative_orig = dict(p.get("cumulative_writeoffs") or {})
+    detail_cumulative_local = dict(p.get("cumulative_writeoffs_local") or {})
+    fallback_history_orig: Dict[str, float] = {}
+    fallback_history_local: Dict[str, float] = {}
+    effective_cumulative_orig = dict(detail_cumulative_orig)
+    effective_cumulative_local = dict(detail_cumulative_local)
+    if has_itemized_writeoff:
+        # 逐 SO 明细只覆盖它所在的父 AR，不能抹掉此前已经成功写表的无明细父回款。
+        # 两类来源统一进入截至当前核销日的 R；有逐 SO 明细的父 AR 从兜底台账排除，
+        # 避免同一父回款既按父金额、又按逐单明细重复累计。
+        fallback_history_orig, fallback_history_local = FAL.history_totals(
+            p.get("_fallback_allocation_state") or {"parents": {}},
+            current_ar=str(p.get("ar") or ""),
+            excluded_parent_ars=p.get("_detailed_parent_ars") or [],
+            as_of_date=p.get("hexiao_date"),
+        )
+        for so, amount in fallback_history_orig.items():
+            effective_cumulative_orig[so] = round(
+                float(effective_cumulative_orig.get(so) or 0.0) + float(amount), 2
+            )
+        for so, amount in fallback_history_local.items():
+            effective_cumulative_local[so] = round(
+                float(effective_cumulative_local.get(so) or 0.0) + float(amount), 2
+            )
+        p["_itemized_cumulative_detail_orig_by_so"] = detail_cumulative_orig
+        p["_itemized_cumulative_detail_local_by_so"] = detail_cumulative_local
+        p["_itemized_cumulative_fallback_orig_by_so"] = fallback_history_orig
+        p["_itemized_cumulative_fallback_local_by_so"] = fallback_history_local
+        p["_effective_cumulative_orig_by_so"] = effective_cumulative_orig
+        p["_effective_cumulative_local_by_so"] = effective_cumulative_local
     fallback_local_by_so: Dict[str, float] = {}
     if writeoffs:
         H = writeoffs
@@ -1419,7 +1457,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     default_lines.append(one)
                 default_cumulative_local = None
                 default_cumulative_orig = (
-                    (p.get("cumulative_writeoffs") or {}).get(so)
+                    effective_cumulative_orig.get(so)
                     if has_itemized_writeoff
                     else (p.get("_fallback_cumulative_orig_by_so") or {}).get(so)
                 )
@@ -1427,9 +1465,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     if has_itemized_writeoff:
                         default_cumulative_local, _ = _writeoff_business_amount(
                             default_cumulative_orig,
-                            explicit_local=(
-                                (p.get("cumulative_writeoffs_local") or {}).get(so)
-                            ),
+                            explicit_local=effective_cumulative_local.get(so),
                             explicit_orig=default_cumulative_orig,
                         )
                     else:
@@ -1492,7 +1528,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 else:
                     deliver_local, _ = _order_delivery_local(deliver_orig, p, rates, order)
                 cumulative_orig = (
-                    (p.get("cumulative_writeoffs") or {}).get(so)
+                    effective_cumulative_orig.get(so)
                     if has_itemized_writeoff
                     else (p.get("_fallback_cumulative_orig_by_so") or {}).get(so)
                 )
@@ -1502,7 +1538,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                         cumulative_local, _ = _writeoff_business_amount(
                             cumulative_orig,
                             explicit_local=(
-                                (p.get("cumulative_writeoffs_local") or {}).get(so)
+                                effective_cumulative_local.get(so)
                                 if has_itemized_writeoff
                                 else (p.get("_fallback_cumulative_local_by_so") or {}).get(so)
                             ),
@@ -1533,6 +1569,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     "business_arrival_total": p.get("total_amount_orig"),
                     "deliver_local": deliver_local,
                     "cumulative_received_local": cumulative_local,
+                    "cumulative_detail_local": detail_cumulative_local.get(so),
+                    "cumulative_fallback_local": fallback_history_local.get(so),
                     "itemized_cumulative_authoritative": bool(
                         has_itemized_writeoff and cumulative_local is not None
                     ),
@@ -1575,7 +1613,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 )
             cumulative_local = None
             cumulative_orig = (
-                (p.get("cumulative_writeoffs") or {}).get(so)
+                effective_cumulative_orig.get(so)
                 if has_itemized_writeoff
                 else (p.get("_fallback_cumulative_orig_by_so") or {}).get(so)
             )
@@ -1584,7 +1622,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     cumulative_local, _ = _writeoff_business_amount(
                         cumulative_orig,
                         explicit_local=(
-                            (p.get("cumulative_writeoffs_local") or {}).get(so)
+                            effective_cumulative_local.get(so)
                             if has_itemized_writeoff
                             else (p.get("_fallback_cumulative_local_by_so") or {}).get(so)
                         ),
@@ -1621,6 +1659,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 "business_arrival_total": p.get("total_amount_orig"),
                 "deliver_local": deliver_local,
                 "cumulative_received_local": cumulative_local,
+                "cumulative_detail_local": detail_cumulative_local.get(so),
+                "cumulative_fallback_local": fallback_history_local.get(so),
                 "itemized_cumulative_authoritative": bool(
                     has_itemized_writeoff and cumulative_local is not None
                 ),
@@ -2000,6 +2040,24 @@ class LedgerIndex:
             if len(rows) == 1:
                 return rows[0], "SO+应收金额", rows
             if len(rows) > 1:
+                # 保留 SO+应收金额为主键；只有该键多命中时，才用已经写在盈亏
+                # “实收金额”列中的 SOD 在原金额候选集内做二次消歧。SOD 不在
+                # 原候选集时不得跨金额选行，避免历史错误 SOD 或金额变化写错行。
+                if sod:
+                    sod_rows = [
+                        r for r in rows
+                        if str((self.row_snapshot.get(r) or {}).get("sod") or "").strip()
+                        == str(sod).strip()
+                    ]
+                    if len(sod_rows) == 1:
+                        return sod_rows[0], "SO+应收金额+SOD", rows
+                    if len(sod_rows) > 1:
+                        outstanding = [
+                            r for r in sod_rows
+                            if self._is_outstanding(self.row_snapshot.get(r) or {})
+                        ]
+                        if len(outstanding) == 1:
+                            return outstanding[0], "SO+应收金额+SOD未结清行", rows
                 return None, "E8", rows
         if sod:
             rows = self.sod_index.get(sod, [])
@@ -2114,6 +2172,12 @@ def classify_one(
         "split_payment_source": {
             "amount_local": common.to_number(rec.get("amount_local")),
             "cumulative_local": common.to_number(rec.get("cumulative_received_local")),
+            "detail_cumulative_local": common.to_number(
+                rec.get("cumulative_detail_local")
+            ),
+            "fallback_cumulative_local": common.to_number(
+                rec.get("cumulative_fallback_local")
+            ),
             "delivery_local": common.to_number(rec.get("deliver_local")),
             "writeoff_sequence_key": rec.get("writeoff_sequence_key"),
         },
@@ -2372,17 +2436,22 @@ def classify_one(
             so, sod, current_received=local_f
         )
         if idempotent_row not in materialized_rows:
-            idempotent_row = next(
-                (
-                    one_row
-                    for one_row in reversed(materialized_rows)
-                    if common.to_number(
-                        (ledger.row_snapshot.get(one_row) or {}).get("huikuan")
-                    )
-                    is not None
-                ),
-                materialized_rows[-1] if materialized_rows else None,
-            )
+            if rec.get("itemized_cumulative_authoritative"):
+                # 逐 SO 新事件必须能按本次金额定位到已写切片，不能只因表内累计较大
+                # 就借用另一父回款的已收行判幂等；否则会静默漏掉后续不同父 AR。
+                idempotent_row = None
+            else:
+                idempotent_row = next(
+                    (
+                        one_row
+                        for one_row in reversed(materialized_rows)
+                        if common.to_number(
+                            (ledger.row_snapshot.get(one_row) or {}).get("huikuan")
+                        )
+                        is not None
+                    ),
+                    materialized_rows[-1] if materialized_rows else None,
+                )
         if idempotent_row is not None:
             idem = ledger.row_snapshot.get(idempotent_row) or {}
             result.update({
