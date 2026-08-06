@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+import amount_policy  # noqa: E402
 
 # 认表特征。**必须有流转表专有列**，否则盈亏「明细」会被误认成流转表
 # （它也有"单号/客户名称/项目下单日期/应收金额"，实测把 5000 行明细当成了流转行）。
@@ -52,7 +53,11 @@ def name_similar(a: str, b: str) -> bool:
     return na == nb or na in nb or nb in na
 
 
-def amounts_equal(a: Optional[float], b: Optional[float], tol: float = 0.005) -> bool:
+def amounts_equal(
+    a: Optional[float],
+    b: Optional[float],
+    tol: float = float(amount_policy.TECHNICAL_EPSILON),
+) -> bool:
     if a is None or b is None:
         return False
     return abs(float(a) - float(b)) <= tol
@@ -257,7 +262,7 @@ def flow_status_policy(status: str) -> dict:
     - 全部订单没检索到 → 「是否更新」**留空**，**不要公式**
     - 全部订单检索到并更新 → 填「是」；表若有惯用公式可套公式（本程序建议字面「是」）
     - 部分更新 → 填「部分」，**颜色标出**哪些 SO 更了 / 没更
-    日清展示建议；确认后安全子集可由 apply_flow 写入。
+    日清展示建议；日清与写前校验通过后安全子集可由 apply_flow 写入。
     """
     s = (status or "").strip()
     if s in ("", "（空白）", "空白", "空"):
@@ -355,7 +360,7 @@ def annotate_records(
             rec["flow_row_no"] = r0.get("row_no")
             rec["flow_order_existing"] = r0.get("order_cell") or ""
             # 命中那一行的身份（日期/付款方/金额）。写入时拿它再对一次：
-            # 从「出计划」到「她说确认」之间她可能往流转表里插过行 → 行号错位，
+            # 从「出计划」到实际写入之间流转表可能被插过行 → 行号错位，
             # 光有 row_no 是证明不了"还是这一行"的。
             rec["flow_identity"] = {
                 "date": r0.get("date").isoformat() if r0.get("date") else "",

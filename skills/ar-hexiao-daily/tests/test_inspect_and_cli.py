@@ -128,7 +128,7 @@ def test_skill_md_has_review_gate():
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "--confirmed" in text and "确认" in text
     assert "核销日清" in text
-    assert "禁止跳过回填审核单" in text or "禁止未确认就 apply" in text
+    assert "禁止跳过《核销日清》和写前校验直接 apply" in text
     assert "apply_all" in text or "apply_flow" in text
     # 不得再出现旧绝对禁令
     assert "禁止自动写到账流转表（只出建议）" not in text

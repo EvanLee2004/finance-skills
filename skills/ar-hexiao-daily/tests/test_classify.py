@@ -77,14 +77,127 @@ def test_subset_uses_cents_not_float():
 # 二、展开：一笔到账 → SOD 级 records
 # ══════════════════════════════════════════════════════════
 def test_no_writeoff_means_full_settle():
-    """核销明细 0 行 = 全额核销（明妹原话：没有这张就说明到账=交付）。"""
+    """无逐SO金额时，父回款足够则按交付额升序把全部订单核销。"""
     p = _pay(amount=5800.0, orders=[
         {"so": "SO1", "deliver": 1450.0}, {"so": "SO2", "deliver": 1740.0}, {"so": "SO3", "deliver": 2610.0},
     ])
     recs = C.expand_payment(p, {})
     assert len(recs) == 3
     assert sum(r["amount_orig"] for r in recs) == 5800.0
-    assert all("全额核销" in r["match_basis"] for r in recs)
+    assert all("父回款总到账按交付额从小到大" in r["match_basis"] for r in recs)
+
+
+def test_parent_fallback_stops_after_partial_smallest_order():
+    """父回款小于最小交付额时，只给最小订单做部分回款。"""
+    p = _pay(
+        amount=80.0,
+        orders=[
+            {"so": "SO_BIG", "deliver": 200.0},
+            {"so": "SO_SMALL", "deliver": 100.0},
+        ],
+        sod_lines={
+            "SO_BIG": [{"sod": "SOD_BIG", "deliver": 200.0}],
+            "SO_SMALL": [{"sod": "SOD_SMALL", "deliver": 100.0}],
+        },
+    )
+    recs = C.expand_payment(p, {})
+    assert [(r["so"], r["amount_orig"]) for r in recs] == [("SO_SMALL", 80.0)]
+    assert p["_parent_fallback_allocation"]["zero_sos"] == ["SO_BIG"]
+    coverage = C.source_coverage([p], recs)
+    assert coverage["expected_order_keys"] == 1
+    assert coverage["linked_order_keys"] == 2
+    assert coverage["zero_allocation_order_keys"] == ["AR_T|SO_BIG"]
+
+
+def test_parent_fallback_multiple_orders_are_waterfall_allocated():
+    """多个订单按交付额从小到大：先全额，余额不足的当前单部分，后续为零。"""
+    p = _pay(
+        amount=275.0,
+        orders=[
+            {"so": "SO_300", "deliver": 300.0},
+            {"so": "SO_050", "deliver": 50.0},
+            {"so": "SO_200", "deliver": 200.0},
+            {"so": "SO_100", "deliver": 100.0},
+        ],
+        sod_lines={
+            "SO_300": [{"sod": "SOD_300", "deliver": 300.0}],
+            "SO_050": [{"sod": "SOD_050", "deliver": 50.0}],
+            "SO_200": [{"sod": "SOD_200", "deliver": 200.0}],
+            "SO_100": [{"sod": "SOD_100", "deliver": 100.0}],
+        },
+    )
+    recs = C.expand_payment(p, {})
+    assert [(r["so"], r["amount_orig"]) for r in recs] == [
+        ("SO_050", 50.0),
+        ("SO_100", 100.0),
+        ("SO_200", 125.0),
+    ]
+    audit = p["_parent_fallback_allocation"]
+    assert audit["partial_sos"] == ["SO_200"]
+    assert audit["zero_sos"] == ["SO_300"]
+    assert audit["unallocated_parent_amount"] == 0.0
+
+
+def test_parent_fallback_equal_deliveries_keep_source_order():
+    """交付额相同时按智云关联顺序处理，避免重跑时漂移。"""
+    p = _pay(
+        amount=150.0,
+        orders=[
+            {"so": "SO_FIRST", "deliver": 100.0},
+            {"so": "SO_SECOND", "deliver": 100.0},
+        ],
+        sod_lines={
+            "SO_FIRST": [{"sod": "SOD_FIRST", "deliver": 100.0}],
+            "SO_SECOND": [{"sod": "SOD_SECOND", "deliver": 100.0}],
+        },
+    )
+    recs = C.expand_payment(p, {})
+    assert [(r["so"], r["amount_orig"]) for r in recs] == [
+        ("SO_FIRST", 100.0),
+        ("SO_SECOND", 50.0),
+    ]
+
+
+def test_parent_fallback_surplus_is_left_unallocated():
+    """父回款超过全部交付额时，订单全部核销，余额保留在父回款而不超写。"""
+    p = _pay(
+        amount=350.0,
+        orders=[
+            {"so": "SO1", "deliver": 100.0},
+            {"so": "SO2", "deliver": 200.0},
+        ],
+    )
+    recs = C.expand_payment(p, {})
+    assert {r["so"]: r["amount_orig"] for r in recs} == {
+        "SO1": 100.0,
+        "SO2": 200.0,
+    }
+    assert p["_parent_fallback_allocation"]["unallocated_parent_amount"] == 50.0
+
+
+def test_parent_fallback_skips_order_already_settled_in_ledger():
+    """顺序台账还没有历史时，也要先跳过盈亏表已结账且无未结账拆分行的订单。"""
+    p = _pay(
+        amount=50.0,
+        orders=[
+            {"so": "SO_CLOSED", "deliver": 100.0},
+            {"so": "SO_OPEN", "deliver": 200.0},
+        ],
+        sod_lines={
+            "SO_CLOSED": [{"sod": "SOD_CLOSED", "deliver": 100.0}],
+            "SO_OPEN": [{"sod": "SOD_OPEN", "deliver": 200.0}],
+        },
+        _ledger_settled_sos=["SO_CLOSED"],
+    )
+
+    recs = C.expand_payment(p, {})
+
+    assert [(r["so"], r["amount_orig"]) for r in recs] == [("SO_OPEN", 50.0)]
+    audit = p["_parent_fallback_allocation"]
+    assert audit["already_settled_sos"] == ["SO_CLOSED"]
+    closed = next(x for x in audit["allocations"] if x["so"] == "SO_CLOSED")
+    assert closed["status"] == "ledger_already_settled"
+    assert closed["ledger_settled_bootstrap"] is True
 
 
 def test_writeoff_overrides_deliver():
@@ -135,13 +248,15 @@ def test_no_sod_falls_back_to_so():
     assert len(recs) == 1 and recs[0]["sod"] == "" and recs[0]["amount_orig"] == 50.0
 
 
-def test_fenbi_always_hold_e1():
+def test_fenbi_without_detail_uses_parent_waterfall():
     p = _pay(huikuan_type="分笔回款")
     recs = C.expand_payment(p, {})
-    assert len(recs) == 1 and recs[0]["forced_code"] == "E1"
+    assert len(recs) == 1
+    assert recs[0].get("forced_code") is None
+    assert recs[0]["amount_orig"] == 100.0
 
 
-def test_fee_without_provable_scope_is_ignored():
+def test_fee_is_included_in_parent_total_without_itemized_writeoff():
     p = _pay(
         amount=97.0,
         fee=1.62,
@@ -149,12 +264,12 @@ def test_fee_without_provable_scope_is_ignored():
     )
     recs = C.expand_payment(p, {})
     assert recs[0].get("forced_code") is None
-    assert recs[0]["amount_orig"] == 100.0
-    assert recs[0]["fee"] == 0.0
+    assert recs[0]["amount_orig"] == 98.62
+    assert recs[0]["fee"] == 1.62
 
 
-def test_fee_does_not_reallocate_full_scope():
-    """没有核销子明细时按最新交付额全额核销，不按手续费比例重写。"""
+def test_fee_completes_parent_waterfall_amount():
+    """没有逐单金额时，手续费加回净到账形成总到账并参与顺序核销。"""
     p = _pay(
         amount=298.38,
         fee=1.62,
@@ -174,7 +289,7 @@ def test_fee_does_not_reallocate_full_scope():
     by_so = {r["so"]: r for r in recs}
     assert by_so["SO1"]["amount_orig"] == 100.0
     assert by_so["SO2"]["amount_orig"] == 200.0
-    assert all("手续费忽略" in r["match_basis"] for r in recs)
+    assert all("父回款总到账" in r["match_basis"] for r in recs)
 
 
 def test_no_orders_is_e7_not_silent_drop():
@@ -348,6 +463,58 @@ def test_auto_happy_path():
     assert "禁止用行号" in r["locate_hint"]
 
 
+def test_forced_hold_becomes_idempotent_auto_when_order_is_already_settled():
+    led = _led({
+        3: {
+            "so": "SO_CLOSED", "sod": "SOD_CLOSED", "yingshou": 100.0,
+            "jiti": 100.0, "huikuan": 100.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 21), "shoukuan_way": "汇",
+        },
+    })
+    rec = _rec(
+        "SO_CLOSED", "SOD_CLOSED", 100.0,
+        forced_code="E_SYSTEM_OVER_WRITEOFF_UNRESOLVED",
+        forced_reason="旧判定本应挂起",
+    )
+
+    result = C.classify_one(rec, led, {}, 0.0, 2026)
+
+    assert result["bucket"] == "auto"
+    assert result["code"] == "OK_ALREADY_SETTLED"
+    assert result["ledger_row_ref"] == 3
+
+
+def test_parent_writeoff_mismatch_cannot_be_hidden_by_settled_precheck():
+    led = _led({
+        3: {
+            "so": "SO_CLOSED", "sod": "SOD_CLOSED", "yingshou": 100.0,
+            "jiti": 100.0, "huikuan": 100.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 21), "shoukuan_way": "汇",
+        },
+    })
+    rec = _rec(
+        "SO_CLOSED", "SOD_CLOSED", 100.0,
+        forced_code="E_PARENT_WRITEOFF_MISMATCH",
+        forced_reason="整笔父回款金额守恒检查未通过",
+    )
+
+    result = C.classify_one(rec, led, {}, 0.0, 2026)
+
+    assert result["bucket"] == "exception"
+    assert result["code"] == "E_PARENT_WRITEOFF_MISMATCH"
+
+
+def test_settled_precheck_does_not_skip_when_open_split_row_exists():
+    led = _led({
+        3: {"so": "SO_PART", "sod": "SOD_PART", "yingshou": 60.0,
+            "huikuan": 60.0, "jiezhang": "是"},
+        4: {"so": "SO_PART", "sod": "SOD_PART", "yingshou": 40.0,
+            "huikuan": None, "jiezhang": "否"},
+    })
+
+    assert led.settled_without_open_row("SO_PART", "SOD_PART") is None
+
+
 def test_receipt_time_is_arrival_date_same_month():
     """她填的收款时间 = 到账日（同月）。7-17 到账、7-22 核销 → 填 7-17。"""
     led = _led({1: {"so": "SO1", "sod": "", "yingshou": 10.0}})
@@ -406,6 +573,42 @@ def test_settle_yes_but_jiti_empty_when_not_full():
     assert r["five_cols"]["计提"] is None
     assert r["row_operation"]["paid_receivable"] == 8.0
     assert r["row_operation"]["unpaid_receivable"] == 2.0
+
+
+@pytest.mark.parametrize("amount,delta", [(99.72, 0.28), (99.00, 1.00)])
+def test_one_yuan_business_tail_settles_without_creating_unpaid_row(amount, delta):
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    r = C.classify_one(
+        _rec(
+            "SO1", "SOD1", amount,
+            deliver_local=100.0,
+            cumulative_received_local=amount,
+        ),
+        led, {}, 0.0, 2026,
+    )
+
+    assert r["bucket"] == "auto"
+    assert "row_operation" not in r
+    assert r["five_cols"]["计提"] == 100.0
+    assert r["five_cols"]["回款明细"] == amount
+    assert r["settlement_tolerance_audit"]["exact_delta"] == delta
+    assert r["settlement_tolerance_audit"]["business_equal"] is True
+    assert "W_SETTLEMENT_TAIL_TOLERATED" in r["warning_codes"]
+
+
+def test_business_tail_above_one_yuan_still_creates_unpaid_row():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    r = C.classify_one(
+        _rec(
+            "SO1", "SOD1", 98.99,
+            deliver_local=100.0,
+            cumulative_received_local=98.99,
+        ),
+        led, {}, 0.0, 2026,
+    )
+
+    assert r["row_operation"]["type"] == "split_below"
+    assert r["row_operation"]["unpaid_receivable"] == 1.01
 
 
 def test_repeated_partial_only_counts_current_sod():
@@ -496,11 +699,253 @@ def test_no_ledger_never_auto():
 
 
 def test_same_row_hit_twice_both_held():
-    """两条计划命中同一行 → 都不自动写。"""
+    """不同 SOD 误命中同一行仍必须挂起。"""
     led = _led({1: {"so": "SO1", "sod": "", "yingshou": 100.0}})
     res = C.classify_records([_rec("SO1", "SODA", 100.0), _rec("SO1", "SODB", 100.0)], led, {})
     assert res["counts"]["auto"] == 0
     assert all(h["code"] == "E8" for h in res["hold"])
+
+
+def test_same_so_sod_distinct_ar_builds_sequential_split_chain():
+    """同一 SO/SOD 的不同父回款逐笔拆行，不能合并成一次回款。"""
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    first = _rec(
+        "SO1", "SOD1", 50.0, ar="AR1", deliver_local=100.0,
+        cumulative_received_local=50.0,
+        writeoff_sequence_key=["2026-07-22", "HX1", "1", "AR1", "SO1"],
+    )
+    second = _rec(
+        "SO1", "SOD1", 50.0, ar="AR2", deliver_local=100.0,
+        cumulative_received_local=100.0,
+        writeoff_sequence_key=["2026-07-22", "HX2", "2", "AR2", "SO1"],
+    )
+    res = C.classify_records([first, second], led, {})
+    assert res["counts"]["auto"] == 2
+    assert res["counts"]["hold"] == 0
+    assert {x["split_chain_group_id"] for x in res["auto"]} == {"split-payment-chain|1|SO1|SOD1"}
+    assert all("W_SPLIT_PAYMENT_SEQUENTIAL" in x["warning_codes"] for x in res["auto"])
+    op = res["auto"][0]["row_operation"]
+    assert op["type"] == "split_payment_chain"
+    assert [step["ar"] for step in op["steps"]] == ["AR1", "AR2"]
+    assert [step["receivable"] for step in op["steps"]] == [50.0, 50.0]
+    assert op["steps"][0]["five_cols"]["计提"] is None
+    assert op["steps"][1]["five_cols"]["计提"] == 100.0
+    assert op["final_unpaid"] is None
+
+
+def test_settled_snapshot_split_chain_uses_each_parent_payment_amount():
+    """已结清快照带回的是历史合计，拆分步骤仍必须保留各父回款本次额。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 7200.0,
+            "jiti": 22200.0, "huikuan": 7200.0, "jiezhang": "是",
+        },
+    })
+    group = []
+    for index, (ar, amount, cumulative) in enumerate(
+        (("AR1", 3000.0, 18000.0), ("AR2", 4200.0, 22200.0)), start=1
+    ):
+        group.append({
+            "ar": ar, "so": "SO1", "sod": "SOD1", "case_id": f"{ar}|SO1|SOD1",
+            "five_cols": {
+                "计提": 22200.0, "回款明细": 7200.0, "是否结账": "是",
+                "收款时间": "2026-07-15", "收款方式": "冲预收", "实收SOD": "SOD1",
+            },
+            "derived_cols": {},
+            "split_payment_source": {
+                "amount_local": amount, "cumulative_local": cumulative,
+                "delivery_local": 22200.0,
+                "writeoff_sequence_key": ["2026-07-15", f"HX{index}", str(index), ar, "SO1"],
+            },
+        })
+
+    operation, error = C._make_split_payment_chain(1, group, led, C.TOL)
+
+    assert error == ""
+    steps = operation["steps"]
+    assert [step["five_cols"]["回款明细"] for step in steps] == [3000.0, 4200.0]
+
+
+@pytest.mark.parametrize("tail", [0.12, 1.0])
+def test_settled_aggregate_kept_when_parent_tail_is_within_one_yuan(tail):
+    """结清尾差不超过1元时，即使来自独立父AR，也不把已有聚合行拆开。"""
+    delivery = 211464.0
+    led = _led({
+        1: {
+            "so": "SO26020257", "sod": "SOD26020257", "yingshou": delivery,
+            "jiti": delivery, "huikuan": delivery, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 15), "shoukuan_way": "汇",
+        },
+    })
+    records = [
+        _rec(
+            "SO26020257", "SOD26020257", tail, ar="AR_SMALL",
+            amount_local=tail, deliver_local=delivery, cumulative_received_local=tail,
+            writeoff_sequence_key=["2026-07-16", "HX1", "1", "AR_SMALL", "SO26020257"],
+        ),
+        _rec(
+            "SO26020257", "SOD26020257", delivery - tail, ar="AR_MAIN",
+            amount_local=delivery - tail, deliver_local=delivery, cumulative_received_local=delivery,
+            writeoff_sequence_key=["2026-07-16", "HX2", "2", "AR_MAIN", "SO26020257"],
+        ),
+    ]
+
+    result = C.classify_records(records, led, {})
+
+    assert result["counts"] == {"auto": 2, "hold": 0, "exception": 0, "total": 2}
+    operations = [item["row_operation"] for item in result["auto"]]
+    assert all(op["type"] == "preserve_aggregate_tail_tolerance" for op in operations)
+    assert all(op["tolerated_tail_amount"] == tail for op in operations)
+    assert all(item["five_cols"]["回款明细"] == delivery for item in result["auto"])
+    assert all("不为该尾差单独拆行" in item["reason"] for item in result["auto"])
+
+
+def test_parent_tail_above_one_yuan_still_builds_split_chain():
+    delivery = 211464.0
+    tail = 1.01
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": delivery,
+            "jiti": delivery, "huikuan": delivery, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 15), "shoukuan_way": "汇",
+        },
+    })
+    records = [
+        _rec(
+            "SO1", "SOD1", tail, ar="AR_SMALL", deliver_local=delivery,
+            amount_local=tail, cumulative_received_local=tail,
+            writeoff_sequence_key=["2026-07-16", "HX1", "1", "AR_SMALL", "SO1"],
+        ),
+        _rec(
+            "SO1", "SOD1", delivery - tail, ar="AR_MAIN", deliver_local=delivery,
+            amount_local=delivery - tail, cumulative_received_local=delivery,
+            writeoff_sequence_key=["2026-07-16", "HX2", "2", "AR_MAIN", "SO1"],
+        ),
+    ]
+
+    result = C.classify_records(records, led, {})
+
+    assert result["counts"]["auto"] == 2
+    assert result["auto"][0]["row_operation"]["type"] == "split_payment_chain"
+
+
+def test_new_split_chain_absorbs_one_yuan_tail_into_final_business_row():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    records = [
+        _rec(
+            "SO1", "SOD1", 0.12, ar="AR_SMALL", deliver_local=100.0,
+            amount_local=0.12, cumulative_received_local=0.12,
+            writeoff_sequence_key=["2026-07-16", "HX1", "1", "AR_SMALL", "SO1"],
+        ),
+        _rec(
+            "SO1", "SOD1", 99.88, ar="AR_MAIN", deliver_local=100.0,
+            amount_local=99.88, cumulative_received_local=100.0,
+            writeoff_sequence_key=["2026-07-16", "HX2", "2", "AR_MAIN", "SO1"],
+        ),
+    ]
+
+    result = C.classify_records(records, led, {})
+
+    assert result["counts"] == {"auto": 2, "hold": 0, "exception": 0, "total": 2}
+    absorbed = next(item for item in result["auto"] if item.get("tail_tolerance_absorbed"))
+    target = next(item for item in result["auto"] if item.get("row_operation"))
+    assert absorbed["five_cols"] == {}
+    assert target["row_operation"]["type"] == "settlement_tail_aggregate"
+    assert target["five_cols"]["回款明细"] == 100.0
+    audit = target["row_operation"]["tail_tolerance_audit"]
+    assert audit["absorbed_total"] == 0.12
+    assert audit["original_parent_amounts"] == [0.12, 99.88]
+
+
+def test_multiple_small_parents_are_not_absorbed_when_total_exceeds_one_yuan():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 1.2}})
+    records = [
+        _rec(
+            "SO1", "SOD1", 0.60, ar="AR1", deliver_local=1.2,
+            amount_local=0.60, cumulative_received_local=0.60,
+            writeoff_sequence_key=["2026-07-16", "HX1", "1", "AR1", "SO1"],
+        ),
+        _rec(
+            "SO1", "SOD1", 0.60, ar="AR2", deliver_local=1.2,
+            amount_local=0.60, cumulative_received_local=1.2,
+            writeoff_sequence_key=["2026-07-16", "HX2", "2", "AR2", "SO1"],
+        ),
+    ]
+
+    result = C.classify_records(records, led, {})
+
+    assert all(not item.get("tail_tolerance_absorbed") for item in result["auto"])
+    assert result["auto"][0]["row_operation"]["type"] == "split_payment_chain"
+
+
+def test_materialized_split_chain_is_found_when_both_parents_hit_chain_tail():
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 3000.0,
+            "jiti": None, "huikuan": 3000.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 15), "shoukuan_way": "冲预收",
+        },
+        2: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 4200.0,
+            "jiti": 22200.0, "huikuan": 4200.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 15), "shoukuan_way": "冲预收",
+        },
+    })
+    group = []
+    for index, (ar, amount, cumulative) in enumerate(
+        (("AR1", 3000.0, 18000.0), ("AR2", 4200.0, 22200.0)), start=1
+    ):
+        group.append({
+            "ar": ar, "so": "SO1", "sod": "SOD1", "case_id": f"{ar}|SO1|SOD1",
+            "five_cols": {
+                "计提": None, "回款明细": 3000.0, "是否结账": "是",
+                "收款时间": "2026-07-15", "收款方式": "冲预收", "实收SOD": "SOD1",
+            },
+            "derived_cols": {},
+            "split_payment_source": {
+                "amount_local": amount, "cumulative_local": cumulative,
+                "delivery_local": 22200.0,
+                "writeoff_sequence_key": ["2026-07-15", f"HX{index}", str(index), ar, "SO1"],
+            },
+        })
+
+    operation, error = C._make_split_payment_chain(2, group, led, C.TOL)
+
+    assert error == ""
+    assert operation["materialized_chain_start"] == 1
+    assert operation["steps"][1]["five_cols"]["计提"] == 22200.0
+
+
+def test_split_payment_chain_without_record_id_is_held():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    records = [
+        _rec("SO1", "SOD1", 40.0, ar="AR1", deliver_local=100.0,
+             cumulative_received_local=40.0),
+        _rec("SO1", "SOD1", 60.0, ar="AR2", deliver_local=100.0,
+             cumulative_received_local=100.0),
+    ]
+    res = C.classify_records(records, led, {})
+    assert res["counts"]["auto"] == 0
+    assert all(item["code"] == "E8" for item in res["hold"])
+    assert all("缺少核销记录NUM" in item["reason"] for item in res["hold"])
+
+
+def test_five_parent_payments_are_five_logical_steps_not_one_aggregate():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    records = [
+        _rec(
+            "SO1", "SOD1", 20.0, ar=f"AR{index}", deliver_local=100.0,
+            cumulative_received_local=20.0 * index,
+            writeoff_sequence_key=["2026-07-22", f"HX{index}", str(index), f"AR{index}", "SO1"],
+        )
+        for index in range(1, 6)
+    ]
+    result = C.classify_records(records, led, {})
+    assert result["counts"] == {"auto": 5, "hold": 0, "exception": 0, "total": 5}
+    operation = result["auto"][0]["row_operation"]
+    assert [step["ar"] for step in operation["steps"]] == ["AR1", "AR2", "AR3", "AR4", "AR5"]
+    assert [step["current_received"] for step in operation["steps"]] == [20.0] * 5
+    assert [step["five_cols"]["计提"] for step in operation["steps"]] == [None, None, None, None, 100.0]
 
 
 def test_case_id_is_sod_level():
@@ -509,8 +954,8 @@ def test_case_id_is_sod_level():
     assert r["case_id"] == "AR_T|SO1|SOD1"
 
 
-def test_fee_is_completely_removed_from_business_amount_logic():
-    """手续费既不能触发挂账，也不能通过白名单或参考表改变核销金额。"""
+def test_fee_logic_has_no_named_order_overrides():
+    """费用按父回款总额处理，但不得通过白名单或参考表点名改变核销金额。"""
     from pathlib import Path
 
     src = Path(C.__file__).read_text(encoding="utf-8")
@@ -525,7 +970,7 @@ def test_fee_is_completely_removed_from_business_amount_logic():
     assert "_fee_net_payment" not in src
     assert "_fee_net_writeoffs" not in src
     assert "_allocate_weighted_cents" not in src
-    assert "手续费字段完全不参与判定" in src
+    assert "net_arrival_plus_explicit_fees_taxes" in src
 
 
 # ══════════════════════════════════════════════════════════

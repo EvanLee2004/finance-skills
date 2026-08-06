@@ -6,6 +6,7 @@ import zipfile
 import openpyxl
 
 import classify_hexiao as C
+import fallback_allocation_ledger as FAL
 import xlsx_patch
 
 
@@ -193,8 +194,8 @@ def test_whole_payment_same_month_uses_arrival_date_and_hui():
     assert result["five_cols"]["收款方式"] == "汇"
 
 
-def test_fee_is_ignored_when_explicit_so_writeoffs_exist():
-    """手续费不参与判定；逐 SO 本次核销金额原样进入业务字段。"""
+def test_fee_is_audited_but_not_double_allocated_when_explicit_so_writeoffs_exist():
+    """有逐 SO 明细时金额原样使用；父回款费用只保留给总额/流转审计。"""
     p = _payment(
         amount=300.0,
         amount_local=None,
@@ -211,8 +212,8 @@ def test_fee_is_ignored_when_explicit_so_writeoffs_exist():
     assert {r["so"] for r in recs} == {"SO1", "SO2"}
     assert all(r.get("forced_code") is None for r in recs)
     assert round(sum(r["amount_orig"] for r in recs), 2) == 300.0
-    assert all(r["fee"] == 0.0 for r in recs)
-    assert all("手续费忽略" in r["match_basis"] for r in recs)
+    assert all(r["fee"] == 99.0 for r in recs)
+    assert all("不重复分配" in r["match_basis"] for r in recs)
 
 
 def test_fee_never_reduces_or_allocates_writeoff_details():
@@ -252,8 +253,8 @@ def test_fee_does_not_block_or_rewrite_historical_cumulative_writeoff():
     assert rec["cumulative_received_local"] == 80.0
 
 
-def test_no_writeoff_details_means_full_delivery_without_fee_allocation():
-    """智云没有逐 SO 子明细时按全额核销，手续费仍不参与金额重写。"""
+def test_no_writeoff_details_use_gross_parent_waterfall():
+    """没有逐 SO 子明细时，净到账加手续费作为父回款总额顺序核销。"""
     p = _payment(
         amount=300.0,
         fee=1.0,
@@ -266,8 +267,11 @@ def test_no_writeoff_details_means_full_delivery_without_fee_allocation():
     recs = C.expand_payment(p, {})
     assert {r["so"] for r in recs} == {"SO1", "SO2"}
     assert all(r.get("forced_code") is None for r in recs)
-    assert round(sum(r["amount_orig"] for r in recs), 2) == 301.0
-    assert all("手续费忽略" in r["match_basis"] for r in recs)
+    assert {r["so"]: r["amount_orig"] for r in recs} == {
+        "SO1": 100.0,
+        "SO2": 201.0,
+    }
+    assert all("父回款总到账" in r["match_basis"] for r in recs)
 
 
 def test_writeoff_without_local_amount_or_rate_uses_writeoff_directly():
@@ -289,8 +293,8 @@ def test_writeoff_without_local_amount_or_rate_uses_writeoff_directly():
     assert rec["cumulative_received_local"] == 90.0
 
 
-def test_one_cent_multi_so_tail_is_rounding_not_partial_payment():
-    """SO26030090/SO26040561 类：父回款与多 SO 合计差 0.01，不制造假部分回款。"""
+def test_one_cent_multi_so_shortfall_is_partial_on_next_order():
+    """父回款比多 SO 交付合计少 0.01 时，按顺序把 0.01 留在当前部分订单。"""
     p = _payment(
         amount=299.99,
         orders=[{"so": "SO1", "deliver": 100.0}, {"so": "SO2", "deliver": 200.0}],
@@ -302,11 +306,14 @@ def test_one_cent_multi_so_tail_is_rounding_not_partial_payment():
     recs = C.expand_payment(p, {})
     assert len(recs) == 2
     assert all(r.get("forced_code") is None for r in recs)
-    assert round(sum(r["amount_orig"] for r in recs), 2) == 300.0
+    assert {r["so"]: r["amount_orig"] for r in recs} == {
+        "SO1": 100.0,
+        "SO2": 199.99,
+    }
 
 
-def test_no_writeoff_details_follow_zhiyun_full_settlement_semantics():
-    """没有逐 SO 子明细即全额核销，不再拿父到账额制造假部分回款。"""
+def test_no_writeoff_details_allocate_smallest_then_partial_next():
+    """没有逐 SO 子明细时，先核销较小订单，再部分核销下一单。"""
     p = _payment(
         amount=250.0,
         orders=[{"so": "SO1", "deliver": 100.0}, {"so": "SO2", "deliver": 200.0}],
@@ -318,7 +325,164 @@ def test_no_writeoff_details_follow_zhiyun_full_settlement_semantics():
     recs = C.expand_payment(p, {})
     assert {r["so"] for r in recs} == {"SO1", "SO2"}
     assert all(r.get("forced_code") is None for r in recs)
-    assert round(sum(r["amount_local"] for r in recs), 2) == 300.0
+    assert {r["so"]: r["amount_local"] for r in recs} == {
+        "SO1": 100.0,
+        "SO2": 150.0,
+    }
+
+
+def test_next_parent_continues_from_first_outstanding_order(tmp_path):
+    """首笔结清 SO1、部分核销 SO2；下一父回款必须跳过 SO1，从 SO2 续核。"""
+    orders = [{"so": "SO1", "deliver": 100.0}, {"so": "SO2", "deliver": 200.0}]
+    sod_lines = {
+        "SO1": [{"sod": "SOD1", "deliver": 100.0}],
+        "SO2": [{"sod": "SOD2", "deliver": 200.0}],
+    }
+    first = _payment(amount=150.0, orders=orders, sod_lines=sod_lines)
+    first_recs = C.expand_payment(first, {})
+    assert {r["so"]: r["amount_orig"] for r in first_recs} == {
+        "SO1": 100.0,
+        "SO2": 50.0,
+    }
+    checked = {
+        "hexiao_date": "2026-07-27",
+        "parent_fallback_allocations": {first["ar"]: first["_parent_fallback_allocation"]},
+        "write": [{"ar": first["ar"], "so": "SO1"}, {"ar": first["ar"], "so": "SO2"}],
+        "skip": [],
+    }
+    FAL.commit(tmp_path, checked)
+
+    second = _payment(
+        amount=100.0,
+        ar="AR_NEXT",
+        orders=orders,
+        sod_lines=sod_lines,
+        _fallback_allocation_state=FAL.load(tmp_path),
+    )
+    second_recs = C.expand_payment(second, {})
+    assert [(r["so"], r["amount_orig"]) for r in second_recs] == [("SO2", 100.0)]
+    audit = second["_parent_fallback_allocation"]
+    assert audit["already_settled_sos"] == ["SO1"]
+    assert audit["allocations"][1]["historical_received"] == 50.0
+    assert second_recs[0]["cumulative_received_local"] == 150.0
+
+
+def test_same_parent_rerun_reuses_successful_allocation(tmp_path):
+    """同一父回款重跑必须复用原分配，不能把游标再次推进到后续订单。"""
+    orders = [{"so": "SO1", "deliver": 100.0}, {"so": "SO2", "deliver": 200.0}]
+    p = _payment(amount=150.0, orders=orders)
+    original = C.expand_payment(p, {})
+    FAL.commit(tmp_path, {
+        "hexiao_date": "2026-07-27",
+        "parent_fallback_allocations": {p["ar"]: p["_parent_fallback_allocation"]},
+        "write": [{"ar": p["ar"], "so": "SO1"}, {"ar": p["ar"], "so": "SO2"}],
+        "skip": [],
+    })
+    rerun = _payment(
+        amount=150.0,
+        orders=orders,
+        _fallback_allocation_state=FAL.load(tmp_path),
+    )
+    repeated = C.expand_payment(rerun, {})
+    assert [(r["so"], r["amount_orig"]) for r in repeated] == [
+        (r["so"], r["amount_orig"]) for r in original
+    ]
+    assert rerun["_parent_fallback_allocation"]["reused_successful_allocation"] is True
+
+
+def test_same_parent_partial_rerun_skips_materialized_split(tmp_path):
+    """同一父回款已拆行落表后重跑，不得再次写未结账承接行。"""
+    orders = [{"so": "SO1", "deliver": 200.0}]
+    sod_lines = {"SO1": [{"sod": "SOD1", "deliver": 200.0}]}
+    first = _payment(amount=150.0, orders=orders, sod_lines=sod_lines)
+    C.expand_payment(first, {})
+    FAL.commit(tmp_path, {
+        "hexiao_date": "2026-07-27",
+        "parent_fallback_allocations": {
+            first["ar"]: first["_parent_fallback_allocation"]
+        },
+        "write": [{"ar": first["ar"], "so": "SO1"}],
+        "skip": [],
+    })
+
+    rerun = _payment(
+        amount=150.0,
+        orders=orders,
+        sod_lines=sod_lines,
+        _fallback_allocation_state=FAL.load(tmp_path),
+    )
+    rec = C.expand_payment(rerun, {})[0]
+    ledger = _ledger({
+        10: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 100.0,
+            "jiti": None, "huikuan": 150.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 24), "shoukuan_way": "汇",
+        },
+        11: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 100.0,
+            "jiti": None, "huikuan": None, "jiezhang": "否",
+        },
+    })
+
+    result = C.classify_one(rec, ledger, {}, 0.0, 2026)
+
+    assert result["bucket"] == "auto"
+    assert result["code"] == "OK_FALLBACK_ALLOCATION_ALREADY_APPLIED"
+    assert result["ledger_row_ref"] == 10
+    assert "row_operation" not in result
+    assert result["five_cols"]["回款明细"] == 150.0
+
+
+def test_itemized_cumulative_rerun_skips_materialized_partial_slice():
+    """有逐单累计真相时，已落表的部分切片不得再次占用未结账行。"""
+    rec = {
+        "ar": "AR_ITEMIZED", "so": "SO1", "sod": "SOD1",
+        "amount_orig": 50.0, "amount_local": 50.0,
+        "deliver_local": 200.0, "cumulative_received_local": 150.0,
+        "itemized_cumulative_authoritative": True,
+        "currency": "人民币CNY", "status": "手动核销", "customer": "测试客户",
+        "hexiao_date": dt.date(2026, 8, 2),
+        "shoukuan_date": dt.date(2026, 7, 31),
+    }
+    ledger = _ledger({
+        20: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 100.0,
+            "jiti": None, "huikuan": 100.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 20), "shoukuan_way": "汇",
+        },
+        21: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 40.0,
+            "jiti": None, "huikuan": 50.0, "jiezhang": "是",
+            "shoukuan_time": dt.date(2026, 7, 31), "shoukuan_way": "汇",
+        },
+        22: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 60.0,
+            "jiti": None, "huikuan": None, "jiezhang": "否",
+        },
+    })
+
+    result = C.classify_one(rec, ledger, {}, 0.0, 2026)
+
+    assert result["bucket"] == "auto"
+    assert result["code"] == "OK_ITEMIZED_CUMULATIVE_ALREADY_APPLIED"
+    assert result["ledger_row_ref"] == 21
+    assert "row_operation" not in result
+    assert result["five_cols"]["回款明细"] == 50.0
+
+
+def test_tax_and_other_explicit_fees_are_included_in_gross_parent_amount():
+    p = _payment(
+        amount=95.0,
+        fee=1.0,
+        tax=2.0,
+        other_fee=2.0,
+        orders=[{"so": "SO1", "deliver": 100.0}],
+        sod_lines={"SO1": [{"sod": "SOD1", "deliver": 100.0}]},
+    )
+    rec = C.expand_payment(p, {})[0]
+    assert rec["amount_orig"] == 100.0
+    assert p["charge_amount_orig"] == 5.0
+    assert p["total_amount_orig"] == 100.0
 
 
 def test_xlsx_patch_forces_excel_formula_recalculation(tmp_path):

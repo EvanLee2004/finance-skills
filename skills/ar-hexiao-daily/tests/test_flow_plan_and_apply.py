@@ -162,13 +162,13 @@ def test_flow_plan_always_covers_all_results_without_named_so_filter():
     }
 
 
-def test_apply_flow_rejects_without_confirmed(tmp_path):
+def test_apply_flow_reports_missing_source(tmp_path):
     plan = {"items": [{"ar": "AR1", "verdict": "write", "file": "x.xlsx", "sheet": "明细", "row_no": 2,
                        "order_suggest": "SO1", "updated_suggest": "是"}], "counts": {"write": 1}}
     p = tmp_path / "plan.json"
     p.write_text(json.dumps(plan), encoding="utf-8")
     rc = AF.main(["--plan", str(p), "--workspace", str(tmp_path)])
-    assert rc == 2
+    assert rc == 1
 
 
 def test_apply_flow_strong_write_and_readback(tmp_path):
@@ -197,10 +197,11 @@ def test_apply_flow_strong_write_and_readback(tmp_path):
     plan_p = ws / "04_产出" / "流转写入计划_校验后.json"
     plan_p.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
 
-    # 无 confirmed 哈希不变
+    # --confirmed 仅为兼容参数；通过校验后直接写工作副本
     rc = AF.main(["--plan", str(plan_p), "--workspace", str(ws)])
-    assert rc == 2
+    assert rc == 0
     assert _sha(flow_path) == before
+    assert list((ws / "04_产出").glob("到账流转_已回填_*.xlsx"))
 
     rc = AF.main([
         "--plan", str(plan_p), "--workspace", str(ws),
@@ -253,7 +254,7 @@ def test_worklist_shows_flow_mk(tmp_path):
     text = "\n".join(
         str(r[0]) for r in wb["先看这里"].iter_rows(values_only=True) if r and r[0]
     )
-    assert "确认后将自动写" in text
+    assert "程序按这份日清统一写入" in text
     assert "须你手填" in text
     assert "流转表怎么填" in wb.sheetnames
     headers = [c for c in next(wb["流转表怎么填"].iter_rows(min_row=1, max_row=1, values_only=True))]
@@ -261,7 +262,7 @@ def test_worklist_shows_flow_mk(tmp_path):
     wb.close()
 
 
-def test_apply_all_rejects_without_confirmed(tmp_path):
+def test_apply_all_allows_empty_write_set_without_confirmed(tmp_path):
     led = tmp_path / "盈亏.xlsx"
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -275,7 +276,7 @@ def test_apply_all_rejects_without_confirmed(tmp_path):
     rc = AA.main([
         "--checked", str(checked), "--ledger", str(led), "--workspace", str(tmp_path),
     ])
-    assert rc == 2
+    assert rc == 0
 
 
 def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):

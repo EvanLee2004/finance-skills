@@ -122,6 +122,35 @@ def test_already_filled_same_is_skip(tmp_path):
     assert V.check_one(_item(2), rows)["verdict"] == "skip"
 
 
+def test_validate_treats_fully_settled_order_as_idempotent_even_if_old_plan_differs(tmp_path):
+    five = {"计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+            "收款时间": dt.date(2026, 7, 8), "收款方式": "汇"}
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", five)])
+    item = _item(2, 回款明细=90.0)
+
+    checked = V.validate({"auto": [item]}, V.read_ledger_rows(led))
+
+    assert checked["counts"] == {"write": 0, "skip": 1, "conflict": 0}
+    assert "已结账" in checked["skip"][0]["_check"]["reason"]
+
+
+def test_validate_does_not_skip_closed_row_when_open_split_row_remains(tmp_path):
+    closed = {"计提": None, "回款明细": 60.0, "是否结账": "是",
+              "收款时间": dt.date(2026, 7, 8), "收款方式": "汇"}
+    opened = {"计提": None, "回款明细": None, "是否结账": "否",
+              "收款时间": None, "收款方式": None}
+    led = _ledger(tmp_path, [
+        ("SO26010001", "SOD26010001", closed),
+        ("SO26010001", "SOD26010001", opened),
+    ])
+    item = _item(2, 计提=None, 回款明细=50.0)
+
+    checked = V.validate({"auto": [item]}, V.read_ledger_rows(led))
+
+    assert checked["counts"]["skip"] == 0
+    assert checked["counts"]["conflict"] == 1
+
+
 def test_same_five_with_missing_business_difference_is_writable(tmp_path):
     five = {"计提": 110.0, "回款明细": 110.0, "是否结账": "是",
             "收款时间": dt.date(2026, 7, 8), "收款方式": "汇"}
@@ -244,6 +273,262 @@ def test_two_plans_same_row_conflict(tmp_path):
     assert res["counts"]["write"] == 1 and res["counts"]["conflict"] == 1
 
 
+def _split_chain_items(final_unpaid=None, row=2):
+    first = _item(row, so="SO_SPLIT", sod="SOD_SPLIT", 计提=None, 回款明细=40.0)
+    second = _item(row, so="SO_SPLIT", sod="SOD_SPLIT", 计提=100.0, 回款明细=60.0)
+    first["ar"], first["case_id"] = "AR1", "AR1|SO_SPLIT|SOD_SPLIT"
+    second["ar"], second["case_id"] = "AR2", "AR2|SO_SPLIT|SOD_SPLIT"
+    steps = [
+        {
+            "index": 0, "case_id": first["case_id"], "ar": "AR1", "so": "SO_SPLIT", "sod": "SOD_SPLIT",
+            "writeoff_sequence_key": ["2026-07-22", "HX1", "1", "AR1", "SO_SPLIT"],
+            "current_received": 40.0, "cumulative_received": 40.0,
+            "receivable": 40.0, "remaining_after": 60.0, "settled": False,
+            "five_cols": dict(first["five_cols"]), "derived_cols": {},
+        },
+        {
+            "index": 1, "case_id": second["case_id"], "ar": "AR2", "so": "SO_SPLIT", "sod": "SOD_SPLIT",
+            "writeoff_sequence_key": ["2026-07-22", "HX2", "2", "AR2", "SO_SPLIT"],
+            "current_received": 60.0, "cumulative_received": 100.0,
+            "receivable": 60.0, "remaining_after": 0.0, "settled": True,
+            "five_cols": dict(second["five_cols"]), "derived_cols": {},
+        },
+    ]
+    op = {
+        "type": "split_payment_chain", "source_receivable": 100.0,
+        "initial_cumulative": 0.0, "latest_delivery": 100.0,
+        "steps": steps, "final_unpaid": final_unpaid,
+    }
+    for index, item in enumerate((first, second)):
+        item["row_operation"] = op
+        item["split_chain_group_id"] = f"split-payment-chain|{row}|SO_SPLIT|SOD_SPLIT"
+        item["split_chain_index"] = index
+        item["split_chain_count"] = 2
+    return [first, second]
+
+
+def test_same_row_split_chain_validates_and_writes_each_parent_separately(tmp_path):
+    led = _ledger(tmp_path, [("SO_SPLIT", "SOD_SPLIT", None)])
+    rows = V.read_ledger_rows(led)
+    checked = V.validate({"auto": _split_chain_items()}, rows)
+    assert checked["counts"] == {"write": 2, "skip": 0, "conflict": 0}
+
+    out = tmp_path / "分笔逐行.xlsx"
+    A.write_plan(led, out, checked["write"])
+    assert A.verify_written(out, checked["write"]) == []
+    ws = openpyxl.load_workbook(str(out), data_only=True)["明细"]
+    assert ws.cell(2, 8).value == 40.0
+    assert ws.cell(3, 8).value == 60.0
+    assert ws.cell(2, 7).value is None
+    assert ws.cell(3, 7).value == 100.0
+
+    rerun = V.validate({"auto": _split_chain_items()}, V.read_ledger_rows(out))
+    assert rerun["counts"] == {"write": 0, "skip": 2, "conflict": 0}
+
+
+def test_legacy_aggregate_row_can_migrate_to_split_chain(tmp_path):
+    """旧版把两笔父回款合在一行时，只在聚合基线完全未变的前提下允许拆开。"""
+    aggregate = {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-07-08", "收款方式": "汇",
+    }
+    ledger = _ledger(tmp_path, [("SO_SPLIT", "SOD_SPLIT", aggregate)])
+    items = _split_chain_items()
+    for item in items:
+        item["row_operation"]["source_five_cols"] = {
+            **aggregate, "实收SOD": "SOD_SPLIT",
+        }
+        item["row_operation"]["source_derived_cols"] = {"差异": None}
+
+    checked = V.validate({"auto": items}, V.read_ledger_rows(ledger))
+
+    assert checked["counts"] == {"write": 2, "skip": 0, "conflict": 0}
+    out = tmp_path / "旧聚合迁移为分笔链.xlsx"
+    A.write_plan(ledger, out, checked["write"])
+    assert A.verify_written(out, checked["write"]) == []
+    ws = openpyxl.load_workbook(str(out), data_only=True)["明细"]
+    assert [ws.cell(row, 8).value for row in (2, 3)] == [40.0, 60.0]
+
+
+def test_one_yuan_tail_aggregate_is_skip_and_snapshot_change_is_conflict():
+    five = {
+        "计提": 211464.0, "回款明细": 211464.0, "是否结账": "是",
+        "收款时间": "2026-07-15", "收款方式": "汇", "实收SOD": "SOD26020257",
+    }
+    operation = {
+        "type": "preserve_aggregate_tail_tolerance",
+        "source_receivable": 211464.0,
+        "initial_cumulative": 0.0,
+        "latest_delivery": 211464.0,
+        "final_cumulative": 211464.0,
+        "parent_amounts": [0.12, 211463.88],
+        "tolerated_tail_amount": 0.12,
+        "tolerance": 1.0,
+        "source_five_cols": dict(five),
+        "source_derived_cols": {"差异": None},
+    }
+    item = {
+        "so": "SO26020257", "sod": "SOD26020257", "ledger_row_ref": 2,
+        "five_cols": dict(five), "row_operation": operation,
+    }
+    row = {
+        "SO": "SO26020257", "SOD": "SOD26020257", "应收金额": 211464.0,
+        "计提": 211464.0, "回款明细": 211464.0, "差异": None,
+        "_差异列存在": True, "是否结账": "是", "收款时间": "2026-07-15",
+        "收款方式": "汇",
+    }
+
+    checked = V.validate({"auto": [item]}, {2: row})
+    assert checked["counts"] == {"write": 0, "skip": 1, "conflict": 0}
+    assert "不超过1元" in checked["skip"][0]["_check"]["reason"]
+
+    changed = {2: {**row, "回款明细": 211463.0}}
+    rejected = V.validate({"auto": [item]}, changed)
+    assert rejected["counts"] == {"write": 0, "skip": 0, "conflict": 1}
+    assert "被改动" in rejected["conflict"][0]["_check"]["reason"]
+
+
+def test_new_one_yuan_tail_aggregate_writes_one_row_and_skips_absorbed_parent(tmp_path):
+    led = _ledger(tmp_path, [("SO_TAIL", "SOD_TAIL", None)])
+    target_five = {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-07-16", "收款方式": "汇", "实收SOD": "SOD_TAIL",
+    }
+    operation = {
+        "type": "settlement_tail_aggregate",
+        "source_receivable": 100.0,
+        "initial_cumulative": 0.0,
+        "latest_delivery": 100.0,
+        "final_cumulative": 100.0,
+        "target_case_id": "AR_MAIN|SO_TAIL|SOD_TAIL",
+        "target_five_cols": dict(target_five),
+        "target_derived_cols": {},
+        "source_five_cols": {
+            "计提": None, "回款明细": None, "是否结账": None,
+            "收款时间": None, "收款方式": None, "实收SOD": "SOD_TAIL",
+        },
+        "source_derived_cols": {"差异": None},
+        "tail_tolerance_audit": {
+            "tolerance": 1.0,
+            "absorbed_total": 0.12,
+            "absorbed_payments": [{
+                "case_id": "AR_SMALL|SO_TAIL|SOD_TAIL",
+                "ar": "AR_SMALL", "amount": 0.12,
+                "writeoff_sequence_key": ["2026-07-16", "HX1"],
+            }],
+            "original_parent_amounts": [0.12, 99.88],
+            "target_case_id": "AR_MAIN|SO_TAIL|SOD_TAIL",
+        },
+    }
+    target = {
+        "case_id": "AR_MAIN|SO_TAIL|SOD_TAIL", "ar": "AR_MAIN",
+        "so": "SO_TAIL", "sod": "SOD_TAIL", "ledger_row_ref": 2,
+        "five_cols": dict(target_five), "row_operation": operation,
+    }
+    absorbed = {
+        "case_id": "AR_SMALL|SO_TAIL|SOD_TAIL", "ar": "AR_SMALL",
+        "so": "SO_TAIL", "sod": "SOD_TAIL", "ledger_row_ref": 2,
+        "five_cols": {},
+        "tail_tolerance_absorbed": {
+            "case_id": "AR_SMALL|SO_TAIL|SOD_TAIL", "ar": "AR_SMALL",
+            "amount": 0.12, "target_case_id": "AR_MAIN|SO_TAIL|SOD_TAIL",
+            "absorbed_total": 0.12, "tolerance": 1.0,
+        },
+    }
+
+    checked = V.validate({"auto": [absorbed, target]}, V.read_ledger_rows(led))
+
+    assert checked["counts"] == {"write": 1, "skip": 1, "conflict": 0}
+    out = tmp_path / "尾差合并.xlsx"
+    changes = A.write_plan(led, out, checked["write"])
+    assert A.verify_written(out, checked["write"]) == []
+    assert changes[0]["操作"] == "结清尾差合并写入"
+    ws = openpyxl.load_workbook(str(out), data_only=True)["明细"]
+    assert ws.max_row == 2
+    assert ws.cell(2, 8).value == 100.0
+
+
+def test_legacy_aggregate_row_changed_after_classify_is_rejected(tmp_path):
+    aggregate = {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-07-08", "收款方式": "汇",
+    }
+    ledger = _ledger(tmp_path, [("SO_SPLIT", "SOD_SPLIT", aggregate)])
+    items = _split_chain_items()
+    for item in items:
+        item["row_operation"]["source_five_cols"] = {
+            **aggregate, "实收SOD": "SOD_SPLIT",
+        }
+        item["row_operation"]["source_derived_cols"] = {"差异": None}
+    changed = openpyxl.load_workbook(str(ledger))
+    changed["明细"].cell(2, 8).value = 99.0
+    changed.save(str(ledger))
+
+    checked = V.validate({"auto": items}, V.read_ledger_rows(ledger))
+
+    assert checked["counts"] == {"write": 0, "skip": 0, "conflict": 2}
+
+def test_split_chain_rerun_finds_whole_chain_after_other_insert_shifts_source_row(tmp_path):
+    led = _ledger(tmp_path, [
+        ("SO_OTHER", "SOD_OTHER", None),
+        ("SO_SPLIT", "SOD_SPLIT", None),
+    ])
+    other = _split_item(row=2, so="SO_OTHER", sod="SOD_OTHER")
+    chain = _split_chain_items(row=3)
+    original_plan = {"auto": [other, *chain]}
+    checked = V.validate(original_plan, V.read_ledger_rows(led))
+    assert checked["counts"] == {"write": 3, "skip": 0, "conflict": 0}
+
+    out = tmp_path / "前序插行后的分笔链.xlsx"
+    A.write_plan(led, out, checked["write"])
+    rerun = V.validate(original_plan, V.read_ledger_rows(out))
+    assert rerun["counts"] == {"write": 0, "skip": 3, "conflict": 0}
+
+
+def test_split_chain_still_unpaid_keeps_each_parent_and_adds_one_open_row(tmp_path):
+    led = _ledger(tmp_path, [("SO_SPLIT", "SOD_SPLIT", None)])
+    items = _split_chain_items()
+    op = items[0]["row_operation"]
+    op["steps"][0].update({
+        "current_received": 30.0, "cumulative_received": 30.0,
+        "receivable": 30.0, "remaining_after": 70.0,
+    })
+    op["steps"][0]["five_cols"]["回款明细"] = 30.0
+    op["steps"][1].update({
+        "current_received": 20.0, "cumulative_received": 50.0,
+        "receivable": 20.0, "remaining_after": 50.0, "settled": False,
+    })
+    op["steps"][1]["five_cols"].update({"计提": None, "回款明细": 20.0})
+    op["final_unpaid"] = {
+        "receivable": 50.0,
+        "five_cols": {
+            "计提": None, "回款明细": None, "是否结账": "否",
+            "收款时间": None, "收款方式": None, "实收SOD": "SOD_SPLIT",
+        },
+    }
+    items[0]["five_cols"] = dict(op["steps"][0]["five_cols"])
+    items[1]["five_cols"] = dict(op["steps"][1]["five_cols"])
+
+    checked = V.validate({"auto": items}, V.read_ledger_rows(led))
+    assert checked["counts"] == {"write": 2, "skip": 0, "conflict": 0}
+    out = tmp_path / "分笔未结清.xlsx"
+    A.write_plan(led, out, checked["write"])
+    assert A.verify_written(out, checked["write"]) == []
+    ws = openpyxl.load_workbook(str(out), data_only=True)["明细"]
+    assert [ws.cell(row, 8).value for row in (2, 3, 4)] == [30.0, 20.0, None]
+    assert [ws.cell(row, 6).value for row in (2, 3, 4)] == [30.0, 20.0, 50.0]
+    assert [ws.cell(row, 7).value for row in (2, 3, 4)] == [None, None, None]
+    assert ws.cell(4, 9).value == "否"
+
+
+def test_split_chain_plan_tampering_is_rejected(tmp_path):
+    led = _ledger(tmp_path, [("SO_SPLIT", "SOD_SPLIT", None)])
+    items = _split_chain_items()
+    items[0]["row_operation"]["steps"][1]["cumulative_received"] = 99.0
+    checked = V.validate({"auto": items}, V.read_ledger_rows(led))
+    assert checked["counts"]["conflict"] == 2
+
+
 def test_split_plan_validates_receivable_invariants(tmp_path):
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     rows = V.read_ledger_rows(led)
@@ -279,6 +564,39 @@ def test_apply_writes_difference_as_formula_with_cached_value(tmp_path):
     formula_wb.close()
     value_wb = openpyxl.load_workbook(str(out), data_only=True)
     assert value_wb["明细"].cell(2, 13).value == -10.0
+    value_wb.close()
+
+
+def test_difference_formula_uses_all_existing_split_rows(tmp_path):
+    open_row = {"是否结账": "否"}
+    paid_row = {
+        "回款明细": 80.0, "是否结账": "是",
+        "收款时间": dt.date(2026, 7, 8), "收款方式": "汇",
+    }
+    ledger = _ledger(tmp_path, [
+        ("SO_SPLIT_DIFF", "SOD_SPLIT_DIFF", open_row),
+        ("SO_SPLIT_DIFF", "SOD_SPLIT_DIFF", paid_row),
+    ])
+    wb = openpyxl.load_workbook(str(ledger))
+    wb["明细"].cell(2, 6).value = 20.0
+    wb["明细"].cell(3, 6).value = 80.0
+    wb.save(str(ledger))
+    item = _item(
+        3, so="SO_SPLIT_DIFF", sod="SOD_SPLIT_DIFF",
+        计提=80.0, 回款明细=80.0,
+    )
+    item["derived_cols"] = {"差异": 20.0}
+    out = tmp_path / "拆分行合计差异公式.xlsx"
+
+    assert V.check_one(item, V.read_ledger_rows(ledger))["verdict"] == "write"
+    A.write_plan(ledger, out, [item])
+
+    assert A.verify_written(out, [item]) == []
+    formula_wb = openpyxl.load_workbook(str(out), data_only=False)
+    assert formula_wb["明细"].cell(3, 13).value == "=SUM(F2,F3)-G3"
+    formula_wb.close()
+    value_wb = openpyxl.load_workbook(str(out), data_only=True)
+    assert value_wb["明细"].cell(3, 13).value == 20.0
     value_wb.close()
 
 
@@ -457,6 +775,7 @@ def test_order_difference_report_matches_written_order(tmp_path):
     summary = dict(wb["汇总"].iter_rows(values_only=True))
     assert summary["本次写入订单数"] == 1
     assert summary["字段差异数"] == 0
+    assert summary["不参与差异判定"] == "收款方式、收款时间"
     assert wb["字段差异"]["A2"].value == "无差异"
 
 
@@ -477,6 +796,28 @@ def test_order_difference_report_lists_actual_field_difference(tmp_path):
     assert result["field_differences"][0]["差异字段"] == "回款明细"
     assert result["field_differences"][0]["计划写入值"] == 100.0
     assert result["field_differences"][0]["上传表写后值"] == 99
+
+
+def test_order_difference_ignores_payment_time_and_method(tmp_path):
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    item = _item(2)
+    out = tmp_path / "写后收款信息不同.xlsx"
+    A.write_plan(led, out, [item])
+    wb = openpyxl.load_workbook(str(out))
+    ws = wb["明细"]
+    ws.cell(2, 10).value = "2026-08-01"
+    ws.cell(2, 11).value = "冲预收"
+    wb.save(str(out))
+
+    result = A.build_order_difference(
+        [item], out, hexiao_date="2026-07-31"
+    )
+
+    assert result["matched_count"] == 1
+    assert result["difference_count"] == 0
+    assert result["field_differences"] == []
+    assert result["ignored_difference_fields"] == ["收款方式", "收款时间"]
+    assert result["order_rows"][0]["对比结果"] == "一致"
 
 
 def test_order_difference_includes_split_inserted_row(tmp_path):
@@ -509,8 +850,25 @@ def test_verify_catches_wrong_write(tmp_path):
     assert A.verify_written(out, [_item(2)]) != []
 
 
-def test_main_refuses_without_confirmed(tmp_path):
-    """人工审核闸：没 --confirmed 绝不能写（哪怕计划全绿）。"""
+def test_verify_still_checks_payment_time_and_method(tmp_path):
+    led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
+    out = tmp_path / "收款信息被改动.xlsx"
+    item = _item(2)
+    A.write_plan(led, out, [item])
+    wb = openpyxl.load_workbook(str(out))
+    ws = wb["明细"]
+    ws.cell(2, 10).value = "2026-08-01"
+    ws.cell(2, 11).value = "冲预收"
+    wb.save(str(out))
+
+    problems = A.verify_written(out, [item])
+
+    assert any("收款时间" in problem for problem in problems)
+    assert any("收款方式" in problem for problem in problems)
+
+
+def test_main_writes_after_precheck_without_confirmed(tmp_path):
+    """日清和写前校验通过后直接写工作副本，旧参数仅兼容。"""
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     checked = tmp_path / "checked.json"
     checked.write_text(
@@ -520,8 +878,8 @@ def test_main_refuses_without_confirmed(tmp_path):
     )
     rc = A.main(["--checked", str(checked), "--ledger", str(led),
                  "--out", str(tmp_path / "o.xlsx"), "--report", str(tmp_path / "r.xlsx")])
-    assert rc == 2
-    assert not (tmp_path / "o.xlsx").exists()
+    assert rc == 0
+    assert (tmp_path / "o.xlsx").exists()
 
 
 def test_main_refuses_when_conflicts(tmp_path):

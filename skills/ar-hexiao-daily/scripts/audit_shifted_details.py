@@ -57,7 +57,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"- {day}: 尚缺 {len(info['missing_order_keys'])}/{info['rows']} 个 AR/SO，"
             f"当前可从 {', '.join(info['sources'])} 还原"
         )
-    print("这些日期逐日重跑并生成增补《核销日清》；确认前禁止写表。")
+    print("这些日期逐日重跑并生成增补《核销日清》；日清与写前校验通过后直接写工作副本。")
     return 1
 
 

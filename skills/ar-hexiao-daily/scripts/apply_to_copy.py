@@ -29,13 +29,24 @@ from typing import Dict, List
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
-from validate_plan import DERIVED, FIVE, _norm, check_one, read_ledger_rows  # noqa: E402
+from validate_plan import (  # noqa: E402
+    DERIVED,
+    FIVE,
+    _norm,
+    check_one,
+    duplicate_audit_error,
+    read_ledger_rows,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+
+# 仅控制差异表判定范围。正常写入与 verify_written() 仍校验 FIVE 全字段。
+ORDER_DIFFERENCE_IGNORED_FIELDS = frozenset({"收款时间", "收款方式"})
 
 
 def locate_columns(ws, aliases) -> Dict[str, int]:
@@ -64,6 +75,19 @@ def locate_columns(ws, aliases) -> Dict[str, int]:
     return {k: v + 1 for k, v in cols.items()}  # openpyxl 是 1-based
 
 
+def _prepare_split_payment_chains(items: List[dict]) -> None:
+    """标记分笔回款链的物理主记录；每个父 AR 的业务行和值保持独立。"""
+    groups: Dict[str, List[dict]] = {}
+    for item in items:
+        gid = item.get("split_chain_group_id")
+        if gid:
+            groups.setdefault(str(gid), []).append(item)
+    for members in groups.values():
+        members.sort(key=lambda item: int(item.get("split_chain_index") or 0))
+        for index, member in enumerate(members):
+            member["_split_chain_primary"] = index == 0
+
+
 def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
     """
     把 items 的五列写进 out（out 是 src 的无损副本）。返回变更明细。
@@ -74,6 +98,8 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
     """
     import openpyxl
     import xlsx_patch
+
+    _prepare_split_payment_chains(items)
 
     # 先用只读模式拿列位置与改前值（不保存，纯读）
     wb = openpyxl.load_workbook(str(src), read_only=True, data_only=True)
@@ -92,22 +118,147 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
     changes: List[dict] = []
     edits: List = []
     insertions: List = []
-    source_rows = sorted(
-        int(it["ledger_row_ref"])
-        for it in items
-        if (it.get("row_operation") or {}).get("type") == "split_below"
-    )
+    source_rows: List[int] = []
+    for it in items:
+        op = it.get("row_operation") or {}
+        if op.get("type") == "split_below":
+            source_rows.append(int(it["ledger_row_ref"]))
+        elif op.get("type") == "split_payment_chain" and it.get("_split_chain_primary"):
+            insertion_count = max(len(op.get("steps") or []) - 1, 0)
+            if op.get("final_unpaid"):
+                insertion_count += 1
+            source_rows.extend([int(it["ledger_row_ref"])] * insertion_count)
+    source_rows.sort()
 
     def final_original_row(row: int) -> int:
         return int(row) + sum(1 for source in source_rows if source < int(row))
 
+    def difference_formula(receivable_rows: List[int], target_row: int) -> str:
+        """差异按同一 SO/SOD 的原始应收合计减最终计提，兼容既有拆分行。"""
+        receivable_col = xlsx_patch.col_letter(cols["应收"])
+        accrual_col = xlsx_patch.col_letter(cols["计提"])
+        refs = [f"{receivable_col}{int(row)}" for row in sorted(set(receivable_rows))]
+        basis = refs[0] if len(refs) == 1 else f"SUM({','.join(refs)})"
+        return f"={basis}-{accrual_col}{int(target_row)}"
+
+    def existing_business_rows(item: dict, target_row: int) -> List[int]:
+        so = str(item.get("so") or "").strip()
+        sod = str(item.get("sod") or "").strip()
+        rows = [
+            final_original_row(row_no)
+            for row_no, row in before_rows.items()
+            if (not so or row.get("SO") == so)
+            and (not sod or row.get("SOD") == sod)
+        ]
+        return rows or [int(target_row)]
+
+    # 链内每个父 AR 都有独立物理行：第 1 笔使用原行，后续笔使用连续复制行。
+    for it in items:
+        if (it.get("row_operation") or {}).get("type") == "split_payment_chain":
+            base = final_original_row(int(it["ledger_row_ref"]))
+            it["_applied_row_ref"] = base + int(it.get("split_chain_index") or 0)
+            if it.get("_split_chain_primary") and (it.get("row_operation") or {}).get("final_unpaid"):
+                it["_chain_unpaid_row_ref"] = base + len((it.get("row_operation") or {}).get("steps") or [])
+
+    def normalized_five(five: dict) -> Dict[str, object]:
+        values: Dict[str, object] = {}
+        for key in FIVE:
+            value = five.get(key)
+            if key == "收款时间" and value is not None:
+                value = common.norm_date(value) or value
+            elif key in ("计提", "回款明细") and value is not None:
+                value = float(value)
+            values[key] = value
+        return values
+
     for it in items:
         r = int(it["ledger_row_ref"])
-        applied_r = final_original_row(r)
+        applied_r = int(it.get("_applied_row_ref") or final_original_row(r))
         it["_applied_row_ref"] = applied_r
         five = it.get("five_cols") or {}
         derived = it.get("derived_cols") or {}
         before = before_rows.get(r, {})
+        op = it.get("row_operation") or {}
+        if op.get("type") == "split_payment_chain":
+            steps = op.get("steps") or []
+            step_index = int(it.get("split_chain_index") or 0)
+            step = steps[step_index]
+            chain_base = applied_r - step_index
+            chain_rows = list(range(
+                chain_base,
+                chain_base + len(steps) + (1 if op.get("final_unpaid") else 0),
+            ))
+            formula = (
+                difference_formula(chain_rows, applied_r)
+                if "差异" in derived else ""
+            )
+            if formula:
+                it["_difference_formula"] = formula
+            if it.get("_split_chain_primary"):
+                first_five = normalized_five(steps[0].get("five_cols") or {})
+                for key, value in first_five.items():
+                    edits.append((r, cols[key], value))
+                edits.append((r, cols["应收"], float(steps[0]["receivable"])))
+                first_sod = first_five.get("实收SOD") or it.get("sod")
+                if first_sod:
+                    edits.append((r, cols["SOD"], first_sod))
+                if "差异" in cols:
+                    first_derived = steps[0].get("derived_cols") or {}
+                    if "差异" in first_derived:
+                        formula = difference_formula(chain_rows, applied_r)
+                        edits.append((r, cols["差异"], xlsx_patch.FormulaValue(
+                            formula, float(first_derived["差异"])
+                        )))
+                    else:
+                        edits.append((r, cols["差异"], None))
+
+                for offset, next_step in enumerate(steps[1:], start=1):
+                    row_no = applied_r + offset
+                    next_five = normalized_five(next_step.get("five_cols") or {})
+                    overrides = {cols[key]: value for key, value in next_five.items()}
+                    overrides[cols["应收"]] = float(next_step["receivable"])
+                    next_sod = next_five.get("实收SOD") or next_step.get("sod")
+                    if next_sod:
+                        overrides[cols["SOD"]] = next_sod
+                    if "差异" in cols:
+                        next_derived = next_step.get("derived_cols") or {}
+                        if "差异" in next_derived:
+                            next_formula = difference_formula(chain_rows, row_no)
+                            overrides[cols["差异"]] = xlsx_patch.FormulaValue(
+                                next_formula, float(next_derived["差异"])
+                            )
+                        else:
+                            overrides[cols["差异"]] = None
+                    insertions.append((r, overrides))
+
+                final_unpaid = op.get("final_unpaid")
+                if final_unpaid:
+                    unpaid_five = normalized_five(final_unpaid.get("five_cols") or {})
+                    overrides = {cols[key]: value for key, value in unpaid_five.items()}
+                    overrides[cols["应收"]] = float(final_unpaid["receivable"])
+                    unpaid_sod = unpaid_five.get("实收SOD") or it.get("sod")
+                    if unpaid_sod:
+                        overrides[cols["SOD"]] = unpaid_sod
+                    if "差异" in cols:
+                        overrides[cols["差异"]] = None
+                    insertions.append((r, overrides))
+
+            changes.append(
+                {
+                    "案例ID": it.get("case_id"),
+                    "行号": applied_r,
+                    "SO": it.get("so"),
+                    "SOD": five.get("实收SOD") or it.get("sod"),
+                    "改前": {k: _norm(before.get(k)) for k in FIVE} if step_index == 0 else {k: "" for k in FIVE},
+                    "改后": {k: _norm(five.get(k)) for k in FIVE},
+                    "派生列_改前": {},
+                    "派生列_改后": {k: _norm(derived.get(k)) for k in DERIVED if k in derived},
+                    "派生列_公式": {"差异": formula if "差异" in derived else ""},
+                    "操作": f"分笔回款链第 {step_index + 1} 笔（独立父回款）",
+                    "新增行号": applied_r if step_index > 0 else "",
+                }
+            )
+            continue
         for k in FIVE:
             v = five.get(k)
             if v is None:
@@ -121,17 +272,16 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
             if "差异" not in cols:
                 raise ValueError("本次需要写差异，但盈亏『明细』找不到“差异”列")
             target_diff = float(derived["差异"])
-            formula = (
-                f"={xlsx_patch.col_letter(cols['应收'])}{applied_r}"
-                f"-{xlsx_patch.col_letter(cols['计提'])}{applied_r}"
+            formula = difference_formula(
+                existing_business_rows(it, applied_r), applied_r
             )
+            it["_difference_formula"] = formula
             edits.append(
                 (r, cols["差异"], xlsx_patch.FormulaValue(formula, target_diff))
             )
         sod = five.get("实收SOD") or it.get("sod")
         if sod:
             edits.append((r, cols["SOD"], sod))
-        op = it.get("row_operation") or {}
         if op.get("type") == "split_below":
             edits.append((r, cols["应收"], float(op["paid_receivable"])))
             # 部分回款阶段两侧计提与业务值差异都必须留空。旧版测试表可以没有
@@ -167,8 +317,14 @@ def write_plan(src: Path, out: Path, items: List[dict]) -> List[dict]:
                 "派生列_公式": {
                     "差异": formula if "差异" in derived else "",
                 },
-                "操作": "拆分并在下方新增未回款行" if op else "更新",
-                "新增行号": applied_r + 1 if op else "",
+                "操作": (
+                    "拆分并在下方新增未回款行"
+                    if op.get("type") == "split_below"
+                    else "结清尾差合并写入"
+                    if op.get("type") == "settlement_tail_aggregate"
+                    else "更新"
+                ),
+                "新增行号": applied_r + 1 if op.get("type") == "split_below" else "",
             }
         )
     xlsx_patch.patch_cells(src, out, target_sheet, edits, insertions=insertions)
@@ -184,9 +340,8 @@ def precheck_before_write(plan: dict, items: List[dict], src: Path) -> List[str]
     """
     **写入前再复核一次**（2026-07-25 立）。
 
-    为什么非有不可：`validate_plan` 复核的是"校验那一刻"的表，而中间隔着一次
-    **人工确认**——她看《核销日清》可能看几分钟，也可能隔天才回你一句「确认」。
-    而 `--in-place` 写的正是她天天在用的那份表：
+    为什么非有不可：`validate_plan` 复核的是"校验那一刻"的表，即使主流程随后立即写入，
+    工作副本仍可能被其它进程或人工同时修改。而 `--in-place` 写的正是她天天在用的那份表：
       · 月初贴交付会**插行**、部分核销会在上方**插行** → 行号当场全部错位
       · 错位之后按旧行号写 = 把这一笔的五列写到**别人那一单**上
       · 更糟的是我们还会写 SOD 列，等于把那行的单号也覆盖掉
@@ -199,6 +354,11 @@ def precheck_before_write(plan: dict, items: List[dict], src: Path) -> List[str]
     只跳过报错的那条，等于把剩下的照样写歪。
     """
     problems: List[str] = []
+
+    for it in items:
+        audit_problem = duplicate_audit_error(plan, it)
+        if audit_problem:
+            problems.append(audit_problem)
 
     recorded = plan.get("ledger_sha256")
     if recorded:
@@ -275,7 +435,7 @@ def verify_written(out: Path, items: List[dict]) -> List[str]:
                     f"第 {r} 行 {k}：期望 {_norm(derived[k])!r} 实际 {_norm(row.get(k))!r}"
                 )
             if k == "差异":
-                expected_formula = (
+                expected_formula = it.get("_difference_formula") or (
                     f"={xlsx_patch.col_letter(formula_cols['应收'])}{r}"
                     f"-{xlsx_patch.col_letter(formula_cols['计提'])}{r}"
                 )
@@ -312,6 +472,43 @@ def verify_written(out: Path, items: List[dict]) -> List[str]:
                     problems.append(
                         f"第 {inserted_r} 行 {key}：期望 {_norm(want)!r} 实际 {_norm(got)!r}"
                     )
+        elif op.get("type") == "split_payment_chain":
+            steps = op.get("steps") or []
+            step_index = int(it.get("split_chain_index") or 0)
+            if step_index >= len(steps):
+                problems.append(f"第 {r} 行分笔链序号越界")
+                continue
+            step = steps[step_index]
+            if _norm(row.get("应收金额")) != _norm(step.get("receivable")):
+                problems.append(
+                    f"第 {r} 行 应收金额：期望 {_norm(step.get('receivable'))!r} "
+                    f"实际 {_norm(row.get('应收金额'))!r}"
+                )
+            for key, want in (step.get("five_cols") or {}).items():
+                if key not in FIVE:
+                    continue
+                if _norm(row.get(key)) != _norm(want):
+                    problems.append(
+                        f"第 {r} 行 {key}：期望 {_norm(want)!r} 实际 {_norm(row.get(key))!r}"
+                    )
+            if it.get("_split_chain_primary") and op.get("final_unpaid"):
+                unpaid_r = int(it.get("_chain_unpaid_row_ref") or (r + len(steps)))
+                unpaid_row = rows.get(unpaid_r)
+                unpaid = op["final_unpaid"]
+                if unpaid_row is None:
+                    problems.append(f"第 {unpaid_r} 行应为分笔链最终未回款行，但写完读不到")
+                else:
+                    expected_unpaid = dict(unpaid.get("five_cols") or {})
+                    expected_unpaid["应收金额"] = unpaid.get("receivable")
+                    if "差异" in formula_cols:
+                        expected_unpaid["差异"] = None
+                    for key, want in expected_unpaid.items():
+                        actual_key = "SOD" if key == "实收SOD" else key
+                        if _norm(unpaid_row.get(actual_key)) != _norm(want):
+                            problems.append(
+                                f"第 {unpaid_r} 行 {key}：期望 {_norm(want)!r} "
+                                f"实际 {_norm(unpaid_row.get(actual_key))!r}"
+                            )
     formula_wb.close()
     return problems
 
@@ -372,6 +569,13 @@ def _comparison_objects(items: List[dict]) -> List[dict]:
             expected["应收金额"] = operation.get("paid_receivable")
             expected["计提"] = None
             expected["差异"] = None
+        elif operation.get("type") == "split_payment_chain":
+            step_index = int(item.get("split_chain_index") or 0)
+            step = (operation.get("steps") or [])[step_index]
+            expected.update({key: value for key, value in (step.get("five_cols") or {}).items() if key in FIVE})
+            expected["应收金额"] = step.get("receivable")
+            if not step.get("derived_cols"):
+                expected["差异"] = None
         objects.append(
             {
                 "item": item,
@@ -401,6 +605,28 @@ def _comparison_objects(items: List[dict]) -> List[dict]:
                     },
                 }
             )
+        elif (
+            operation.get("type") == "split_payment_chain"
+            and item.get("_split_chain_primary")
+            and operation.get("final_unpaid")
+        ):
+            unpaid = operation["final_unpaid"]
+            unpaid_row = int(item.get("_chain_unpaid_row_ref") or (
+                applied_row + len(operation.get("steps") or [])
+            ))
+            unpaid_expected = {
+                "SO": item.get("so") or "",
+                "SOD": (unpaid.get("five_cols") or {}).get("实收SOD") or sod,
+                "应收金额": unpaid.get("receivable"),
+                **{key: value for key, value in (unpaid.get("five_cols") or {}).items() if key in FIVE},
+                "差异": None,
+            }
+            objects.append({
+                "item": item,
+                "object_type": "分笔链最终未回款行",
+                "planned_row": unpaid_row,
+                "expected": unpaid_expected,
+            })
     return objects
 
 
@@ -423,6 +649,7 @@ def build_order_difference(
     将本次实际写入订单与上传盈亏表的写后副本逐字段对比。
 
     只核对本批次实际写入的订单，不把上传表中的全部历史订单算作“多余订单”。
+    收款时间、收款方式只作为写入与回读字段，不参与差异判定。
     """
     rows = read_ledger_rows(ledger)
     order_rows: List[dict] = []
@@ -447,6 +674,8 @@ def build_order_difference(
             )
         else:
             for field, wanted in expected.items():
+                if field in ORDER_DIFFERENCE_IGNORED_FIELDS:
+                    continue
                 actual = actual_row.get(field)
                 if _norm(actual) != _norm(wanted):
                     row_differences.append(
@@ -504,6 +733,7 @@ def build_order_difference(
         "comparison_object_count": len(order_rows),
         "matched_count": sum(1 for row in order_rows if row["对比结果"] == "一致"),
         "difference_count": len(field_differences),
+        "ignored_difference_fields": sorted(ORDER_DIFFERENCE_IGNORED_FIELDS),
         "order_rows": order_rows,
         "field_differences": field_differences,
     }
@@ -524,6 +754,10 @@ def write_order_difference_report(result: dict, path: Path) -> None:
         ("对比对象数", result.get("comparison_object_count", 0)),
         ("一致对象数", result.get("matched_count", 0)),
         ("字段差异数", result.get("difference_count", 0)),
+        (
+            "不参与差异判定",
+            "、".join(result.get("ignored_difference_fields") or []),
+        ),
         (
             "结论",
             "写入订单与上传表写后数据全部一致"
@@ -563,10 +797,10 @@ def write_order_difference_report(result: dict, path: Path) -> None:
     success_fill = PatternFill("solid", fgColor="E6F4EA")
     difference_fill = PatternFill("solid", fgColor="FCE8E6")
     summary.sheet_view.showGridLines = False
-    summary["B7"].fill = (
+    summary["B8"].fill = (
         success_fill if not result.get("difference_count") else difference_fill
     )
-    summary["B7"].font = Font(bold=True)
+    summary["B8"].font = Font(bold=True)
     for ws in (orders, differences):
         ws.sheet_view.showGridLines = False
         for cell in ws[1]:
@@ -692,6 +926,8 @@ def _apply_in_place(
         difference_result = build_order_difference(
             writable, tmp, hexiao_date=hexiao_date
         )
+        # 就地模式先在临时文件验证，但交付报告必须显示最终业务副本名。
+        difference_result["ledger"] = str(src)
         write_order_difference_report(difference_result, difference_report)
     except Exception as e:
         tmp.unlink(missing_ok=True)
@@ -727,7 +963,7 @@ def _resnapshot_sources(ledger: Path) -> None:
     就地回填成功后重新打指纹。
 
     否则下一次 `verify_sources verify` 必然报「盈亏表被改动」——**那是我们自己
-    经她确认后合法写的**，却长得跟"程序偷偷改了她的表"一模一样。
+    经校验后合法写的**，却长得跟"程序偷偷改了她的表"一模一样。
     2026-07-23 opencode 实测就踩到：AI 照 SKILL 在 apply 后跑 verify，
     当场甩出一句吓人的「校验未通过」。新指纹＝新基线，之后再变才是真异常。
     """
@@ -744,7 +980,7 @@ def _resnapshot_sources(ledger: Path) -> None:
 
 
 def _mark_review_applied(checked_p: Path) -> None:
-    """写成功后把待确认标记改成已应用（若存在）。"""
+    """写成功后把旧版待确认标记改成已应用（若存在）。"""
     for folder in (checked_p.parent, checked_p.parent.parent / "04_产出"):
         stamp = folder / "回填审核_待确认.json"
         if stamp.is_file():
@@ -774,7 +1010,7 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--confirmed",
         action="store_true",
-        help="人工审核闸：明妹看过回填审核单并口头确认后才允许加此开关。无此开关拒绝写入。",
+        help="已废弃的兼容参数；现在校验与日清生成后可直接写入。",
     )
     args = ap.parse_args(argv)
 
@@ -783,18 +1019,6 @@ def main(argv=None) -> int:
         if not p.is_file():
             print(f"ERROR: 找不到{name} {p}", file=sys.stderr)
             return 2
-
-    # 硬闸：没人工确认绝不能写（明妹 7-23：回填前先 Excel 说明要回填啥）
-    if not args.confirmed:
-        print(
-            "ERROR: 缺人工确认，拒绝写入。\n"
-            "  1) 先跑 build_worklist.py 出《核销日清》给她看（含要填/跳过/冲突三态）\n"
-            "  2) 她说「确认 / OK / 可以写 / 按这个写」之后\n"
-            "  3) 再跑本命令并加上 --confirmed\n"
-            "  （头几次并排验收也不许跳过这一眼）",
-            file=sys.stderr,
-        )
-        return 2
 
     plan = json.loads(checked_p.read_text(encoding="utf-8"))
     writable = plan.get("write") or []
@@ -810,7 +1034,7 @@ def main(argv=None) -> int:
         print("没有可写的笔（可能都已经填过了）。什么都没改。")
         return 0
 
-    # ★ 写入前最后一道闸：她的表在「校验 → 确认」这段时间里变了没有
+    # ★ 写入前最后一道闸：她的表在「校验 → 写入」之间是否发生变化
     try:
         stale = precheck_before_write(plan, writable, src)
     except ValueError as e:

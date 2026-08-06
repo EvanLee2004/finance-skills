@@ -40,3 +40,15 @@ def test_insert_shared_formula_master_demotes_copied_master():
     assert '<c r="A2"><f t="shared" si="9"/>' in got
     assert len(re.findall(r'<f\b[^>]*si="9"', got)) == 4
 
+
+def test_repeated_insert_after_same_source_keeps_one_shared_master():
+    """同一源行连续插多条分笔业务行时，共享公式范围只扩展且主公式仍唯一。"""
+    xml = _sheet([
+        '<row r="1"><c r="A1"><f t="shared" ref="A1:A3" si="11">B1*2</f><v>2</v></c></row>',
+        '<row r="2"><c r="A2"><f t="shared" si="11"/><v>4</v></c></row>',
+        '<row r="3"><c r="A3"><f t="shared" si="11"/><v>6</v></c></row>',
+    ])
+    got = X._insert_row_copy(X._insert_row_copy(xml, 1), 1)
+    assert 'ref="A1:A5"' in got
+    assert len(re.findall(r'<f\b[^>]*ref="A1:A5"', got)) == 1
+    assert len(re.findall(r'<f\b[^>]*si="11"', got)) == 5

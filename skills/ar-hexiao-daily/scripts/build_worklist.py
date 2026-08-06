@@ -85,7 +85,11 @@ def _diff_text(five: dict, cur: dict, derived: dict) -> str:
 
 # 这些码的 reason 是**逐笔算出来的、自带操作指引**（插哪一行、候选 SOD 是哪几个…），
 # 比 config 里的通用建议有用得多 → 「怎么办」直接用 reason。
-SPECIFIC_CODES = {"E4", "E5", "E7", "E8", "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"}
+SPECIFIC_CODES = {
+    "E4", "E5", "E7", "E8",
+    "E_PARENT_WRITEOFF_MISMATCH",
+    "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED",
+}
 
 
 def _row(item: dict, status: str, codes: dict, action_override: str = "") -> List[Any]:
@@ -227,24 +231,24 @@ def build_workbook(
         ],
         [""],
         ["【盈亏明细】"],
-        [f"① 今天要填     {n.get('今天要填', 0):>4} 行  ← 确认后程序可写"],
+        [f"① 今天要填     {n.get('今天要填', 0):>4} 行  ← 校验通过后程序直接写"],
         [f"② 已填过·跳过  {n.get('已填过·跳过', 0):>4} 行  ← 不用管"],
         [f"③ 冲突·需你定  {n.get('冲突·需你定', 0):>4} 行  ← 你看一眼定个方向"],
         [f"④ 挂账待办     {n.get('挂账待办', 0):>4} 行  ← 今天填不了，看「怎么办」"],
         [f"⑤ 异常         {n.get('异常', 0):>4} 行  ← 数据不对劲，先别填"],
         [""],
         ["【到账流转】"],
-        [f"⑥ 确认后将自动写  {m_write:>4} 笔  ← 强三键唯一命中（单号+是否更新）"],
+        [f"⑥ 将自动写      {m_write:>4} 笔  ← 强三键唯一命中（单号+是否更新）"],
         [f"⑦ 须你手填      {m_hand:>4} 笔  ← 弱命中/对不上/多命中，见「流转表怎么填」"],
         [""],
         ["怎么用："],
         ["  1. 翻到《今日清单》，按「状态」列筛「今天要填」。"],
         ["  2. 一行一个单号。拿「怎么找到这行」去盈亏『明细』筛出那一行。"],
         ["  3. 照「应填_xxx」几列对照；冲突行看「差异」。"],
-        ["  4. 翻《流转表怎么填》：写入方式=自动 的确认后程序写；=手填 的你自己填。"],
-        ["  5. 都看完了跟我说「确认」，我再统一写：先盈亏明细，再流转可写笔。"],
+        ["  4. 翻《流转表怎么填》：写入方式=自动 的由程序直接写；=手填 的你自己填。"],
+        ["  5. 程序按这份日清统一写入：先盈亏明细，再流转可写笔。"],
         [""],
-        ["※ 这份只是清单，程序还没动你的任何表。"],
+        ["※ 生成这份清单时尚未写表；随后统一入口会先备份、再写入并逐格回读。"],
         ["※ 智云永远不写。"],
     ]
     for ln in lines:
@@ -312,7 +316,7 @@ def build_workbook(
                 pol.get("填法") or "", pol.get("公式策略") or "", pol.get("颜色标注") or "",
                 " ".join(s.get("待处理SO") or []),
                 s.get("flow_locate") or fp.get("flow_locate") or "",
-                fp.get("reason") or pol.get("人话") or ("确认后自动写" if mode == "自动" else "须手填"),
+                fp.get("reason") or pol.get("人话") or ("程序自动写" if mode == "自动" else "须手填"),
             ])
         wsum.freeze_panes = "A2"
 
@@ -391,7 +395,7 @@ def main(argv=None) -> int:
     print(f"核销日期：{common.date_cn(hexiao_date) if hexiao_date else '(未知·请核对取数)'}")
     print("《核销日清》已生成：" + " / ".join(f"{k} {v}" for k, v in tally.items()))
     print(
-        f"流转：确认后自动写 {fc.get('write', 0)} · 须手填 {fc.get('hand', 0)} · 跳过 {fc.get('skip', 0)}"
+        f"流转：自动写 {fc.get('write', 0)} · 须手填 {fc.get('hand', 0)} · 跳过 {fc.get('skip', 0)}"
     )
     print(f"结果: {out_path}")
 
