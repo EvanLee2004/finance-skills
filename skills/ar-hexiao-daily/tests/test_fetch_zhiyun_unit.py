@@ -47,6 +47,34 @@ def test_plain_option_and_relation():
     assert F._plain(None) == ""
 
 
+def test_settlement_relation_recovers_order_when_xiadan_is_empty():
+    controls = [
+        {"controlId": "order", "controlName": "结算订单"},
+        {"controlId": "written", "controlName": "订单已核销金额"},
+        {"controlId": "amount", "controlName": "交付额/原币"},
+        {"controlId": "currency", "controlName": "结算币种"},
+    ]
+    rows = [{
+        "order": '[{"name":"SO26000001"}]',
+        "written": "120.47",
+        "amount": "120.50",
+        "currency": "人民币CNY",
+    }]
+
+    got = F.extract_related_orders(rows, controls, F.REL_JIESUAN)
+
+    assert got == [{
+        "so": "SO26000001",
+        "written_off": "120.47",
+        "written_off_local": "",
+        "deliver": "120.50",
+        "rate": "",
+        "currency": "人民币CNY",
+        "name": "",
+        "source": "结算",
+    }]
+
+
 def test_no_credentials_in_source():
     src = Path(__file__).resolve().parents[1] / "scripts" / "fetch_zhiyun.py"
     text = src.read_text(encoding="utf-8")

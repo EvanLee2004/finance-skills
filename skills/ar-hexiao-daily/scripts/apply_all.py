@@ -34,6 +34,7 @@ def _record_done(args, *, ledger_written: bool, flow_written: bool) -> None:
         import json
 
         import batch_ledger
+        import fallback_allocation_ledger
 
         plan = json.loads(Path(args.checked).read_text(encoding="utf-8"))
         d = common.norm_date(plan.get("hexiao_date"))
@@ -43,13 +44,23 @@ def _record_done(args, *, ledger_written: bool, flow_written: bool) -> None:
                 file=sys.stderr,
             )
             return
+        allocation_path, allocation_added = fallback_allocation_ledger.commit(
+            Path(args.workspace), plan
+        )
         batch_ledger.record(
             Path(args.workspace), d, "applied",
             written={"盈亏": bool(ledger_written), "流转": bool(flow_written)},
         )
+        if plan.get("parent_fallback_allocations"):
+            print(
+                f"父回款顺序分配台账：新增 {allocation_added} 笔，已复核保存至 {allocation_path.name}"
+            )
         print(f"跑批台账：{common.date_cn(d)} 已标记「已写表·收工」")
     except Exception as e:
-        print(f"WARN: 跑批台账登记失败（不影响已写入的数据）：{type(e).__name__}", file=sys.stderr)
+        print(
+            f"WARN: 写后台账登记失败（不影响已写入的数据）：{type(e).__name__}",
+            file=sys.stderr,
+        )
 
 
 def _resnapshot_sources(workspace) -> None:

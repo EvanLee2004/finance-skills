@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+import amount_policy  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -134,7 +135,11 @@ def precheck_flow_identity(workspace: Path, items: List[dict]) -> List[str]:
                             problems.append(f"{it.get('ar')}: 第 {r} 行付款方变了（表被插过行？）")
                     if "金额" in cols and ident.get("amount") is not None:
                         now = common.to_number(cell("金额"))
-                        if now is None or abs(float(now) - float(ident["amount"])) > 0.005:
+                        if (
+                            now is None
+                            or abs(float(now) - float(ident["amount"]))
+                            > float(amount_policy.TECHNICAL_EPSILON)
+                        ):
                             problems.append(
                                 f"{it.get('ar')}: 第 {r} 行金额变了（表被插过行？）"
                             )

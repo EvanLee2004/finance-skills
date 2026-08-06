@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+import amount_policy  # noqa: E402
 
 # 认表特征。**必须有流转表专有列**，否则盈亏「明细」会被误认成流转表
 # （它也有"单号/客户名称/项目下单日期/应收金额"，实测把 5000 行明细当成了流转行）。
@@ -52,7 +53,11 @@ def name_similar(a: str, b: str) -> bool:
     return na == nb or na in nb or nb in na
 
 
-def amounts_equal(a: Optional[float], b: Optional[float], tol: float = 0.005) -> bool:
+def amounts_equal(
+    a: Optional[float],
+    b: Optional[float],
+    tol: float = float(amount_policy.TECHNICAL_EPSILON),
+) -> bool:
     if a is None or b is None:
         return False
     return abs(float(a) - float(b)) <= tol

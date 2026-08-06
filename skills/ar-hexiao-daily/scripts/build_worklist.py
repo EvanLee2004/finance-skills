@@ -85,7 +85,11 @@ def _diff_text(five: dict, cur: dict, derived: dict) -> str:
 
 # 这些码的 reason 是**逐笔算出来的、自带操作指引**（插哪一行、候选 SOD 是哪几个…），
 # 比 config 里的通用建议有用得多 → 「怎么办」直接用 reason。
-SPECIFIC_CODES = {"E4", "E5", "E7", "E8", "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"}
+SPECIFIC_CODES = {
+    "E4", "E5", "E7", "E8",
+    "E_PARENT_WRITEOFF_MISMATCH",
+    "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED",
+}
 
 
 def _row(item: dict, status: str, codes: dict, action_override: str = "") -> List[Any]:

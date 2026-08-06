@@ -495,8 +495,6 @@ def patch_cells(
         payload = {i.filename: zin.read(i.filename) for i in infos}
         insertion_specs = list(insertions or [])
         source_rows = [int(x[0]) for x in insertion_specs]
-        if len(source_rows) != len(set(source_rows)):
-            raise ValueError("同一原始行不能在一批计划里拆分两次")
         for source_row in sorted(source_rows, reverse=True):
             xml = _insert_row_copy(xml, source_row)
 
@@ -506,8 +504,12 @@ def patch_cells(
         by_row: Dict[int, Dict[str, object]] = {}
         for r, c, v in edits:
             by_row.setdefault(final_original_row(int(r)), {})[col_letter(c)] = v
+        insertion_occurrence: Dict[int, int] = {}
         for source_row, overrides in insertion_specs:
-            inserted_row = final_original_row(int(source_row)) + 1
+            source_row = int(source_row)
+            occurrence = insertion_occurrence.get(source_row, 0)
+            inserted_row = final_original_row(source_row) + 1 + occurrence
+            insertion_occurrence[source_row] = occurrence + 1
             for c, v in overrides.items():
                 by_row.setdefault(inserted_row, {})[col_letter(int(c))] = v
 

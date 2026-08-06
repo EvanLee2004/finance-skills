@@ -10,6 +10,7 @@
 
   回款记录（1 笔到账）
     ├─ 关联「下单」            → 这笔到账关联了哪几个 SO + 每个 SO 的交付额
+    │   └─ 下单为空时回查「结算」→ 从结算关联补找 SO，再继续取 SOD/交付额
     ├─ 关联「订单同币种核销明细信息」→ 逐 SO 的本次核销金额
     │                            **0 行 = 全额核销**（明妹原话：没有这张就说明到账=交付）
     └─ 由 SO 去「订单明细」表   → 每个 SO 下的 SOD + 逐 SOD 交付额
@@ -50,7 +51,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ── 常量（表 ID / 字段 ID 来自 2026-07-09/22/23 勘探，非密钥）────────────────
 BASE_DEFAULT = "http://192.168.10.167:18880"
 APP_ID = "6ff4fb2e-e68c-4ee9-83a0-836de8f72c11"
-EXPORT_SCHEMA_VERSION = "2026-07-31-writeoff-record-identity-v1"
+EXPORT_SCHEMA_VERSION = "2026-08-05-order-written-off-fallback-v2"
 CREDENTIAL_SERVICE = "codex.ar-hexiao-daily.zhiyun"
 
 WS_HUIKUAN = "6555d2b1f9460e517040ba6c"  # 回款记录（唯一入口）
@@ -72,11 +73,16 @@ F_HK = {
 
 # 关联字段按**中文名**取（controlId 会随配置变，名字不会）
 REL_XIADAN = "下单"
+REL_JIESUAN = "结算"
 REL_HEXIAO_MINGXI = "订单同币种核销明细信息"
 REL_SODLINE = "订单明细"  # 只借它的 dataSource 定位「订单明细」表
 
 # 关联子表里要取的列（按中文名，取不到就空，不猜）
-XIADAN_COLS = ["SO", "交付额/原币", "汇率", "结算币种", "订单名称"]
+XIADAN_COLS = [
+    "SO", "订单NUM", "订单号", "新智云单号",
+    "订单已核销金额", "订单已核销金额/本币",
+    "交付额/原币", "汇率", "结算币种", "订单名称",
+]
 # ⚠「同币种核销明细信息」表里**没有**叫 SO 的字段，SO 藏在关联字段「订单NUM」的 name 里
 #   （2026-07-23 实调：该表字段 = 核销记录NUM/回款记录NUM/订单NUM/本次核销金额/…）。
 #   旧版靠"按金额跟下单栏配对"猜 SO，金额一撞就配错；这一版直接从订单NUM读，不猜。
@@ -442,6 +448,41 @@ def pick_named(
     return out
 
 
+def extract_related_orders(
+    rows: Sequence[dict], controls: Sequence[dict], source: str
+) -> List[dict]:
+    """从“下单”或“结算”关联行提取订单；SO 可位于 SO 或订单NUM。"""
+    names = ZhiyunClient.name_map(controls)
+    opts = ZhiyunClient.option_maps(controls)
+    out: List[dict] = []
+    for row in rows:
+        values = pick_named(row, names, opts, XIADAN_COLS)
+        so = extract_so(
+            values.get("SO") or values.get("订单NUM")
+            or values.get("订单号") or values.get("新智云单号") or ""
+        )
+        if not so:
+            candidates = {
+                extract_so(_plain(row.get(cid), opts.get(cid)))
+                for cid in names
+            } - {""}
+            if len(candidates) == 1:
+                so = next(iter(candidates))
+        if not so:
+            continue
+        out.append({
+            "so": so,
+            "written_off": values.get("订单已核销金额"),
+            "written_off_local": values.get("订单已核销金额/本币"),
+            "deliver": values.get("交付额/原币"),
+            "rate": values.get("汇率"),
+            "currency": values.get("结算币种"),
+            "name": values.get("订单名称"),
+            "source": source,
+        })
+    return out
+
+
 def write_xlsx(path: Path, headers: List[str], rows: List[List[Any]]) -> None:
     from openpyxl import Workbook
 
@@ -523,6 +564,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     hk_ctrls = client.controls(WS_HUIKUAN)
     hk_opts = client.option_maps(hk_ctrls)
     cid_xiadan = client.id_by_name(hk_ctrls, REL_XIADAN)
+    cid_jiesuan = client.id_by_name(hk_ctrls, REL_JIESUAN)
     cid_mingxi = client.id_by_name(hk_ctrls, REL_HEXIAO_MINGXI)
     ws_mingxi = client.datasource_of(WS_HUIKUAN, REL_HEXIAO_MINGXI)
     ws_sodline = client.datasource_of(WS_HUIKUAN, REL_SODLINE)
@@ -569,6 +611,8 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     mx_seen_record_ids = set()
     all_so: List[str] = []
     ars_without_orders: List[str] = []
+    settlement_recovered_ars: List[str] = []
+    settlement_rows_used = 0
 
     for rec in payments:
         rid = str(rec.get("rowid") or "")
@@ -577,21 +621,23 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
             continue
 
         xd_rows, xd_ctrls = client.relation_rows(WS_HUIKUAN, rid, cid_xiadan)
-        xd_names, xd_opts = client.name_map(xd_ctrls), client.option_maps(xd_ctrls)
-        got_so = 0
-        for r in xd_rows:
-            v = pick_named(r, xd_names, xd_opts, XIADAN_COLS)
-            so = extract_so(v.get("SO") or "")
-            if not so:
-                continue
-            got_so += 1
+        related = extract_related_orders(xd_rows, xd_ctrls, REL_XIADAN)
+        if not related and cid_jiesuan:
+            js_rows, js_ctrls = client.relation_rows(WS_HUIKUAN, rid, cid_jiesuan)
+            related = extract_related_orders(js_rows, js_ctrls, REL_JIESUAN)
+            if related:
+                settlement_recovered_ars.append(rec["ar"])
+                settlement_rows_used += len(related)
+        for v in related:
+            so = v["so"]
             if so not in all_so:
                 all_so.append(so)
             xd_out.append([
-                rec["ar"], so, v.get("交付额/原币"), v.get("汇率"),
-                v.get("结算币种"), v.get("订单名称"),
+                rec["ar"], so, v.get("written_off"), v.get("written_off_local"),
+                v.get("deliver"), v.get("rate"),
+                v.get("currency"), v.get("name"), v.get("source"),
             ])
-        if got_so == 0:
+        if not related:
             ars_without_orders.append(rec["ar"])
 
         if cid_mingxi:
@@ -677,7 +723,8 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
 
     write_xlsx(
         out_dir / f"订单交付_{day_tag}.xlsx",
-        ["回款记录ID", "SO", "交付额/原币", "汇率", "结算币种", "订单名称"],
+        ["回款记录ID", "SO", "订单已核销金额", "订单已核销金额/本币",
+         "交付额/原币", "汇率", "结算币种", "订单名称", "单号来源"],
         xd_out,
     )
     write_xlsx(
@@ -730,6 +777,8 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
         "回款记录笔数": len(hk_rows),
         "回款记录_接口报总数": hk_total,
         "下单行数": len(xd_out),
+        "结算回查行数": settlement_rows_used,
+        "从结算找回单号的AR数": len(set(settlement_recovered_ars)),
         "涉及SO数": len(all_so),
         "核销明细行数": len(mx_out),
         "跨父回款历史核销补取行数": historical_added,
@@ -986,7 +1035,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception:
         pass
     print(
-        f"   回款记录 {summary['回款记录笔数']} 笔 · 下单 {summary['下单行数']} 行"
+        f"   回款记录 {summary['回款记录笔数']} 笔 · 订单关联 {summary['下单行数']} 行"
+        f"（结算回查 {summary.get('结算回查行数', 0)} 行）"
         f"（{summary['涉及SO数']} 个 SO）· 核销明细 {summary['核销明细行数']} 行"
         f" · 订单明细 {summary['订单明细SOD行数']} 个 SOD"
     )
@@ -997,7 +1047,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     print(f"   回款类型分布: {summary['回款类型分布']}")
     if summary["无下单行的AR"]:
-        print(f"   ⚠ 有 {len(summary['无下单行的AR'])} 笔到账没抓到下单行，判定会报异常不会漏")
+        print(f"   ⚠ 有 {len(summary['无下单行的AR'])} 笔到账在下单和结算中都没抓到单号，判定会报异常不会漏")
     if summary["查不到SOD的SO"]:
         print(f"   ⚠ 有 {len(summary['查不到SOD的SO'])} 个 SO 查不到 SOD，将退化成按 SO 匹配")
     print(

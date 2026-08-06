@@ -30,7 +30,10 @@ def _write(path, headers, rows):
     wb.save(path)
 
 
-def _mk_exports(root: Path, *, with_writeoff=True, with_sod=True):
+def _mk_exports(
+    root: Path, *, with_writeoff=True, with_sod=True,
+    with_order_written_off=True,
+):
     exp = root / "01_智云导出"
     exp.mkdir(parents=True, exist_ok=True)
     _write(exp / "回款记录_test.xlsx",
@@ -39,8 +42,9 @@ def _mk_exports(root: Path, *, with_writeoff=True, with_sod=True):
            [["AR26079999", "2026-07-22", "2026-07-17", 100, 100, 0,
              "人民币CNY", "预存回款", "核销成功", "测试客户甲"]])
     _write(exp / "订单交付_test.xlsx",
-           ["回款记录ID", "SO", "交付额/原币", "汇率", "订单名称"],
-           [["AR26079999", "SO26070111", 250, 1, "某单"]])
+           ["回款记录ID", "SO", "订单已核销金额", "交付额/原币", "汇率", "订单名称"],
+           [["AR26079999", "SO26070111",
+             100 if with_order_written_off else None, 250, 1, "某单"]])
     if with_writeoff:
         _write(exp / "核销明细_test.xlsx",
                ["核销记录NUM", "rowid", "回款记录NUM", "核销日期",
@@ -63,8 +67,12 @@ def test_load_exports_reads_four_tables(tmp_path):
     assert len(pays) == 1
     p = pays[0]
     assert p["ar"] == "AR26079999"
-    assert p["orders"] == [{"so": "SO26070111", "deliver": 250.0, "rate": 1.0,
-                            "currency": "", "name": "某单"}]
+    order = p["orders"][0]
+    assert order["so"] == "SO26070111"
+    assert order["written_off"] == 100.0
+    assert order["written_off_present"] is True
+    assert order["deliver"] == 250.0
+    assert order["rate"] == 1.0
     # 当前核销记录按物理记录号保留。
     assert p["writeoffs"] == {"SO26070111": 100.0}
     assert len(p["sod_lines"]["SO26070111"]) == 3
@@ -79,9 +87,13 @@ def test_expand_uses_sod_subset(tmp_path):
     assert sum(r["amount_orig"] for r in recs) == 100.0
 
 
-def test_no_writeoff_table_means_full_settle(tmp_path):
-    """核销明细表整份没有 → 全额核销（对整笔/自动核销类就是这样）。"""
-    _mk_exports(tmp_path, with_writeoff=False)
+def test_whole_payment_without_order_written_off_uses_delivery_fallback(tmp_path):
+    """整笔回款全部缺订单已核销金额时，按完整交付额形成逐SO金额。"""
+    _mk_exports(
+        tmp_path,
+        with_writeoff=False,
+        with_order_written_off=False,
+    )
     # 到账额改成 250 才等于交付额
     _write(tmp_path / "01_智云导出" / "回款记录_test.xlsx",
            ["回款记录ID", "核销日期", "到账日期", "到账金额/原币", "到账金额/本币",
@@ -89,8 +101,14 @@ def test_no_writeoff_table_means_full_settle(tmp_path):
            [["AR26079999", "2026-07-22", "2026-07-21", 250, 250, 0,
              "人民币CNY", "整笔回款", "手动核销", "测试客户甲"]])
     recs = C.expand_payments(C.load_exports(tmp_path), {})
-    assert len(recs) == 3
-    assert sum(r["amount_orig"] for r in recs) == 250.0
+    assert {rec["sod"] for rec in recs} == {
+        "SOD26070222", "SOD26070221", "SOD26070220"
+    }
+    assert sum(rec["amount_orig"] for rec in recs) == 250
+    assert all(
+        "W_WHOLE_PAYMENT_DELIVERY_FALLBACK" in rec["warning_codes"]
+        for rec in recs
+    )
 
 
 def test_missing_order_table_is_hard_error(tmp_path):
