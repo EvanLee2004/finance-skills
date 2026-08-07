@@ -710,6 +710,8 @@ def test_apply_partial_inserts_unpaid_row_below_and_preserves_other_fields(tmp_p
     assert ws.cell(2, 7).value is None
     assert ws.cell(2, 8).value == 50.0
     assert ws.cell(2, 9).value == "是"
+
+
     assert ws.cell(2, 13).value is None
     assert ws.cell(3, 1).value == ws.cell(2, 1).value
     assert ws.cell(3, 5).value == "SO26010001"
@@ -722,6 +724,62 @@ def test_apply_partial_inserts_unpaid_row_below_and_preserves_other_fields(tmp_p
     assert ws.cell(3, 12).value == "SOD26010001"
     assert ws.cell(3, 13).value is None
     assert ws.cell(4, 5).value == "SO_OTHER"
+
+
+def test_same_so_multi_sod_aggregate_validates_writes_once_and_is_idempotent(tmp_path):
+    ledger = _ledger(tmp_path, [("SO_MULTI", "SODA", None)])
+    wb = openpyxl.load_workbook(str(ledger))
+    wb["明细"].cell(2, 6).value = 40.0
+    wb.save(str(ledger))
+    target_five = {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-08-05", "收款方式": "汇", "实收SOD": "SODA、SODB",
+    }
+    operation = {
+        "type": "same_so_multi_sod_aggregate",
+        "source_receivable": 40.0,
+        "source_five_cols": {
+            "计提": None, "回款明细": None, "是否结账": None,
+            "收款时间": None, "收款方式": None, "实收SOD": "SODA",
+        },
+        "source_derived_cols": {"差异": None},
+        "so": "SO_MULTI", "ar": "AR1", "so_delivery": 100.0,
+        "current_received": 100.0, "combined_sod": "SODA、SODB",
+        "member_sods": ["SODA", "SODB"],
+        "member_case_ids": ["AR1|SO_MULTI|SODA", "AR1|SO_MULTI|SODB"],
+        "member_amounts": [40.0, 60.0], "member_deliveries": [40.0, 60.0],
+        "writeoff_sequence_key": ["2026-08-06", "HX1", "RID1", "AR1", "SO_MULTI"],
+        "target_case_id": "AR1|SO_MULTI|SODA",
+        "target_five_cols": dict(target_five), "target_derived_cols": {},
+    }
+    target = {
+        "case_id": "AR1|SO_MULTI|SODA", "ar": "AR1", "so": "SO_MULTI", "sod": "SODA",
+        "ledger_row_ref": 2, "five_cols": dict(target_five), "derived_cols": {},
+        "row_operation": operation,
+    }
+    absorbed = {
+        "case_id": "AR1|SO_MULTI|SODB", "ar": "AR1", "so": "SO_MULTI", "sod": "SODB",
+        "ledger_row_ref": 2, "five_cols": {}, "derived_cols": {},
+        "same_so_multi_sod_absorbed": {
+            "target_case_id": target["case_id"], "group_id": "same-so-multi-sod|2|SO_MULTI|AR1",
+            "member_sods": ["SODA", "SODB"], "so_delivery": 100.0,
+        },
+    }
+    plan = {"auto": [target, absorbed]}
+
+    checked = V.validate(plan, V.read_ledger_rows(ledger))
+    assert checked["counts"] == {"write": 1, "skip": 1, "conflict": 0}
+
+    out = tmp_path / "同SO多SOD合并.xlsx"
+    A.write_plan(ledger, out, checked["write"])
+    assert A.verify_written(out, checked["write"]) == []
+    row = V.read_ledger_rows(out)[2]
+    assert row["应收金额"] == 100.0
+    assert row["回款明细"] == 100.0
+    assert row["SOD"] == "SODA、SODB"
+
+    rerun = V.validate(plan, V.read_ledger_rows(out))
+    assert rerun["counts"] == {"write": 0, "skip": 2, "conflict": 0}
 
 
 def test_old_ledger_without_difference_column_still_writes_normal_payment(tmp_path):

@@ -1408,6 +1408,22 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
         lines = sod_lines.get(so) or []
         chosen: Optional[List[dict]] = None
         how = ""
+        order = order_by_so.get(so) or {}
+        so_delivery_orig = deliver_by_so.get(so)
+        if has_itemized_writeoff:
+            so_delivery_local, _ = _writeoff_business_amount(
+                so_delivery_orig,
+                explicit_local=business_local_by_so.get(so),
+                explicit_orig=h,
+            )
+        else:
+            so_delivery_local, _ = _order_delivery_local(
+                so_delivery_orig, p, rates, order
+            )
+        all_sods = sorted({
+            str(x.get("sod") or "").strip() for x in lines
+            if str(x.get("sod") or "").strip()
+        })
         fallback_partial = (
             not has_itemized_writeoff
             and so in set((p.get("_parent_fallback_allocation") or {}).get("partial_sos") or [])
@@ -1427,7 +1443,6 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 cand = "、".join(
                     f"{x['sod']}={x['deliver']}" for x in lines[:12]
                 ) + ("…" if len(lines) > 12 else "")
-                order = order_by_so.get(so) or {}
                 current_local = None
                 if has_itemized_writeoff:
                     current_local, _ = _writeoff_business_amount(
@@ -1509,7 +1524,6 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 ))
             else:
                 # 订单明细查不到 SOD → 退化成按 SO 匹配盈亏表（老路，仍可判）
-                order = order_by_so.get(so) or {}
                 if has_itemized_writeoff:
                     current_local, _ = _writeoff_business_amount(
                         h,
@@ -1568,6 +1582,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     "arrival_total": p.get("amount_orig"),
                     "business_arrival_total": p.get("total_amount_orig"),
                     "deliver_local": deliver_local,
+                    "so_delivery_local": so_delivery_local,
+                    "all_sods": all_sods,
                     "cumulative_received_local": cumulative_local,
                     "cumulative_detail_local": detail_cumulative_local.get(so),
                     "cumulative_fallback_local": fallback_history_local.get(so),
@@ -1581,7 +1597,6 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 })
             continue
         for line in chosen:
-            order = order_by_so.get(so) or {}
             line_orig = float(line["deliver"])
             unique_partial = (
                 len(lines) == 1
@@ -1658,6 +1673,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 "arrival_total": p.get("amount_orig"),
                 "business_arrival_total": p.get("total_amount_orig"),
                 "deliver_local": deliver_local,
+                "so_delivery_local": so_delivery_local,
+                "all_sods": all_sods,
                 "cumulative_received_local": cumulative_local,
                 "cumulative_detail_local": detail_cumulative_local.get(so),
                 "cumulative_fallback_local": fallback_history_local.get(so),
@@ -2179,6 +2196,11 @@ def classify_one(
                 rec.get("cumulative_fallback_local")
             ),
             "delivery_local": common.to_number(rec.get("deliver_local")),
+            "so_delivery_local": common.to_number(rec.get("so_delivery_local")),
+            "all_sods": sorted({
+                str(x or "").strip() for x in (rec.get("all_sods") or [])
+                if str(x or "").strip()
+            }),
             "writeoff_sequence_key": rec.get("writeoff_sequence_key"),
         },
     }
@@ -2699,6 +2721,110 @@ def classify_one(
     return result
 
 
+def _make_same_so_multi_sod_aggregate(
+    ref: int,
+    group: List[dict],
+    ledger: Optional[LedgerIndex],
+    tolerance: float,
+) -> Tuple[Optional[dict], str]:
+    """同一物理核销记录的完整多 SOD 集合共用一行时，按 SO 级金额合并。"""
+    if ledger is None:
+        return None, "缺少盈亏表索引"
+    sos = {str(x.get("so") or "").strip() for x in group}
+    sods = {str(x.get("sod") or "").strip() for x in group}
+    if len(sos) != 1 or "" in sos or len(sods) <= 1 or "" in sods:
+        return None, "不是同一 SO 的多个有效 SOD"
+    if len(group) != len(sods):
+        return None, "同一 SOD 在同行组内重复出现"
+
+    ars = {str(x.get("ar") or "").strip() for x in group}
+    if len(ars) != 1 or "" in ars:
+        return None, "多个 SOD 不属于同一父回款"
+    sources = [x.get("split_payment_source") or {} for x in group]
+    sequence_keys = [source.get("writeoff_sequence_key") for source in sources]
+    if not all(isinstance(key, (list, tuple)) and len(key) >= 2 and str(key[1]).strip()
+               for key in sequence_keys):
+        return None, "缺少核销记录NUM，无法证明属于同一物理核销记录"
+    normalized_keys = {tuple(str(part or "") for part in key) for key in sequence_keys}
+    if len(normalized_keys) != 1:
+        return None, "多个 SOD 来自不同物理核销记录"
+
+    expected_sets = {
+        tuple(sorted({str(sod or "").strip() for sod in (source.get("all_sods") or [])
+                      if str(sod or "").strip()}))
+        for source in sources
+    }
+    if len(expected_sets) != 1 or set(next(iter(expected_sets), ())) != sods:
+        return None, "同行组不是该 SO 的完整 SOD 集合"
+
+    amounts = [common.to_number(source.get("amount_local")) for source in sources]
+    deliveries = [common.to_number(source.get("delivery_local")) for source in sources]
+    so_deliveries = [common.to_number(source.get("so_delivery_local")) for source in sources]
+    if any(value is None or float(value) <= 0 for value in amounts + deliveries + so_deliveries):
+        return None, "缺少有效的本币 SOD 金额或 SO 交付金额"
+    so_delivery = round(float(so_deliveries[0]), 2)
+    if any(abs(float(value) - so_delivery) > max(tolerance, TOL) for value in so_deliveries):
+        return None, "多个 SOD 携带的 SO 交付金额不一致"
+    total_amount = round(sum(float(value) for value in amounts), 2)
+    total_delivery = round(sum(float(value) for value in deliveries), 2)
+    if abs(total_amount - so_delivery) > max(tolerance, TOL):
+        return None, "多个 SOD 的本次核销合计不等于 SO 交付金额"
+    if abs(total_delivery - so_delivery) > max(tolerance, TOL):
+        return None, "多个 SOD 的交付额合计不等于 SO 交付金额"
+
+    snap = ledger.row_snapshot.get(int(ref)) or {}
+    so = next(iter(sos))
+    if str(snap.get("so") or "").strip() not in ("", so):
+        return None, "盈亏行 SO 与合并组不一致"
+    existing_sod = str(snap.get("sod") or "").strip()
+    ordered_sods = sorted(sods)
+    if existing_sod in sods:
+        ordered_sods.remove(existing_sod)
+        ordered_sods.insert(0, existing_sod)
+    combined_sod = "、".join(ordered_sods)
+
+    dates = {str((x.get("five_cols") or {}).get("收款时间") or "") for x in group}
+    ways = {str((x.get("five_cols") or {}).get("收款方式") or "") for x in group}
+    if len(dates) != 1 or len(ways) != 1:
+        return None, "多个 SOD 的收款时间或收款方式不一致"
+    target = next(
+        (x for x in group if str(x.get("sod") or "").strip() == existing_sod),
+        sorted(group, key=lambda x: (str(x.get("sod") or ""), str(x.get("case_id") or "")))[0],
+    )
+    target_five = {
+        "计提": so_delivery,
+        "回款明细": total_amount,
+        "是否结账": "是",
+        "收款时间": next(iter(dates)) or None,
+        "收款方式": next(iter(ways)) or None,
+        "实收SOD": combined_sod,
+    }
+    return {
+        "type": "same_so_multi_sod_aggregate",
+        "source_receivable": common.to_number(snap.get("yingshou")),
+        "source_five_cols": {
+            "计提": snap.get("jiti"), "回款明细": snap.get("huikuan"),
+            "是否结账": snap.get("jiezhang"),
+            "收款时间": common.norm_date(snap.get("shoukuan_time")) or snap.get("shoukuan_time"),
+            "收款方式": snap.get("shoukuan_way"), "实收SOD": snap.get("sod"),
+        },
+        "source_derived_cols": {"差异": snap.get("chayi")},
+        "so": so,
+        "ar": next(iter(ars)),
+        "so_delivery": so_delivery,
+        "current_received": total_amount,
+        "combined_sod": combined_sod,
+        "member_sods": ordered_sods,
+        "member_case_ids": [str(x.get("case_id") or "") for x in group],
+        "member_amounts": [round(float(value), 2) for value in amounts],
+        "member_deliveries": [round(float(value), 2) for value in deliveries],
+        "writeoff_sequence_key": list(sequence_keys[0]),
+        "target_case_id": str(target.get("case_id") or ""),
+        "target_five_cols": target_five,
+        "target_derived_cols": {},
+    }, ""
+
+
 def _make_split_payment_chain(
     ref: int,
     group: List[dict],
@@ -3026,6 +3152,42 @@ def classify_records(
     for ref, group in by_row.items():
         if len(group) <= 1:
             continue
+        aggregate, aggregate_error = _make_same_so_multi_sod_aggregate(
+            ref, group, ledger, max(thr, TOL)
+        )
+        if aggregate is not None:
+            target_case_id = str(aggregate["target_case_id"])
+            group_id = f"same-so-multi-sod|{ref}|{aggregate['so']}|{aggregate['ar']}"
+            for r in group:
+                case_id = str(r.get("case_id") or "")
+                if case_id == target_case_id:
+                    r["five_cols"] = dict(aggregate["target_five_cols"])
+                    r["derived_cols"] = {}
+                    r["row_operation"] = aggregate
+                    r["same_so_multi_sod_group_id"] = group_id
+                    warnings = list(r.get("warning_codes") or [])
+                    if "W_SAME_SO_MULTI_SOD_AGGREGATE" not in warnings:
+                        warnings.append("W_SAME_SO_MULTI_SOD_AGGREGATE")
+                    r["warning_codes"] = warnings
+                    r["reason"] = (
+                        f"{r.get('reason') or '核销命中'}；同一 SO 的多个 SOD 共用一行，"
+                        "按 SO 交付金额合并核销"
+                    )
+                else:
+                    r["five_cols"] = {}
+                    r["derived_cols"] = {}
+                    r.pop("row_operation", None)
+                    r["same_so_multi_sod_absorbed"] = {
+                        "target_case_id": target_case_id,
+                        "group_id": group_id,
+                        "member_sods": list(aggregate["member_sods"]),
+                        "so_delivery": aggregate["so_delivery"],
+                    }
+                    r["reason"] = (
+                        f"{r.get('reason') or '核销命中'}；已并入同一 SO 多 SOD 合并核销行，"
+                        "不重复写金额"
+                    )
+            continue
         operation, chain_error = _make_split_payment_chain(ref, group, ledger, max(thr, TOL))
         if operation is not None:
             tail_audit = operation.get("tail_tolerance_audit") or {}
@@ -3130,6 +3292,8 @@ def classify_records(
                 )
             continue
 
+        if aggregate_error and "不同 SO/SOD" in chain_error:
+            chain_error = f"{chain_error}；多 SOD 合并未通过：{aggregate_error}"
         # 真正的多行/多笔歧义继续 E8，但原因显示实际笔数，不再硬编码“两笔”。
         for r in group:
             r["bucket"] = "hold"

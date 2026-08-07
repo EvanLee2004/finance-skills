@@ -220,6 +220,8 @@ def test_sod_expansion_full():
     assert len(recs) == 3
     assert {r["sod"] for r in recs} == {"SOD1", "SOD2", "SOD3"}
     assert sum(r["amount_orig"] for r in recs) == 300.0
+    assert all(r["so_delivery_local"] == 300.0 for r in recs)
+    assert all(r["all_sods"] == ["SOD1", "SOD2", "SOD3"] for r in recs)
 
 
 def test_sod_expansion_subset():
@@ -773,6 +775,60 @@ def test_same_row_hit_twice_both_held():
     res = C.classify_records([_rec("SO1", "SODA", 100.0), _rec("SO1", "SODB", 100.0)], led, {})
     assert res["counts"]["auto"] == 0
     assert all(h["code"] == "E8" for h in res["hold"])
+
+
+def test_same_physical_writeoff_multi_sod_same_row_aggregates_by_so_delivery():
+    """完整多 SOD 属于同一物理核销记录时，共用一行并按 SO 交付金额写一次。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SODA", "yingshou": 40.0,
+            "jiti": None, "huikuan": None, "jiezhang": "否",
+            "shoukuan_time": None, "shoukuan_way": None, "chayi": None,
+        }
+    })
+    common = {
+        "ar": "AR1",
+        "so_delivery_local": 100.0,
+        "all_sods": ["SODA", "SODB"],
+        "writeoff_sequence_key": ["2026-08-06", "HX1", "RID1", "AR1", "SO1"],
+    }
+    first = _rec("SO1", "SODA", 40.0, deliver_local=40.0, **common)
+    second = _rec("SO1", "SODB", 60.0, deliver_local=60.0, **common)
+
+    result = C.classify_records([first, second], led, {})
+
+    assert result["counts"] == {"auto": 2, "hold": 0, "exception": 0, "total": 2}
+    target = next(item for item in result["auto"] if item.get("row_operation"))
+    absorbed = next(item for item in result["auto"] if item.get("same_so_multi_sod_absorbed"))
+    operation = target["row_operation"]
+    assert operation["type"] == "same_so_multi_sod_aggregate"
+    assert operation["so_delivery"] == 100.0
+    assert target["five_cols"] == {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-07-21", "收款方式": "汇",
+        "实收SOD": "SODA、SODB",
+    }
+    assert absorbed["five_cols"] == {}
+    assert "W_SAME_SO_MULTI_SOD_AGGREGATE" in target["warning_codes"]
+
+
+def test_same_row_multi_sod_from_different_writeoffs_still_holds():
+    led = _led({1: {"so": "SO1", "sod": "SODA", "yingshou": 40.0}})
+    first = _rec(
+        "SO1", "SODA", 40.0, ar="AR1", deliver_local=40.0,
+        so_delivery_local=100.0, all_sods=["SODA", "SODB"],
+        writeoff_sequence_key=["2026-08-06", "HX1", "RID1", "AR1", "SO1"],
+    )
+    second = _rec(
+        "SO1", "SODB", 60.0, ar="AR2", deliver_local=60.0,
+        so_delivery_local=100.0, all_sods=["SODA", "SODB"],
+        writeoff_sequence_key=["2026-08-06", "HX2", "RID2", "AR2", "SO1"],
+    )
+
+    result = C.classify_records([first, second], led, {})
+
+    assert result["counts"]["auto"] == 0
+    assert result["counts"]["hold"] == 2
 
 
 def test_same_so_sod_distinct_ar_builds_sequential_split_chain():

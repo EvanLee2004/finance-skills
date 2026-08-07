@@ -278,6 +278,36 @@ def resolve_item_row(item: dict, rows: Dict[int, dict]) -> tuple[Optional[int], 
     )
 
 
+def resolve_same_so_multi_sod_row(
+    item: dict, rows: Dict[int, dict]
+) -> tuple[Optional[int], str]:
+    """多 SOD 合并行允许以任一成员 SOD 或合并后的 SOD 文本唯一重定位。"""
+    op = item.get("row_operation") or {}
+    ref = int(item.get("ledger_row_ref") or 0)
+    so = str(op.get("so") or item.get("so") or "").strip()
+    member_sods = {str(x or "").strip() for x in (op.get("member_sods") or []) if str(x or "").strip()}
+    combined = str(op.get("combined_sod") or "").strip()
+
+    def identity(row: Optional[dict]) -> bool:
+        if row is None or (so and row.get("SO") != so):
+            return False
+        sod = str(row.get("SOD") or "").strip()
+        return not sod or sod in member_sods or sod == combined
+
+    if ref and identity(rows.get(ref)):
+        return ref, ""
+    candidates = [row_no for row_no, row in rows.items() if identity(row)]
+    target = op.get("target_five_cols") or item.get("five_cols") or {}
+    exact = [row_no for row_no in candidates if _matches_planned_fields(rows[row_no], target)]
+    if len(exact) == 1:
+        return exact[0], ""
+    if len(candidates) == 1:
+        return candidates[0], ""
+    if not candidates:
+        return None, "按 SO 和多 SOD 成员找不到合并核销目标行"
+    return None, f"按 SO 和多 SOD 成员找到 {len(candidates)} 行，无法唯一重定位"
+
+
 def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> Optional[dict]:
     """复核逐笔分笔链的结构、金额守恒及完整幂等状态。"""
     op = item.get("row_operation") or {}
@@ -460,6 +490,100 @@ def _check_settlement_tail_aggregate(item: dict, rows: Dict[int, dict], ref: int
     return {"verdict": "write", "reason": "结清尾差审计和目标行快照一致，可以合并写入"}
 
 
+def _same_so_multi_sod_error(op: dict) -> str:
+    member_sods = [str(x or "").strip() for x in (op.get("member_sods") or [])]
+    case_ids = [str(x or "").strip() for x in (op.get("member_case_ids") or [])]
+    try:
+        so_delivery = round(float(op["so_delivery"]), 2)
+        current = round(float(op["current_received"]), 2)
+        amounts = [round(float(x), 2) for x in (op.get("member_amounts") or [])]
+        deliveries = [round(float(x), 2) for x in (op.get("member_deliveries") or [])]
+    except (KeyError, TypeError, ValueError):
+        return "同 SO 多 SOD 合并金额参数缺失或不是数字"
+    if (
+        not op.get("so") or not op.get("ar") or not op.get("target_case_id")
+        or len(member_sods) < 2 or len(set(member_sods)) != len(member_sods)
+        or any(not sod for sod in member_sods)
+        or len(case_ids) != len(member_sods) or len(set(case_ids)) != len(case_ids)
+        or any(not case_id for case_id in case_ids)
+        or len(amounts) != len(member_sods) or len(deliveries) != len(member_sods)
+        or any(value <= 0 for value in amounts + deliveries)
+        or so_delivery <= 0
+        or abs(sum(amounts) - current) > 0.011
+        or abs(current - so_delivery) > 0.011
+        or abs(sum(deliveries) - so_delivery) > 0.011
+        or str(op.get("combined_sod") or "") != "、".join(member_sods)
+        or str(op.get("target_case_id") or "") not in case_ids
+    ):
+        return "同 SO 多 SOD 合并计划不完整或金额不守恒"
+    target = op.get("target_five_cols") or {}
+    if (
+        common.to_number(target.get("计提")) != so_delivery
+        or common.to_number(target.get("回款明细")) != current
+        or target.get("是否结账") != "是"
+        or str(target.get("实收SOD") or "") != str(op.get("combined_sod") or "")
+    ):
+        return "同 SO 多 SOD 合并目标值与审计参数不一致"
+    return ""
+
+
+def _check_same_so_multi_sod_aggregate(
+    item: dict, rows: Dict[int, dict], ref: int
+) -> dict:
+    op = item.get("row_operation") or {}
+    error = _same_so_multi_sod_error(op)
+    if error:
+        return {"verdict": "conflict", "reason": error}
+    row = rows.get(int(ref))
+    if row is None:
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行已不存在"}
+    so = str(op.get("so") or "").strip()
+    member_sods = {str(x or "").strip() for x in (op.get("member_sods") or [])}
+    combined = str(op.get("combined_sod") or "").strip()
+    if row.get("SO") not in ("", so):
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行的 SO 已变化"}
+    row_sod = str(row.get("SOD") or "").strip()
+    if row_sod and row_sod not in member_sods and row_sod != combined:
+        return {"verdict": "conflict", "reason": "目标行 SOD 不属于本次合并组"}
+    target = op.get("target_five_cols") or {}
+    receivable = common.to_number(row.get("应收金额"))
+    if (
+        receivable is not None
+        and abs(float(receivable) - float(op["so_delivery"])) <= 0.011
+        and _matches_planned_fields(row, target)
+        and (not row.get("_差异列存在") or _norm(row.get("差异")) in ("", "None"))
+    ):
+        return {"verdict": "skip", "reason": "同 SO 多 SOD 已按 SO 交付金额合并写入，幂等跳过"}
+    source_receivable = common.to_number(op.get("source_receivable"))
+    if source_receivable is None or receivable is None or abs(float(receivable) - float(source_receivable)) > 0.011:
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行的原应收已变化"}
+    if not _matches_planned_fields(row, op.get("source_five_cols") or {}):
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行在判定后被改动"}
+    source_derived = op.get("source_derived_cols") or {}
+    if "差异" in source_derived and _norm(row.get("差异")) != _norm(source_derived.get("差异")):
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行差异列在判定后被改动"}
+    return {"verdict": "write", "reason": "同一 SO 完整多 SOD 组金额守恒，可合并写入一行"}
+
+
+def _absorbed_multi_sod_error(item: dict, target: Optional[dict]) -> str:
+    marker = item.get("same_so_multi_sod_absorbed") or {}
+    if not marker:
+        return ""
+    if target is None:
+        return "多 SOD 合并引用的目标不存在"
+    op = target.get("row_operation") or {}
+    if op.get("type") != "same_so_multi_sod_aggregate":
+        return "多 SOD 合并引用的目标不是合法合并计划"
+    if (
+        str(marker.get("target_case_id") or "") != str(target.get("case_id") or "")
+        or str(item.get("case_id") or "") not in set(op.get("member_case_ids") or [])
+        or set(marker.get("member_sods") or []) != set(op.get("member_sods") or [])
+        or common.to_number(marker.get("so_delivery")) != common.to_number(op.get("so_delivery"))
+    ):
+        return "多 SOD 合并引用与目标审计信息不一致"
+    return _same_so_multi_sod_error(op)
+
+
 def _absorbed_tail_item_error(item: dict, target: Optional[dict]) -> str:
     marker = item.get("tail_tolerance_absorbed") or {}
     if not marker:
@@ -598,6 +722,8 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     five = item.get("five_cols") or {}
     derived = item.get("derived_cols") or {}
     so, sod = (item.get("so") or "").strip(), (item.get("sod") or "").strip()
+    op = item.get("row_operation") or {}
+    is_multi_sod_aggregate = op.get("type") == "same_so_multi_sod_aggregate"
 
     if not ref:
         return {"verdict": "conflict", "reason": "判定结果里没有行号，无法定位"}
@@ -606,7 +732,7 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
         return {"verdict": "conflict", "reason": f"第 {ref} 行在表里不存在了（表被删过行？）"}
 
     # ① 行号还指着同一单吗——她插过行的话这里必然对不上
-    if sod and row["SOD"] and row["SOD"] != sod:
+    if not is_multi_sod_aggregate and sod and row["SOD"] and row["SOD"] != sod:
         return {
             "verdict": "conflict",
             "reason": f"第 {ref} 行现在是 {row['SOD']}，不是计划里的 {sod}（表在判定之后被插过行）",
@@ -640,7 +766,6 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
         except (TypeError, ValueError):
             return {"verdict": "conflict", "reason": f"{k} 不是数字：{derived[k]!r}"}
 
-    op = item.get("row_operation") or {}
     if op:
         if op.get("type") == "split_payment_chain":
             chain_result = _check_split_payment_chain(item, rows, int(ref))
@@ -650,6 +775,8 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             return _check_preserved_aggregate_tail(item, rows, int(ref))
         elif op.get("type") == "settlement_tail_aggregate":
             return _check_settlement_tail_aggregate(item, rows, int(ref))
+        elif op.get("type") == "same_so_multi_sod_aggregate":
+            return _check_same_so_multi_sod_aggregate(item, rows, int(ref))
         elif op.get("type") != "split_below":
             return {"verdict": "conflict", "reason": f"未知行操作：{op.get('type')!r}"}
         if op.get("type") == "split_below" and row.get("_差异列存在") and _norm(row.get("差异")) not in ("", "None"):
@@ -821,15 +948,29 @@ def validate(
         original_ref = it.get("ledger_row_ref")
         operation_type = (it.get("row_operation") or {}).get("type")
         is_split_chain = operation_type == "split_payment_chain"
+        is_multi_sod_aggregate = operation_type == "same_so_multi_sod_aggregate"
         is_guarded_aggregate = operation_type in {
             "preserve_aggregate_tail_tolerance", "settlement_tail_aggregate",
+            "same_so_multi_sod_aggregate",
         }
         absorbed_marker = it.get("tail_tolerance_absorbed") or {}
+        multi_sod_marker = it.get("same_so_multi_sod_absorbed") or {}
         # 分笔链必须逐行复核完整性，不能因为其中已有一行结账就短路为“整单已写”。
         # 1元尾差聚合行也必须复核判定时快照，防止计划生成后被人工改动。
         settled_ref = None if (is_split_chain or is_guarded_aggregate) else settled_without_open_row(it, rows)
         if audit_error:
             res = {"verdict": "conflict", "reason": audit_error}
+        elif multi_sod_marker:
+            target = by_case_id.get(str(multi_sod_marker.get("target_case_id") or ""))
+            marker_error = _absorbed_multi_sod_error(it, target)
+            res = (
+                {"verdict": "conflict", "reason": marker_error}
+                if marker_error
+                else {
+                    "verdict": "skip",
+                    "reason": "该 SOD 已并入同一 SO 的合并核销行，不重复写金额",
+                }
+            )
         elif absorbed_marker:
             target = by_case_id.get(str(absorbed_marker.get("target_case_id") or ""))
             marker_error = _absorbed_tail_item_error(it, target)
@@ -852,6 +993,8 @@ def validate(
         else:
             if is_split_chain:
                 resolved_ref, locate_error = resolve_split_chain_row(it, rows)
+            elif is_multi_sod_aggregate:
+                resolved_ref, locate_error = resolve_same_so_multi_sod_row(it, rows)
             else:
                 resolved_ref, locate_error = resolve_item_row(it, rows)
             if locate_error:

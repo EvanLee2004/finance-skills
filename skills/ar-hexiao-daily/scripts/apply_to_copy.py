@@ -288,7 +288,11 @@ def write_plan(
         sod = five.get("实收SOD") or it.get("sod")
         if sod:
             edits.append((r, cols["SOD"], sod))
-        if op.get("type") == "split_below":
+        if op.get("type") == "same_so_multi_sod_aggregate":
+            edits.append((r, cols["应收"], float(op["so_delivery"])))
+            if "差异" in cols:
+                edits.append((r, cols["差异"], None))
+        elif op.get("type") == "split_below":
             edits.append((r, cols["应收"], float(op["paid_receivable"])))
             # 部分回款阶段两侧计提与业务值差异都必须留空。旧版测试表可以没有
             # “差异”列；存在时显式把源行和复制出的未回款行保持为空。
@@ -328,6 +332,8 @@ def write_plan(
                     if op.get("type") == "split_below"
                     else "结清尾差合并写入"
                     if op.get("type") == "settlement_tail_aggregate"
+                    else "同一 SO 多 SOD 合并写入"
+                    if op.get("type") == "same_so_multi_sod_aggregate"
                     else "更新"
                 ),
                 "新增行号": applied_r + 1 if op.get("type") == "split_below" else "",
@@ -547,6 +553,14 @@ def verify_written(out: Path, items: List[dict]) -> List[str]:
                                 f"第 {unpaid_r} 行 {key}：期望 {_norm(want)!r} "
                                 f"实际 {_norm(unpaid_row.get(actual_key))!r}"
                             )
+        elif op.get("type") == "same_so_multi_sod_aggregate":
+            if _norm(row.get("应收金额")) != _norm(op.get("so_delivery")):
+                problems.append(
+                    f"第 {r} 行 应收金额：期望 {_norm(op.get('so_delivery'))!r} "
+                    f"实际 {_norm(row.get('应收金额'))!r}"
+                )
+            if "差异" in formula_cols and _norm(row.get("差异")) not in ("", "None"):
+                problems.append(f"第 {r} 行 多 SOD 合并后差异应留空")
     formula_wb.close()
     return problems
 
@@ -614,6 +628,9 @@ def _comparison_objects(items: List[dict]) -> List[dict]:
             expected["应收金额"] = step.get("receivable")
             if not step.get("derived_cols"):
                 expected["差异"] = None
+        elif operation.get("type") == "same_so_multi_sod_aggregate":
+            expected["应收金额"] = operation.get("so_delivery")
+            expected["差异"] = None
         objects.append(
             {
                 "item": item,
