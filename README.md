@@ -24,7 +24,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
-**当前源码共 15 个技能**。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
+**当前源码共 16 个技能进更新白名单**（另有 `project-detail-to-ledger` 已在仓内、尚未进白名单）。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
 
 > ### ⭐ 更新去哪？就这一个仓库 · 2026-07-25 起 git 即分发
 >
@@ -49,7 +49,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 - **行为 / 环境**：理清需求、装依赖——不碰业务口径，但所有业务技能都用得上
 - **通用基座**：处理四类文档（Excel/PDF/Word/PPT）的底层能力，给业务技能"打下手"、也兜住够不上独立技能的零散文档活
 
-### 业务技能（财务专有，config 驱动、可复现）· 9 个
+### 业务技能（财务专有，config 驱动、可复现）· 10 个
 
 | skill | 解决什么 | 状态 |
 |-------|----------|------|
@@ -62,6 +62,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [dept-expense-alloc](skills/dept-expense-alloc/) | **部门费用归集分摊（月度）**：用友余额+收入底稿+人员归属+按人费用 → 部门科目余额表+利润表，主体合计=部门合计核对≈0 | ✅ v1.0.0 可交付 · **已入包** · 待真实月份试用 |
 | [ar-hexiao-daily](skills/ar-hexiao-daily/) | **应收核销日清**：出纳按核销日取智云数 → SOD 级判定 → 一份《核销日清》→ **她确认** → 写前复核 → 统一写盈亏明细 + 流转安全子集；含跑批台账查漏天（**永不写智云**） | ✅ 测试 186 · **opencode 端到端实测通过**（715 格与她手填逐格一致）· 待工位真 T-1 验收 |
 | [order-daily-summary](skills/order-daily-summary/) | **九点下单统计**：登录智云抓下单表 → 组织架构归多语（不含运保）/数据/游戏/其他 →「下单数据(万元)」xlsx | ✅ 单测 24 · **内网真机复测通过（2026-07-24）** |
+| [qige-invoice-to-kingdee](skills/qige-invoice-to-kingdee/) | **琪哥发票入金蝶**：改样发票簿 → 明细 + 金蝶凭证引入表；缺科目/档案 hold | 🟡 合成测试绿 · 本机 30 张金标 22/8 · 待 push |
 
 > 链路示意：`receivables-merge` → `split-by-sales`（旁路 `compliance-spot-check`）；出纳核销独立走 `ar-hexiao-daily`；亮晶下单日报走 `order-daily-summary`。  
 > **规划中（未建 skill）**：销售反馈汇总 等。  
@@ -83,7 +84,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx，批注修订、插图、提正文 | ✅ 已入库 · 已入包 |
 | [pptx](skills/pptx/) | **PPT 演示文稿**：做幻灯片、改模板、抽正文、合并拆分 deck | ✅ 已入库 · 已入包 |
 
-**合计：9 业务 + 2 行为/环境 + 4 基座 = 15。**
+**合计：10 业务 + 2 行为/环境 + 4 基座 = 16（更新白名单）。** `project-detail-to-ledger` 在仓内但不进白名单，直至另定。
 
 > **环境依赖（部署到同事机器时注意）**：① 四类通用基座的"校验"脚本 `office/validate.py` 用了 `match` 语法，**需 Python ≥3.10**（3.9 会报 SyntaxError）——核心读写不受影响，仅可选校验步骤受限。② `xlsx/recalc.py`、`pptx/thumbnail.py`、`docx/accept_changes.py` 依赖 **LibreOffice（soffice）**重算/转图/接受修订；没装 LibreOffice 时这几个功能降级，openpyxl/python-docx/pypdf 的基本读写仍正常。  
 > **以上环境问题统一交给 `env-doctor` 处理**——任何技能缺库/缺工具，agent 查它的清单按国内镜像装齐再重试。  
@@ -159,7 +160,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 更新财务skills
 ```
 
-Agent 从 Gitee/GitHub `main` 拉最新 → 只覆盖财务包白名单 15 夹 → 保留本机 `config/` → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
+Agent 从 Gitee/GitHub `main` 拉最新 → 只覆盖财务包白名单夹 → 保留本机 `config/` → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
 
 完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v19 第三节 B 段一致）。
 
@@ -188,10 +189,10 @@ git log -1 --oneline
 
 【红线·只动财务包，别碰我别的技能】
 - 只能更新/新增下面白名单文件夹；白名单以外一律不删、不改、不移动、不覆盖。
-- 禁止清空整个 skills 目录；禁止「只保留这 15 个」；禁止重命名白名单外的夹。
+- 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
 （另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
 
 【装到哪】

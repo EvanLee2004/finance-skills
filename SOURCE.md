@@ -36,7 +36,7 @@
 | **同事本机（首次安装）** | 说「安装财务skills」或粘手册第三节 A 段；Agent 从 Gitee/GitHub clone 后按白名单装入 opencode。 |
 
 > ⚠️ **push 了 ≠ 同事本机已更新。** 云端更新后，同事要说一次「更新财务skills」才会同步到本机。  
-> ⚠️ **更新 ≠ 清空 skills。** 只动官方白名单 15 夹；同事自己装的 / 自己写的 skill **一律不删不改**。
+> ⚠️ **更新 ≠ 清空 skills。** 只动官方白名单夹；同事自己装的 / 自己写的 skill **一律不删不改**。
 
 ---
 
@@ -50,8 +50,8 @@
 目录里每个官方 skill 一个夹（如 `labor-invoice-check`、`ar-hexiao-daily`）。  
 **更新只动财务包白名单夹**；同事自己装的其他 skill 不许删、不许改、不许挪。
 
-**财务包白名单（15）**  
-`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf` · `env-doctor`
+**财务包白名单（16）**  
+`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `qige-invoice-to-kingdee` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf` · `env-doctor`
 
 另：根下说明文件 `财务技能包_来源与更新.md` 一并覆盖更新（方便下次还能找到本说明）。
 
@@ -75,10 +75,10 @@
      `git clone --depth 1 -b main https://gitee.com/Lee157/finance-skills.git`  
      （Gitee 不通再试 `https://github.com/EvanLee2004/finance-skills.git`）  
 3. **白名单覆盖**到 opencode skills 目录：  
-   - 仅对白名单 15 个夹：覆盖 `SKILL.md`、`scripts/`、`README.md`、`references/` 等源码；白名单里本机还没有的夹整夹复制  
+   - 仅对白名单 16 个夹：覆盖 `SKILL.md`、`scripts/`、`README.md`、`references/` 等源码；白名单里本机还没有的夹整夹复制  
    - **保留**本机各技能已有 `config/`（见第三节铁律）  
    - 把 `skills/财务技能包_来源与更新.md` 放到 skills 目录根  
-4. **禁止**：清空整个 skills；删除/改动白名单外任何夹；为「只保留这 15 个」去删同事自装技能。  
+4. **禁止**：清空整个 skills；删除/改动白名单外任何夹；为「只保留白名单这些」去删同事自装技能。  
 5. **可选清理**（仅当存在才删，且只删这些已下线官方旧夹）：`payroll-info-match`、`insurance-fund-merge`、`bank-income-extract`。  
 6. **汇报**（必须逐条）：更新到的 **git short SHA**；更新/新增了哪些白名单技能；白名单外其他技能是否「未动」；config 是否保留；提醒 **重启 opencode**。
 
@@ -97,10 +97,10 @@
 
 【红线·只动财务包，别碰我别的技能】
 - 只能更新/新增下面白名单文件夹；白名单以外一律不删、不改、不移动、不覆盖。
-- 禁止清空整个 skills 目录；禁止「只保留这 15 个」；禁止重命名白名单外的夹。
+- 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
 （另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
 
 【装到哪】

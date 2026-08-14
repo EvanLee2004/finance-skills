@@ -1,0 +1,9 @@
+{
+  "tax_account": "21710105",
+  "pack_size": 5,
+  "voucher_word": "记",
+  "currency": "RMB",
+  "exchange_rate": 1,
+  "booking_date": "run_day",
+  "tax_rate_divisor": "1.06"
+}
