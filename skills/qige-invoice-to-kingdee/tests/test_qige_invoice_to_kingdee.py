@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -81,18 +82,27 @@ def _write_master(path: Path, data=None):
     path.write_text(json.dumps(data or _master(), ensure_ascii=False), encoding="utf-8")
 
 
-def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14"):
+def _copy_template(path: Path):
+    shutil.copy2(convert.TEMPLATE_PATH, path)
+
+
+def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14", with_master=True):
     inv = tmp_path / "发票.xlsx"
-    mas = tmp_path / "master.json"
+    tpl = tmp_path / "数据模板.xlsx"
     out = tmp_path / "out"
     out.mkdir()
     _write_invoice(inv, rows, org=org)
-    _write_master(mas, master)
+    _copy_template(tpl)
+    master_path = None
+    if with_master:
+        master_path = tmp_path / "master.json"
+        _write_master(master_path, master)
     return convert.convert(
         invoice_path=inv,
-        master_path=mas,
         out_dir=out,
         booking_date=booking,
+        template_path=tpl,
+        master_path=master_path,
     )
 
 
@@ -127,25 +137,46 @@ def test_hold_missing_account(tmp_path):
     assert "科目" in result.holds[0]["原因"]
 
 
-def test_hold_missing_customer(tmp_path):
+def test_unknown_customer_still_bookable(tmp_path):
     rows = [_ok_row(name="不存在客户甲有限公司")]
     result = _run(tmp_path, rows)
-    assert result.bookable_count == 0
-    assert "客户" in result.holds[0]["原因"]
+    assert result.bookable_count == 1
+    assert result.hold_count == 0
+    kd = load_workbook(result.kingdee_path)
+    ws = kd[convert.KINGDEE_SHEET]
+    assert ws.cell(4, 19).value == "不存在客户甲有限公司"
+    assert ws.cell(4, 18).value in (None, "")
+    kd.close()
 
 
-def test_hold_customer_suffix_mismatch(tmp_path):
+def test_customer_suffix_mismatch_does_not_guess_code(tmp_path):
     rows = [_ok_row(name="乙中心有限公司")]
     result = _run(tmp_path, rows)
-    assert result.bookable_count == 0
-    assert "客户" in result.holds[0]["原因"]
+    assert result.bookable_count == 1
+    kd = load_workbook(result.kingdee_path)
+    ws = kd[convert.KINGDEE_SHEET]
+    assert ws.cell(4, 18).value in (None, "")
+    assert ws.cell(4, 19).value == "乙中心有限公司"
+    kd.close()
 
 
-def test_hold_missing_employee(tmp_path):
+def test_unknown_employee_still_bookable(tmp_path):
     rows = [_ok_row(app="不存在职员甲")]
     result = _run(tmp_path, rows)
+    assert result.bookable_count == 1
+    kd = load_workbook(result.kingdee_path)
+    ws = kd[convert.KINGDEE_SHEET]
+    assert ws.cell(4, 25).value == "不存在职员甲"
+    assert ws.cell(4, 24).value in (None, "")
+    kd.close()
+
+
+def test_customer_one_to_many_holds(tmp_path):
+    master = _master()
+    master["customer"].append({"code": "9999", "name": "甲科技有限公司"})
+    result = _run(tmp_path, [_ok_row()], master=master)
     assert result.bookable_count == 0
-    assert "职员" in result.holds[0]["原因"]
+    assert "一对多" in result.holds[0]["原因"]
 
 
 def test_normalize_brackets_and_spaces_match(tmp_path):
@@ -221,7 +252,7 @@ def test_red_invoice_negative_and_summary(tmp_path):
 def test_detail_covers_every_source_row(tmp_path):
     rows = [
         _ok_row(inv="ok"),
-        _ok_row(name="不存在客户甲有限公司", inv="hold"),
+        _ok_row(ar=None, rev=None, inv="hold"),
     ]
     result = _run(tmp_path, rows)
     det = load_workbook(result.detail_path)
@@ -232,32 +263,85 @@ def test_detail_covers_every_source_row(tmp_path):
     det.close()
 
 
-def test_missing_master_stops(tmp_path):
+def test_missing_master_still_converts(tmp_path):
     inv = tmp_path / "发票.xlsx"
+    tpl = tmp_path / "数据模板.xlsx"
+    out = tmp_path / "out"
     _write_invoice(inv, [_ok_row()])
-    with pytest.raises(SystemExit):
-        convert.convert(
-            invoice_path=inv,
-            master_path=tmp_path / "nope.json",
-            out_dir=tmp_path / "out",
-            booking_date="2026-08-14",
-        )
+    _copy_template(tpl)
+    result = convert.convert(
+        invoice_path=inv,
+        out_dir=out,
+        booking_date="2026-08-14",
+        template_path=tpl,
+        master_path=None,
+    )
+    assert result.bookable_count == 1
+    assert result.kingdee_path.is_file()
+    kd = load_workbook(result.kingdee_path)
+    ws = kd[convert.KINGDEE_SHEET]
+    assert ws.cell(4, 19).value == "甲科技有限公司"
+    assert str(ws.cell(4, 22).value) == "15"
+    assert ws.cell(4, 25).value == "于占国"
+    kd.close()
 
 
-@pytest.mark.skipif(not GOLD_INVOICE.is_file() or not GOLD_MASTER.is_file(), reason="本机金标文件不在")
+def test_result_filename_beside_template(tmp_path):
+    inv = tmp_path / "发票明昊.xlsx"
+    tpl = tmp_path / "数据模板_凭证引入引出模板_0813.xlsx"
+    _write_invoice(inv, [_ok_row()])
+    _copy_template(tpl)
+    result = convert.convert(
+        invoice_path=inv,
+        out_dir=tmp_path,
+        booking_date="2026-08-14",
+        template_path=tpl,
+    )
+    assert result.kingdee_path == tmp_path / "数据模板_凭证引入引出模板_0813_结果.xlsx"
+    assert result.detail_path == tmp_path / "发票明昊_明细结果.xlsx"
+    assert tpl.is_file()
+    assert result.kingdee_path.is_file()
+    assert result.kingdee_path != tpl
+
+
+def test_inspect_two_excels_no_json(tmp_path):
+    inv = tmp_path / "发票.xlsx"
+    tpl = tmp_path / "数据模板.xlsx"
+    _write_invoice(inv, [_ok_row()])
+    _copy_template(tpl)
+    leftover = tmp_path / "数据模板_结果.xlsx"
+    _copy_template(leftover)
+    found = convert.inspect_dir(tmp_path)
+    assert Path(found["invoice"]).name == "发票.xlsx"
+    assert Path(found["template"]).name == "数据模板.xlsx"
+    assert found.get("master") in (None, "")
+
+
+def test_cli_writes_result_in_same_folder(tmp_path):
+    inv = tmp_path / "发票.xlsx"
+    tpl = tmp_path / "数据模板.xlsx"
+    _write_invoice(inv, [_ok_row()])
+    _copy_template(tpl)
+    rc = convert.main(["--input-dir", str(tmp_path), "--date", "2026-08-14"])
+    assert rc == 0
+    assert (tmp_path / "数据模板_结果.xlsx").is_file()
+    assert tpl.is_file()
+
+
+@pytest.mark.skipif(not GOLD_INVOICE.is_file(), reason="本机金标文件不在")
 def test_gold_minghao_30(tmp_path):
     out = tmp_path / "gold"
     out.mkdir()
+    master = GOLD_MASTER if GOLD_MASTER.is_file() else None
     result = convert.convert(
         invoice_path=GOLD_INVOICE,
-        master_path=GOLD_MASTER,
         out_dir=out,
         booking_date="2026-08-14",
+        master_path=master,
     )
     assert result.source_count == 30
-    assert result.hold_count == 8
-    assert result.bookable_count == 22
-    assert all(h.get("原因") for h in result.holds)
+    assert result.hold_count == 0
+    assert result.bookable_count == 30
     kd = load_workbook(result.kingdee_path)
     ws = kd["sheet1（名称勿改）"]
     n_lines = 0
@@ -269,6 +353,6 @@ def test_gold_minghao_30(tmp_path):
         n_lines += 1
         debit += Decimal(str(row[15] or 0))
         credit += Decimal(str(row[16] or 0))
-    assert n_lines == 66
+    assert n_lines == 90
     assert debit == credit
     kd.close()

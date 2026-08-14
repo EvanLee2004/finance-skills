@@ -4,6 +4,6 @@
 
 | 任务 | 工位 | 状态 | 备注 |
 |------|------|------|------|
-| 琪哥发票入金蝶 `qige-invoice-to-kingdee` | 正式 clone `项目/长期项目/财务部skills/finance-skills` · `main` | 使用中 | 2026-08-14 不开 fork；仓干净时在主目录串行 |
+| 琪哥发票入金蝶 `qige-invoice-to-kingdee` | 正式 clone `项目/长期项目/财务部skills/finance-skills` · `main` | 使用中 | 2026-08-14 复用主目录；两文件输入返工；不开 fork |
 
 `grok worktree list` 当前无本仓 fork。

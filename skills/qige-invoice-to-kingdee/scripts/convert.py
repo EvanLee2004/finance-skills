@@ -291,7 +291,7 @@ def read_invoices(path: Path, aliases: dict, divisor: Decimal) -> tuple[list[dic
     return items, None
 
 
-def classify(item: dict, master: Master, tax_account: str) -> Line:
+def classify(item: dict, master: Master | None, tax_account: str) -> Line:
     line = Line(
         source_row=item["source_row"],
         invoice_no=item["invoice_no"],
@@ -334,24 +334,30 @@ def classify(item: dict, master: Master, tax_account: str) -> Line:
         line.status = "待确认"
         line.reason = "组织架构重名或部门编码空"
         return line
-    dept, err = master.department(uniq[0])
-    if err:
-        line.status = "待确认"
-        line.reason = err
-        return line
-    emp, err = master.employee(line.applicant)
-    if err:
-        line.status = "待确认"
-        line.reason = err
-        return line
-    cus, err = master.customer(line.unit_name)
-    if err:
-        line.status = "待确认"
-        line.reason = err
-        return line
-    line.dept_code, line.dept_name = dept
-    line.emp_code, line.emp_name = emp
-    line.customer_code, line.customer_name = cus
+    line.dept_code = uniq[0]
+    line.dept_name = ""
+    line.emp_code = ""
+    line.emp_name = line.applicant
+    line.customer_code = ""
+    line.customer_name = line.unit_name
+    if master:
+        dept, err = master.department(line.dept_code)
+        if dept:
+            line.dept_code, line.dept_name = dept
+        emp, err = master.employee(line.applicant)
+        if err and "一对多" in err:
+            line.status = "待确认"
+            line.reason = err
+            return line
+        if emp:
+            line.emp_code, line.emp_name = emp
+        cus, err = master.customer(line.unit_name)
+        if err and "一对多" in err:
+            line.status = "待确认"
+            line.reason = err
+            return line
+        if cus:
+            line.customer_code, line.customer_name = cus
     line.status = "可入账"
     line.reason = ""
     _ = tax_account
@@ -488,18 +494,15 @@ def write_detail(path: Path, lines: list[Line]) -> Path:
 
 def convert(
     invoice_path: Path,
-    master_path: Path,
     out_dir: Path,
     booking_date: str | None = None,
     template_path: Path | None = None,
+    master_path: Path | None = None,
 ) -> ConvertResult:
     invoice_path = Path(invoice_path)
-    master_path = Path(master_path)
     out_dir = Path(out_dir)
     if not invoice_path.is_file():
         raise SystemExit("找不到发票 Excel")
-    if not master_path.is_file():
-        raise SystemExit("缺金蝶档案 json")
     template = Path(template_path) if template_path else TEMPLATE_PATH
     if not template.is_file():
         raise SystemExit("缺金蝶引入空模")
@@ -511,17 +514,23 @@ def convert(
     items, err = read_invoices(invoice_path, aliases, rules["tax_rate_divisor"])
     if err:
         raise SystemExit(err)
-    try:
-        master = Master(json.loads(master_path.read_text(encoding="utf-8")))
-    except Exception:
-        raise SystemExit("金蝶档案 json 读失败")
+    master = None
+    if master_path:
+        master_path = Path(master_path)
+        if not master_path.is_file():
+            raise SystemExit("金蝶档案 json 不存在")
+        try:
+            master = Master(json.loads(master_path.read_text(encoding="utf-8")))
+        except Exception:
+            raise SystemExit("金蝶档案 json 读失败")
     lines = [classify(item, master, rules["tax_account"]) for item in items]
     bookable = [x for x in lines if x.status == "可入账"]
     holds = [x for x in lines if x.status != "可入账"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = booking.replace("-", "")
-    detail_path = out_dir / f"发票入金蝶_明细_{stamp}.xlsx"
-    kingdee_path = out_dir / f"凭证引入_发票_{stamp}.xlsx"
+    detail_path = out_dir / f"{invoice_path.stem}_明细结果.xlsx"
+    kingdee_path = out_dir / f"{template.stem}_结果.xlsx"
+    if kingdee_path.resolve() == template.resolve():
+        kingdee_path = out_dir / f"{template.stem}_填写结果.xlsx"
     write_detail(detail_path, lines)
     write_kingdee(kingdee_path, bookable, rules, booking, template)
     return ConvertResult(
@@ -543,12 +552,30 @@ def convert(
     )
 
 
+def is_result_file(path: Path) -> bool:
+    return "结果" in path.stem
+
+
 def sniff_invoice(path: Path) -> bool:
+    if is_result_file(path):
+        return False
     try:
         wb = load_workbook(path, read_only=True, data_only=False)
         ok = "发票" in wb.sheetnames and "组织架构" in wb.sheetnames
         wb.close()
         return ok
+    except Exception:
+        return False
+
+
+def sniff_template(path: Path) -> bool:
+    if is_result_file(path):
+        return False
+    try:
+        wb = load_workbook(path, read_only=True, data_only=False)
+        names = wb.sheetnames
+        wb.close()
+        return KINGDEE_SHEET in names and "发票" not in names
     except Exception:
         return False
 
@@ -562,10 +589,13 @@ def sniff_master(path: Path) -> bool:
 
 
 def inspect_dir(input_dir: Path) -> dict:
-    found = {"invoice": None, "master": None}
+    found = {"invoice": None, "template": None, "master": None}
     for p in sorted(Path(input_dir).iterdir()):
-        if p.suffix.lower() in {".xlsx", ".xlsm"} and sniff_invoice(p) and not found["invoice"]:
-            found["invoice"] = str(p)
+        if p.suffix.lower() in {".xlsx", ".xlsm"}:
+            if sniff_invoice(p) and not found["invoice"]:
+                found["invoice"] = str(p)
+            elif sniff_template(p) and not found["template"]:
+                found["template"] = str(p)
         if p.suffix.lower() == ".json" and sniff_master(p) and not found["master"]:
             found["master"] = str(p)
     return found
@@ -577,7 +607,7 @@ def main(argv=None) -> int:
     parser.add_argument("--input-dir")
     parser.add_argument("--invoice")
     parser.add_argument("--master")
-    parser.add_argument("--out-dir")
+    parser.add_argument("--out-dir", "--out", dest="out_dir")
     parser.add_argument("--template")
     parser.add_argument("--date")
     args = parser.parse_args(argv)
@@ -585,27 +615,35 @@ def main(argv=None) -> int:
         target = Path(args.input_dir or SKILL_DIR / "工作区" / "input")
         found = inspect_dir(target)
         print(json.dumps(found, ensure_ascii=False, indent=2))
-        return 0 if found["invoice"] else 2
+        return 0 if found["invoice"] and found["template"] else 2
     invoice = Path(args.invoice) if args.invoice else None
+    template = Path(args.template) if args.template else None
     master = Path(args.master) if args.master else None
-    if args.input_dir:
-        found = inspect_dir(Path(args.input_dir))
+    input_dir = Path(args.input_dir) if args.input_dir else None
+    if input_dir:
+        found = inspect_dir(input_dir)
         invoice = invoice or (Path(found["invoice"]) if found["invoice"] else None)
+        template = template or (Path(found["template"]) if found["template"] else None)
         master = master or (Path(found["master"]) if found["master"] else None)
-    if not invoice or not master:
-        log("缺发票 Excel 或金蝶档案 json。把两份放进同一文件夹，或显式传 --invoice / --master。")
+    if not invoice:
+        log("缺发票 Excel。把改样发票簿和金蝶空模放进同一文件夹。")
         return 2
-    out_dir = Path(args.out_dir) if args.out_dir else invoice.parent
+    if not template:
+        template = TEMPLATE_PATH
+    if not template.is_file():
+        log("缺金蝶引入空模。把官方凭证引入模板和发票簿放进同一文件夹。")
+        return 2
+    out_dir = Path(args.out_dir) if args.out_dir else (input_dir or invoice.parent)
     result = convert(
         invoice_path=invoice,
-        master_path=master,
         out_dir=out_dir,
         booking_date=args.date,
-        template_path=Path(args.template) if args.template else None,
+        template_path=template,
+        master_path=master,
     )
     log(
         f"源有效行 {result.source_count}：可入账 {result.bookable_count}，待确认 {result.hold_count}。"
-        f"明细={result.detail_path}；金蝶表={result.kingdee_path}。未点引入。"
+        f"金蝶表={result.kingdee_path}；明细={result.detail_path}。未点引入。"
     )
     return 0
 
