@@ -66,7 +66,7 @@ flowchart TD
 
 | 文件 | 改什么 |
 |------|--------|
-| `config/rules.json` | 税科目、几张一记、币别 |
+| `config/rules.json` | 税科目、几张一记、币别、科目名称对照 |
 | `config/业务规则.md` | 口径说明 |
 | `config/列名别名.json` | 表头别名 |
 | `config/凭证引入空模.xlsx` | 她没带空模时的兜底 |

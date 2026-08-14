@@ -202,8 +202,12 @@ def test_three_lines_balance_and_tax_no_aux(tmp_path):
     credit = sum(Decimal(str(r[16] or 0)) for r in lines)
     assert debit == credit == Decimal("1060.00")
     assert lines[0][6] == "113103"
+    assert lines[0][7] == "应收账款_多语本地化服务"
     assert lines[1][6] == "510103"
+    assert lines[1][7] == "主营业务收入_多语本地化服务"
     assert lines[2][6] == "21710105"
+    assert lines[2][7] == "销项税额"
+    assert lines[0][12] == "人民币"
     assert lines[2][17] in (None, "")
     assert lines[2][21] in (None, "")
     assert lines[2][23] in (None, "")

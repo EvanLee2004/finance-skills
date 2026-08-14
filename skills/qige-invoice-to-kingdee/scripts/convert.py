@@ -89,6 +89,10 @@ def load_rules() -> dict:
         "exchange_rate": Decimal(str(data.get("exchange_rate") or 1)),
         "booking_date": str(data.get("booking_date") or "run_day"),
         "tax_rate_divisor": Decimal(str(data.get("tax_rate_divisor") or "1.06")),
+        "currency_name": str(data.get("currency_name") or "人民币"),
+        "account_names": {
+            str(k): str(v) for k, v in (data.get("account_names") or {}).items() if k and v
+        },
     }
 
 
@@ -391,7 +395,9 @@ def write_kingdee(path: Path, bookable: list[Line], rules: dict, booking: str, t
         "number": col_by_label(ws, "凭证号 #"),
         "expl": col_by_label(ws, "摘要 #"),
         "account": col_by_label(ws, "*科目.编码"),
+        "account_name": col_by_label(ws, "科目.名称"),
         "currency": col_by_label(ws, "*币别.编码"),
+        "currency_name": col_by_label(ws, "币别.名称"),
         "rate": col_by_label(ws, "*汇率"),
         "amountfor": col_by_label(ws, "原币金额"),
         "debit": col_by_label(ws, "借方 #"),
@@ -421,7 +427,12 @@ def write_kingdee(path: Path, bookable: list[Line], rules: dict, booking: str, t
                 ws.cell(row_i, cols["number"], batch)
                 ws.cell(row_i, cols["expl"], expl)
                 ws.cell(row_i, cols["account"], account)
+                acc_name = rules["account_names"].get(str(account), "")
+                if acc_name:
+                    ws.cell(row_i, cols["account_name"], acc_name)
                 ws.cell(row_i, cols["currency"], rules["currency"])
+                if rules.get("currency_name"):
+                    ws.cell(row_i, cols["currency_name"], rules["currency_name"])
                 ws.cell(row_i, cols["rate"], float(rules["exchange_rate"]))
                 val = float(amt)
                 ws.cell(row_i, cols["amountfor"], val)
