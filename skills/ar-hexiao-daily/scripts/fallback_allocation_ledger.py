@@ -5,13 +5,27 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 import amount_policy
 
 
 LEDGER_NAME = "父回款顺序分配台账.json"
 VERSION = 1
+
+
+def _norm_date(value) -> Optional[dt.date]:
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def ledger_path(workspace: Path) -> Path:
@@ -103,14 +117,19 @@ def history_totals(
     *,
     current_ar: str,
     excluded_parent_ars: Iterable[str] = (),
+    as_of_date=None,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Aggregate prior successful fallback allocations, excluding current/detailed parents."""
+    """Aggregate successful fallback allocations visible at the requested date."""
     excluded = {str(value or "").strip() for value in excluded_parent_ars}
     excluded.add(str(current_ar or "").strip())
+    cutoff = _norm_date(as_of_date)
     original: Dict[str, float] = {}
     local: Dict[str, float] = {}
     for ar, entry in (state.get("parents") or {}).items():
         if str(ar or "").strip() in excluded:
+            continue
+        entry_date = _norm_date(entry.get("hexiao_date"))
+        if cutoff is not None and entry_date is not None and entry_date > cutoff:
             continue
         for row in entry.get("allocations") or []:
             so = str(row.get("so") or "").strip()

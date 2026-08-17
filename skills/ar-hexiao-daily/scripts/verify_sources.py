@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 
 MANIFEST_NAME = "源文件清单.json"
+MUTABLE_NAME = "可写工作副本.json"
 # 需要保证只读的目录：她给的智云导出 + 她的表副本 + 台账（台账我们自己写，不纳入）
 WATCH_DIRS = ("01_智云导出", "02_我的表副本")
 
@@ -38,8 +39,30 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def mutable_path(workspace: Path) -> Path:
+    path = workspace / "03_台账" / MUTABLE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def mutable_files(workspace: Path) -> set[str]:
+    path = mutable_path(workspace)
+    if not path.is_file():
+        return set()
+    return {str(Path(item).resolve()) for item in json.loads(path.read_text(encoding="utf-8"))}
+
+
+def register_mutable(workspace: Path, path: Path) -> None:
+    values = mutable_files(workspace)
+    values.add(str(Path(path).resolve()))
+    mutable_path(workspace).write_text(
+        json.dumps(sorted(values), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def collect(workspace: Path) -> List[dict]:
     out: List[dict] = []
+    mutable = mutable_files(workspace)
     for d in WATCH_DIRS:
         base = workspace / d
         if not base.is_dir():
@@ -49,7 +72,7 @@ def collect(workspace: Path) -> List[dict]:
             # 纳进来会让 apply 之后的 verify 必然报「新出现」→ 一句吓人的假警报。
             if "备份" in p.parts:
                 continue
-            if p.is_file() and not p.name.startswith("~$"):
+            if p.is_file() and not p.name.startswith("~$") and str(p.resolve()) not in mutable:
                 out.append(
                     {
                         "path": str(p),
@@ -94,7 +117,11 @@ def do_verify(workspace: Path) -> int:
         print(f"ERROR: 找不到清单 {mp}；请先跑 snapshot", file=sys.stderr)
         return 2
     payload = json.loads(mp.read_text(encoding="utf-8"))
-    recorded: Dict[str, dict] = {f["path"]: f for f in payload.get("files", [])}
+    mutable = mutable_files(workspace)
+    recorded: Dict[str, dict] = {
+        f["path"]: f for f in payload.get("files", [])
+        if str(Path(f["path"]).resolve()) not in mutable
+    }
     problems: List[str] = []
     for path_s, item in recorded.items():
         p = Path(path_s)

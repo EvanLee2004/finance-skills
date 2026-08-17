@@ -25,6 +25,7 @@ from openpyxl.styles import Font, PatternFill
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import amount_policy  # noqa: E402
+import workbook_finalize  # noqa: E402
 
 
 IGNORED_FIELDS = frozenset({"收款时间", "收款方式"})
@@ -356,6 +357,7 @@ def run(final: Path, reference: Path, output: Path, case_paths: Optional[List[Pa
     _write_sheet(wb, "独有行", presence)
     output.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output)
+    workbook_finalize.finalize_static_report(output)
     return summary
 
 

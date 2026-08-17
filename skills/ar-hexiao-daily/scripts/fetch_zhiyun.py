@@ -51,7 +51,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ── 常量（表 ID / 字段 ID 来自 2026-07-09/22/23 勘探，非密钥）────────────────
 BASE_DEFAULT = "http://192.168.10.167:18880"
 APP_ID = "6ff4fb2e-e68c-4ee9-83a0-836de8f72c11"
-EXPORT_SCHEMA_VERSION = "2026-08-05-order-written-off-fallback-v2"
+EXPORT_SCHEMA_VERSION = "2026-08-13-flow-sales-name-v4"
 CREDENTIAL_SERVICE = "codex.ar-hexiao-daily.zhiyun"
 
 WS_HUIKUAN = "6555d2b1f9460e517040ba6c"  # 回款记录（唯一入口）
@@ -81,7 +81,7 @@ REL_SODLINE = "订单明细"  # 只借它的 dataSource 定位「订单明细」
 XIADAN_COLS = [
     "SO", "订单NUM", "订单号", "新智云单号",
     "订单已核销金额", "订单已核销金额/本币",
-    "交付额/原币", "汇率", "结算币种", "订单名称",
+    "交付额/原币", "汇率", "结算币种", "订单名称", "项目交付日期",
 ]
 # ⚠「同币种核销明细信息」表里**没有**叫 SO 的字段，SO 藏在关联字段「订单NUM」的 name 里
 #   （2026-07-23 实调：该表字段 = 核销记录NUM/回款记录NUM/订单NUM/本次核销金额/…）。
@@ -478,9 +478,45 @@ def extract_related_orders(
             "rate": values.get("汇率"),
             "currency": values.get("结算币种"),
             "name": values.get("订单名称"),
+            "delivery_date": values.get("项目交付日期"),
+            "delivery_date_status": "关联下单明确值" if values.get("项目交付日期") else "",
             "source": source,
         })
     return out
+
+
+def lookup_order_delivery_date(
+    client: ZhiyunClient,
+    worksheet_id: str,
+    controls: Sequence[dict],
+    so: str,
+) -> Tuple[str, str]:
+    """从智云“下单”订单详情按 SO 精确回读项目交付日期；缺失或冲突都不猜。"""
+    if not worksheet_id:
+        return "", "项目交付日期缺失：无法定位下单数据源"
+    names = client.name_map(controls)
+    opts = client.option_maps(controls)
+    try:
+        hits = client.search_rows(worksheet_id, so)
+    except Exception as e:
+        return "", f"项目交付日期回读失败：{type(e).__name__}"
+    dates = set()
+    for row in hits:
+        values = pick_named(row, names, opts, XIADAN_COLS)
+        found_so = extract_so(
+            values.get("SO") or values.get("订单NUM")
+            or values.get("订单号") or values.get("新智云单号") or ""
+        )
+        if found_so != so:
+            continue
+        raw = str(values.get("项目交付日期") or "").strip()
+        if raw:
+            dates.add(raw)
+    if len(dates) == 1:
+        return next(iter(dates)), "订单详情明确值"
+    if len(dates) > 1:
+        return "", "项目交付日期冲突：订单详情存在多个不同日期"
+    return "", "项目交付日期缺失：订单详情没有明确值"
 
 
 def write_xlsx(path: Path, headers: List[str], rows: List[List[Any]]) -> None:
@@ -563,9 +599,11 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
 
     hk_ctrls = client.controls(WS_HUIKUAN)
     hk_opts = client.option_maps(hk_ctrls)
+    sales_cid = client.id_by_name(hk_ctrls, "销售")
     cid_xiadan = client.id_by_name(hk_ctrls, REL_XIADAN)
     cid_jiesuan = client.id_by_name(hk_ctrls, REL_JIESUAN)
     cid_mingxi = client.id_by_name(hk_ctrls, REL_HEXIAO_MINGXI)
+    ws_xiadan = client.datasource_of(WS_HUIKUAN, REL_XIADAN)
     ws_mingxi = client.datasource_of(WS_HUIKUAN, REL_HEXIAO_MINGXI)
     ws_sodline = client.datasource_of(WS_HUIKUAN, REL_SODLINE)
     if not cid_xiadan:
@@ -576,7 +614,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     # ── ① 回款记录 ────────────────────────────────────────────
     hk_headers = [
         "回款记录ID", "核销日期", "到账日期", "到账金额/原币", "到账金额/本币",
-        "手续费/原币", "原币币种", "回款类型", "核销状态", "开票客户", "rowid",
+        "手续费/原币", "原币币种", "回款类型", "核销状态", "开票客户", "销售名称", "rowid",
         "仅历史累计父记录",
     ]
     hk_out: List[List[Any]] = []
@@ -597,12 +635,13 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
             "huikuan_type": htype,
             "status": _plain(row.get(F_HK["status"]), hk_opts.get(F_HK["status"])),
             "customer": _plain(row.get(F_HK["customer_txt"])) or _plain(row.get(F_HK["customer_rel"])),
+            "sales_name": _plain(row.get(sales_cid), hk_opts.get(sales_cid)) if sales_cid else "",
             "rowid": row.get("rowid") or "",
         }
         payments.append(rec)
         hk_out.append([rec[k] for k in (
             "ar", "hexiao_date", "arrival_date", "amount_orig", "amount_local",
-            "fee", "currency", "huikuan_type", "status", "customer", "rowid")] + ["否"])
+            "fee", "currency", "huikuan_type", "status", "customer", "sales_name", "rowid")] + ["否"])
 
     day_tag = day.replace("-", "")
     # ── ② 下单栏（每笔 → SO + 交付额）+ ③ 同币种核销明细 ───────
@@ -613,6 +652,8 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     ars_without_orders: List[str] = []
     settlement_recovered_ars: List[str] = []
     settlement_rows_used = 0
+    delivery_date_cache: Dict[str, Tuple[str, str]] = {}
+    xiadan_ctrls = client.controls(ws_xiadan) if ws_xiadan else []
 
     for rec in payments:
         rid = str(rec.get("rowid") or "")
@@ -632,10 +673,17 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
             so = v["so"]
             if so not in all_so:
                 all_so.append(so)
+            if not str(v.get("delivery_date") or "").strip():
+                if so not in delivery_date_cache:
+                    delivery_date_cache[so] = lookup_order_delivery_date(
+                        client, ws_xiadan, xiadan_ctrls, so
+                    )
+                v["delivery_date"], v["delivery_date_status"] = delivery_date_cache[so]
             xd_out.append([
                 rec["ar"], so, v.get("written_off"), v.get("written_off_local"),
                 v.get("deliver"), v.get("rate"),
-                v.get("currency"), v.get("name"), v.get("source"),
+                v.get("currency"), v.get("name"), v.get("delivery_date"),
+                v.get("delivery_date_status"), v.get("source"),
             ])
         if not related:
             ars_without_orders.append(rec["ar"])
@@ -706,6 +754,7 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
             _plain(row.get(F_HK["huikuan_type"]), hk_opts.get(F_HK["huikuan_type"])),
             _plain(row.get(F_HK["status"]), hk_opts.get(F_HK["status"])),
             _plain(row.get(F_HK["customer_txt"])) or _plain(row.get(F_HK["customer_rel"])),
+            _plain(row.get(sales_cid), hk_opts.get(sales_cid)) if sales_cid else "",
             row.get("rowid") or "",
             "是",
         ])
@@ -724,7 +773,8 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
     write_xlsx(
         out_dir / f"订单交付_{day_tag}.xlsx",
         ["回款记录ID", "SO", "订单已核销金额", "订单已核销金额/本币",
-         "交付额/原币", "汇率", "结算币种", "订单名称", "单号来源"],
+         "交付额/原币", "汇率", "结算币种", "订单名称", "项目交付日期",
+         "交付日期取数状态", "单号来源"],
         xd_out,
     )
     write_xlsx(
@@ -783,6 +833,10 @@ def fetch_day(client: ZhiyunClient, day: str, out_dir: Path) -> dict:
         "核销明细行数": len(mx_out),
         "跨父回款历史核销补取行数": historical_added,
         "订单明细SOD行数": len(sod_out),
+        "缺项目交付日期的SO": sorted({
+            str(row[1] or "").strip() for row in xd_out
+            if str(row[1] or "").strip() and not str(row[8] or "").strip()
+        }),
         "回款类型分布": type_counts,
         "无下单行的AR": ars_without_orders,
         "查不到SOD的SO": so_without_sod,

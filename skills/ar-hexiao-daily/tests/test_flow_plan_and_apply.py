@@ -17,6 +17,7 @@ import apply_flow as AF  # noqa: E402
 import apply_all as AA  # noqa: E402
 import apply_to_copy as AC  # noqa: E402
 import build_worklist as BW  # noqa: E402
+import workbook_finalize as WF  # noqa: E402
 
 
 def _sha(p: Path) -> str:
@@ -56,6 +57,9 @@ def _result_with_flow_items(items_meta):
             "flow_row_no": m.get("flow_row_no"),
             "flow_order_suggest": m.get("flow_order_suggest") or "",
             "flow_order_existing": m.get("flow_order_existing") or "",
+            "split_payment_source": {
+                "so_delivery_local": m.get("delivery_amount", 100.0),
+            },
             "five_cols": {"回款明细": 100, "是否结账": "是"},
         }
         (auto if it["bucket"] == "auto" else hold).append(it)
@@ -132,6 +136,23 @@ def test_plan_strong_write_weak_hand():
     assert by["AR4"]["verdict"] == "hand"
     assert plan["counts"]["write"] == 1
     assert plan["counts"]["hand"] >= 3
+
+
+@pytest.mark.parametrize("matched_by", ["三键(原币公式)", "三键(原币公式含手续费)"])
+def test_plan_accepts_unique_foreign_formula_match_as_strong(matched_by):
+    result = _result_with_flow_items([{
+        "ar": "AR_FX",
+        "so": "SO_FX",
+        "flow_hits": 1,
+        "flow_matched_by": matched_by,
+        "flow_file": "流转A.xlsx",
+        "flow_sheet": "明细",
+        "flow_row_no": 2,
+        "flow_order_suggest": "SO_FX",
+        "updated": "是",
+    }])
+    plan = BFP.build_plan(result)
+    assert plan["items"][0]["verdict"] == "write"
 
 
 def test_flow_plan_always_covers_all_results_without_named_so_filter():
@@ -236,6 +257,42 @@ def test_apply_flow_skips_hand(tmp_path):
     assert _sha(flow_path) == before
 
 
+def test_apply_flow_idempotent_rerun_replaces_report_with_static_zero_change(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "02_我的表副本").mkdir(parents=True)
+    (ws / "04_产出").mkdir(parents=True)
+    flow_path = ws / "02_我的表副本" / "流转测.xlsx"
+    _flow_xlsx(flow_path, [("2026-08-10", "甲", 100, "SO1", "是", "汇")])
+    before = _sha(flow_path)
+    plan = {
+        "items": [{
+            "ar": "AR1", "verdict": "write", "file": "流转测.xlsx", "sheet": "明细",
+            "row_no": 2, "order_suggest": "SO1", "updated_suggest": "是",
+            "matched_by": "三键", "hits": 1,
+        }],
+        "counts": {"write": 1, "hand": 0, "skip": 0},
+    }
+    plan_p = ws / "04_产出" / "流转写入计划_校验后.json"
+    plan_p.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    report = ws / "04_产出" / "流转变更清单_20260810.xlsx"
+
+    rc = AF.main([
+        "--plan", str(plan_p), "--workspace", str(ws), "--in-place",
+        "--report", str(report),
+    ])
+
+    assert rc == 0
+    assert _sha(flow_path) == before
+    wb = openpyxl.load_workbook(str(report), read_only=True, data_only=True)
+    assert wb["流转变更清单"].max_row == 1
+    wb.close()
+    calc = WF.inspect_calculation(report)
+    assert calc.formula_cells == 0
+    assert calc.calc_chain_present is False
+    assert calc.full_calc_on_load in ("", "0")
+    assert calc.force_full_calc in ("", "0")
+
+
 def test_worklist_shows_flow_mk(tmp_path):
     result = _result_with_flow_items([
         {
@@ -291,9 +348,13 @@ def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.xlsx"
     ledger.write_bytes(b"placeholder")
     calls = []
+    events = []
 
-    monkeypatch.setattr(AA.apply_to_copy, "main", lambda _args: 0)
-    monkeypatch.setattr(AA.apply_flow, "main", lambda _args: 0)
+    monkeypatch.setattr(AA.apply_to_copy, "main", lambda _args: events.append("ledger") or 0)
+    monkeypatch.setattr(
+        AA.apply_flow, "main",
+        lambda args: events.append("prefill" if "prefill" in args else "status") or 0,
+    )
     monkeypatch.setattr(AA, "_record_done", lambda *args, **kwargs: None)
     monkeypatch.setattr(AA, "_resnapshot_sources", lambda workspace: calls.append(Path(workspace)))
 
@@ -309,6 +370,7 @@ def test_apply_all_resnapshots_after_all_writes_succeed(tmp_path, monkeypatch):
 
     assert rc == 0
     assert calls == [tmp_path]
+    assert events == ["prefill", "ledger", "status"]
 
 
 def test_plan_empty_so_preserves_existing_order_and_exact_strong():
@@ -444,3 +506,91 @@ def test_apply_all_skips_flow_when_ledger_fails(tmp_path):
     ])
     assert rc != 0
     assert _sha(flow_path) == before
+
+
+def test_flow_plan_writes_so_and_delivery_amount_one_per_line():
+    result = _result_with_flow_items([
+        {
+            "ar": "AR1", "so": "SO26010001", "delivery_amount": 1234.5,
+            "flow_hits": 1, "flow_matched_by": "三键", "flow_file": "流转.xlsx",
+            "flow_sheet": "明细", "flow_row_no": 2,
+        },
+        {
+            "ar": "AR1", "so": "SO26010002", "delivery_amount": 2000,
+            "flow_hits": 1, "flow_matched_by": "三键", "flow_file": "流转.xlsx",
+            "flow_sheet": "明细", "flow_row_no": 2,
+        },
+    ])
+    item = BFP.build_plan(result)["items"][0]
+    assert item["order_suggest"] == "SO26010001  1,234.50\nSO26010002  2,000.00"
+
+
+def test_flow_plan_missing_delivery_amount_is_hand_not_partial_auto_write():
+    result = _result_with_flow_items([{
+        "ar": "AR1", "so": "SO26010001", "delivery_amount": None,
+        "flow_hits": 1, "flow_matched_by": "三键", "flow_file": "流转.xlsx",
+        "flow_sheet": "明细", "flow_row_no": 2,
+    }])
+    item = BFP.build_plan(result)["items"][0]
+    assert item["verdict"] == "hand"
+    assert "交付金额缺失" in item["reason"]
+
+
+def test_final_status_partial_marks_only_unsettled_so_red():
+    result = _result_with_flow_items([
+        {
+            "ar": "AR1", "so": "SO26010001", "delivery_amount": 100,
+            "flow_hits": 1, "flow_matched_by": "三键", "flow_file": "流转.xlsx",
+            "flow_sheet": "明细", "flow_row_no": 2,
+        },
+        {
+            "ar": "AR1", "so": "SO26010002", "delivery_amount": 200,
+            "flow_hits": 1, "flow_matched_by": "三键", "flow_file": "流转.xlsx",
+            "flow_sheet": "明细", "flow_row_no": 2,
+        },
+    ])
+    plan = BFP.build_plan(result)
+    final = BFP.finalize_plan_after_ledger(plan, {
+        "write": [{"ar": "AR1", "so": "SO26010001"}],
+        "skip": [],
+        "conflict": [{"ar": "AR1", "so": "SO26010002"}],
+    })
+    item = final["items"][0]
+    assert item["updated_suggest"] == "部分"
+    assert item["red_sos"] == ["SO26010002"]
+    colors = {run["text"].split()[0]: run["color"] for run in item["order_rich_runs"]}
+    assert colors["SO26010001"] == ""
+    assert colors["SO26010002"] == "FFFF0000"
+
+
+def test_apply_flow_prefill_then_status_with_partial_red(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "02_我的表副本").mkdir(parents=True)
+    flow_path = ws / "02_我的表副本" / "流转测.xlsx"
+    _flow_xlsx(flow_path, [("2026-08-11", "甲公司", 300, "", "旧状态")])
+    item = {
+        "ar": "AR1", "verdict": "write", "file": "流转测.xlsx", "sheet": "明细",
+        "row_no": 2, "so_list": ["SO26010001", "SO26010002"],
+        "order_suggest": "SO26010001  100.00\nSO26010002  200.00",
+        "updated_suggest": "部分", "red_sos": ["SO26010002"],
+        "write_order": True, "write_updated": True,
+    }
+    plan_p = tmp_path / "plan.json"
+    plan_p.write_text(json.dumps({"items": [item]}, ensure_ascii=False), encoding="utf-8")
+
+    assert AF.main(["--plan", str(plan_p), "--workspace", str(ws), "--in-place", "--phase", "prefill"]) == 0
+    wb = openpyxl.load_workbook(flow_path, read_only=True, data_only=True)
+    row = next(wb["明细"].iter_rows(min_row=2, max_row=2, values_only=True))
+    wb.close()
+    assert row[3] == item["order_suggest"]
+    assert row[4] == "旧状态"
+
+    assert AF.main(["--plan", str(plan_p), "--workspace", str(ws), "--in-place", "--phase", "status"]) == 0
+    wb = openpyxl.load_workbook(flow_path, read_only=False, data_only=True, rich_text=True)
+    row = next(wb["明细"].iter_rows(min_row=2, max_row=2, values_only=True))
+    wb.close()
+    assert str(row[3]) == item["order_suggest"]
+    assert row[4] == "部分"
+    colors = AF._line_colors(row[3])
+    assert not colors.get("SO26010001")
+    assert colors["SO26010002"].endswith("FF0000")

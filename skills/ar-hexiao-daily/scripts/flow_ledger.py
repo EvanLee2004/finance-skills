@@ -9,9 +9,11 @@
 设计要点
 - **按表头内容认表，不按文件名**（她各渠道分开好几张：汇款/微信/支付宝/美元户）。
 - 匹配键按可靠度排序（参考李尚 business-rules §3）：
-  1. 到账日期 + 净到账额 + 公司名/汇款人
-  2. 到账日期 + （净额 + 手续费）+ 公司名  ← 微信/支付宝把客户支付额拆成净额与手续费
-  3. 到账日期 + 金额（任一口径），公司名对不上 → **弱命中**，仍要人确认
+  1. 先按到账日期 + 到账额筛选候选行；PayPal/美元户若金额格为
+     `原币金额*流转汇率`，改用公式中的原币金额与智云原币到账额比较；
+  2. 再以智云销售名称/客户名称匹配流转表公司名称/汇款人，四种组合任一成立即名称命中；
+  3. 微信/支付宝另允许到账日期 +（净额 + 手续费）按同样名称规则匹配；
+  4. 日期金额命中但四种名称组合都不成立 → **弱命中**，仍要人确认。
 - 命中 0 → E0；命中 >1 → E12；命中 1 → 给出行号与建议单号。
 - 匹配只读；**写入**见 `apply_flow.py`（确认后、仅强三键唯一命中）。
 """
@@ -23,7 +25,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
@@ -34,10 +36,16 @@ import amount_policy  # noqa: E402
 _REQUIRED_HINTS = ("单号",)
 _SIGNATURE_COLS = ("是否更新应收款", "是否已登记系统", "收款形式")
 _NAME_HINTS = ("公司名称", "汇款人", "对方户名")
+_REMITTER_ALIASES = ("汇款人", "汇款人名称", "对方户名")
 # 盈亏表专有列：出现即判定"这不是流转表"
 _LEDGER_MARKERS = ("计提金额", "新智云单号", "回款明细", "是否结账")
 
 _NOISE = re.compile(r"[（）()\s·、,，.。\-—_]|有限公司|股份|集团|分公司|总公司")
+_SIMPLE_FX_FORMULA = re.compile(
+    r"^\s*=\s*(?P<original>[+]?(?:\d+(?:\.\d*)?|\.\d+))\s*"
+    r"\*\s*(?P<rate>[+]?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+)
+_FORMULA_ORIGINAL_FORMS = frozenset({"paypal", "美元户"})
 
 
 def normalize_name(s: str) -> str:
@@ -61,6 +69,21 @@ def amounts_equal(
     if a is None or b is None:
         return False
     return abs(float(a) - float(b)) <= tol
+
+
+def formula_original_amount(formula, form: str) -> Tuple[Optional[float], Optional[float]]:
+    """只为 PayPal/美元户解析简单的 `=原币*汇率`，其它公式一律不猜。"""
+    normalized_form = re.sub(r"\s+", "", str(form or "")).lower()
+    if normalized_form not in _FORMULA_ORIGINAL_FORMS or not isinstance(formula, str):
+        return None, None
+    matched = _SIMPLE_FX_FORMULA.fullmatch(formula)
+    if not matched:
+        return None, None
+    original = float(matched.group("original"))
+    rate = float(matched.group("rate"))
+    if original < 0 or rate <= 0:
+        return None, None
+    return original, rate
 
 
 class FlowLedger:
@@ -91,9 +114,13 @@ class FlowLedger:
         aliases = common.load_aliases()
         inst = cls()
         for p in paths:
+            wb = None
             try:
                 wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+                wb_formula = openpyxl.load_workbook(str(p), read_only=True, data_only=False)
             except Exception:
+                if wb is not None:
+                    wb.close()
                 continue
             for ws in wb.worksheets:
                 all_rows = list(ws.iter_rows(values_only=True))
@@ -111,6 +138,7 @@ class FlowLedger:
                     )
                 except ValueError:
                     continue
+                formula_rows = list(wb_formula[ws.title].iter_rows(values_only=True))
                 opt = {}
                 for k in ["收款形式", "是否更新应收款", "是否已登记系统"]:
                     idx = common.fuzzy_find_col(
@@ -118,6 +146,8 @@ class FlowLedger:
                     )
                     if idx is not None:
                         opt[k] = idx
+                company_idx = common.fuzzy_find_col(headers, ("公司名称", "客户名称"))
+                remitter_idx = common.fuzzy_find_col(headers, _REMITTER_ALIASES)
                 rno = hrow + 1
                 for row in it:
                     rno += 1
@@ -130,18 +160,38 @@ class FlowLedger:
                     amount = common.to_number(cell(cols["金额"]))
                     if date is None and amount is None:
                         continue
+                    company_name = str(cell(company_idx) or "").strip()
+                    remitter = str(cell(remitter_idx) or "").strip()
+                    payer = company_name or remitter or str(cell(cols["公司名称"]) or "").strip()
+                    form = (
+                        str(cell(opt.get("收款形式")) or "").strip()
+                        if "收款形式" in opt
+                        else ""
+                    )
+                    amount_formula = (
+                        formula_rows[rno - 1][cols["金额"]]
+                        if rno - 1 < len(formula_rows)
+                        and cols["金额"] < len(formula_rows[rno - 1])
+                        else None
+                    )
+                    formula_orig, formula_rate = formula_original_amount(amount_formula, form)
                     inst.rows.append(
                         {
                             "file": p.name,
                             "sheet": ws.title,
                             "row_no": rno,  # 1-based，含表头
                             "date": date,
-                            "payer": str(cell(cols["公司名称"]) or "").strip(),
+                            "company_name": company_name,
+                            "remitter": remitter,
+                            "payer": payer,
                             "amount": amount,
-                            "order_cell": str(cell(cols["单号"]) or "").strip(),
-                            "form": str(cell(opt.get("收款形式")) or "").strip()
-                            if "收款形式" in opt
+                            "amount_formula": amount_formula
+                            if isinstance(amount_formula, str) and amount_formula.startswith("=")
                             else "",
+                            "formula_orig_amount": formula_orig,
+                            "formula_rate": formula_rate,
+                            "order_cell": str(cell(cols["单号"]) or "").strip(),
+                            "form": form,
                             "updated": str(cell(opt.get("是否更新应收款")) or "").strip()
                             if "是否更新应收款" in opt
                             else "",
@@ -152,6 +202,7 @@ class FlowLedger:
                     )
                 inst.sources.append(f"{p.name}#{ws.title}")
             wb.close()
+            wb_formula.close()
         return inst
 
     @classmethod
@@ -170,10 +221,12 @@ class FlowLedger:
         amount_net: Optional[float],
         customer: str = "",
         fee: Optional[float] = 0.0,
+        sales_name: str = "",
     ) -> dict:
         """
         返回 {"hits": n, "rows": [...], "matched_by": str}
-        matched_by ∈ 三键 / 三键(含手续费) / 日期+金额(名字不符) / ""
+        matched_by ∈ 三键 / 三键(含手续费) / 三键(原币公式) /
+        三键(原币公式含手续费) / 日期+金额(名字不符) / ""
         """
         date = common.norm_date(arrival_date)
         gross = None
@@ -183,19 +236,82 @@ class FlowLedger:
         def by_date(r):
             return date is not None and r["date"] == date
 
-        cand_net = [r for r in self.rows if by_date(r) and amounts_equal(r["amount"], amount_net)]
+        def uses_formula_original(row: dict) -> bool:
+            return row.get("formula_orig_amount") is not None
+
+        cand_net = [
+            r for r in self.rows
+            if by_date(r)
+            and not uses_formula_original(r)
+            and amounts_equal(r.get("amount"), amount_net)
+        ]
+        cand_orig = [
+            r for r in self.rows
+            if by_date(r)
+            and uses_formula_original(r)
+            and amounts_equal(r.get("formula_orig_amount"), amount_net)
+        ]
         cand_gross = (
-            [r for r in self.rows if by_date(r) and amounts_equal(r["amount"], gross)]
+            [
+                r for r in self.rows
+                if by_date(r)
+                and not uses_formula_original(r)
+                and amounts_equal(r.get("amount"), gross)
+            ]
+            if gross is not None
+            else []
+        )
+        cand_orig_gross = (
+            [
+                r for r in self.rows
+                if by_date(r)
+                and uses_formula_original(r)
+                and amounts_equal(r.get("formula_orig_amount"), gross)
+            ]
             if gross is not None
             else []
         )
 
-        for pool, tag in ((cand_net, "三键"), (cand_gross, "三键(含手续费)")):
-            named = [r for r in pool if name_similar(r["payer"], customer)]
-            if named:
-                return {"hits": len(named), "rows": named, "matched_by": tag}
+        def names_match(row: dict) -> bool:
+            flow_names = {
+                str(row.get("company_name") or "").strip(),
+                str(row.get("remitter") or "").strip(),
+                str(row.get("payer") or "").strip(),
+            }
+            zhiyun_names = {
+                str(sales_name or "").strip(),
+                str(customer or "").strip(),
+            }
+            return any(
+                name_similar(flow_name, zhiyun_name)
+                for flow_name in flow_names
+                for zhiyun_name in zhiyun_names
+                if flow_name and zhiyun_name
+            )
 
-        weak = cand_net + [r for r in cand_gross if r not in cand_net]
+        def matched_tag(rows: List[dict], normal: str, formula: str) -> str:
+            bases = {uses_formula_original(r) for r in rows}
+            if bases == {True}:
+                return formula
+            if bases == {False}:
+                return normal
+            return "三键(混合金额口径)"
+
+        direct = cand_net + [r for r in cand_orig if r not in cand_net]
+        with_fee = cand_gross + [r for r in cand_orig_gross if r not in cand_gross]
+        for pool, normal_tag, formula_tag in (
+            (direct, "三键", "三键(原币公式)"),
+            (with_fee, "三键(含手续费)", "三键(原币公式含手续费)"),
+        ):
+            named = [r for r in pool if names_match(r)]
+            if named:
+                return {
+                    "hits": len(named),
+                    "rows": named,
+                    "matched_by": matched_tag(named, normal_tag, formula_tag),
+                }
+
+        weak = direct + [r for r in with_fee if r not in direct]
         if weak:
             return {
                 "hits": len(weak),
@@ -223,6 +339,48 @@ class FlowLedger:
             return existing or ""
         parts = ([existing.strip()] if existing and existing.strip() else []) + add
         return "\n".join(parts)
+
+    @staticmethod
+    def suggest_order_amount_cell(
+        so_amounts: Sequence[Tuple[str, Optional[float]]], existing: str = ""
+    ) -> str:
+        """生成「SO  交付金额」文本；每个 SO 独占一行，已有其它订单保持不动。"""
+        ordered: List[Tuple[str, Optional[float]]] = []
+        seen = set()
+        for so, amount in so_amounts:
+            so = str(so or "").strip()
+            if not so or so in seen:
+                continue
+            seen.add(so)
+            ordered.append((so, amount))
+
+        lines = [x.strip() for x in str(existing or "").replace("\r", "").split("\n") if x.strip()]
+        result: List[str] = []
+        consumed = set()
+        for line in lines:
+            matched = None
+            for so, amount in ordered:
+                if re.search(rf"(?<![A-Z0-9]){re.escape(so)}(?![A-Z0-9])", line, re.I):
+                    matched = (so, amount)
+                    break
+            if matched is None:
+                result.append(line)
+                continue
+            so, amount = matched
+            if so in consumed:
+                continue
+            consumed.add(so)
+            result.append(FlowLedger._format_so_amount(so, amount))
+        for so, amount in ordered:
+            if so not in consumed:
+                result.append(FlowLedger._format_so_amount(so, amount))
+        return "\n".join(result)
+
+    @staticmethod
+    def _format_so_amount(so: str, amount: Optional[float]) -> str:
+        if amount is None:
+            return so
+        return f"{so}  {float(amount):,.2f}"
 
 
 def derive_flow_status(so_states: Sequence[str]) -> str:
@@ -325,14 +483,16 @@ def annotate_records(
             str(rec.get("shoukuan_date")),
             amount,
             rec.get("customer") or "",
+            rec.get("sales_name") or "",
             rec.get("fee") or 0.0,
         )
         if key not in cache:
             cache[key] = flow.match(
                 rec.get("shoukuan_date"),
                 amount,
-                rec.get("customer") or "",
-                rec.get("fee") or 0.0,
+                customer=rec.get("customer") or "",
+                fee=rec.get("fee") or 0.0,
+                sales_name=rec.get("sales_name") or "",
             )
         hit = cache[key]
         d = common.norm_date(rec.get("shoukuan_date"))
@@ -397,8 +557,14 @@ def main(argv=None) -> int:
         return 1
     filled = sum(1 for r in flow.rows if r.get("order_cell"))
     multi = sum(1 for r in flow.rows if len(re.split(r"[\s\n]+", r["order_cell"].strip())) > 1)
+    formula_original = sum(1 for r in flow.rows if r.get("formula_orig_amount") is not None)
     print(f"已填单号行: {filled}；其中多 SO 行: {multi}")
-    print(json.dumps({"sources": flow.sources, "rows": len(flow.rows)}, ensure_ascii=False))
+    print(f"PayPal/美元户原币公式行: {formula_original}")
+    print(json.dumps({
+        "sources": flow.sources,
+        "rows": len(flow.rows),
+        "formula_original_rows": formula_original,
+    }, ensure_ascii=False))
     return 0
 
 

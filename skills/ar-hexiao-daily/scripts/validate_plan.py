@@ -278,6 +278,36 @@ def resolve_item_row(item: dict, rows: Dict[int, dict]) -> tuple[Optional[int], 
     )
 
 
+def resolve_same_so_multi_sod_row(
+    item: dict, rows: Dict[int, dict]
+) -> tuple[Optional[int], str]:
+    """多 SOD 合并行允许以任一成员 SOD 或合并后的 SOD 文本唯一重定位。"""
+    op = item.get("row_operation") or {}
+    ref = int(item.get("ledger_row_ref") or 0)
+    so = str(op.get("so") or item.get("so") or "").strip()
+    member_sods = {str(x or "").strip() for x in (op.get("member_sods") or []) if str(x or "").strip()}
+    combined = str(op.get("combined_sod") or "").strip()
+
+    def identity(row: Optional[dict]) -> bool:
+        if row is None or (so and row.get("SO") != so):
+            return False
+        sod = str(row.get("SOD") or "").strip()
+        return not sod or sod in member_sods or sod == combined
+
+    if ref and identity(rows.get(ref)):
+        return ref, ""
+    candidates = [row_no for row_no, row in rows.items() if identity(row)]
+    target = op.get("target_five_cols") or item.get("five_cols") or {}
+    exact = [row_no for row_no in candidates if _matches_planned_fields(rows[row_no], target)]
+    if len(exact) == 1:
+        return exact[0], ""
+    if len(candidates) == 1:
+        return candidates[0], ""
+    if not candidates:
+        return None, "按 SO 和多 SOD 成员找不到合并核销目标行"
+    return None, f"按 SO 和多 SOD 成员找到 {len(candidates)} 行，无法唯一重定位"
+
+
 def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> Optional[dict]:
     """复核逐笔分笔链的结构、金额守恒及完整幂等状态。"""
     op = item.get("row_operation") or {}
@@ -460,6 +490,100 @@ def _check_settlement_tail_aggregate(item: dict, rows: Dict[int, dict], ref: int
     return {"verdict": "write", "reason": "结清尾差审计和目标行快照一致，可以合并写入"}
 
 
+def _same_so_multi_sod_error(op: dict) -> str:
+    member_sods = [str(x or "").strip() for x in (op.get("member_sods") or [])]
+    case_ids = [str(x or "").strip() for x in (op.get("member_case_ids") or [])]
+    try:
+        so_delivery = round(float(op["so_delivery"]), 2)
+        current = round(float(op["current_received"]), 2)
+        amounts = [round(float(x), 2) for x in (op.get("member_amounts") or [])]
+        deliveries = [round(float(x), 2) for x in (op.get("member_deliveries") or [])]
+    except (KeyError, TypeError, ValueError):
+        return "同 SO 多 SOD 合并金额参数缺失或不是数字"
+    if (
+        not op.get("so") or not op.get("ar") or not op.get("target_case_id")
+        or len(member_sods) < 2 or len(set(member_sods)) != len(member_sods)
+        or any(not sod for sod in member_sods)
+        or len(case_ids) != len(member_sods) or len(set(case_ids)) != len(case_ids)
+        or any(not case_id for case_id in case_ids)
+        or len(amounts) != len(member_sods) or len(deliveries) != len(member_sods)
+        or any(value <= 0 for value in amounts + deliveries)
+        or so_delivery <= 0
+        or abs(sum(amounts) - current) > 0.011
+        or abs(current - so_delivery) > 0.011
+        or abs(sum(deliveries) - so_delivery) > 0.011
+        or str(op.get("combined_sod") or "") != "、".join(member_sods)
+        or str(op.get("target_case_id") or "") not in case_ids
+    ):
+        return "同 SO 多 SOD 合并计划不完整或金额不守恒"
+    target = op.get("target_five_cols") or {}
+    if (
+        common.to_number(target.get("计提")) != so_delivery
+        or common.to_number(target.get("回款明细")) != current
+        or target.get("是否结账") != "是"
+        or str(target.get("实收SOD") or "") != str(op.get("combined_sod") or "")
+    ):
+        return "同 SO 多 SOD 合并目标值与审计参数不一致"
+    return ""
+
+
+def _check_same_so_multi_sod_aggregate(
+    item: dict, rows: Dict[int, dict], ref: int
+) -> dict:
+    op = item.get("row_operation") or {}
+    error = _same_so_multi_sod_error(op)
+    if error:
+        return {"verdict": "conflict", "reason": error}
+    row = rows.get(int(ref))
+    if row is None:
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行已不存在"}
+    so = str(op.get("so") or "").strip()
+    member_sods = {str(x or "").strip() for x in (op.get("member_sods") or [])}
+    combined = str(op.get("combined_sod") or "").strip()
+    if row.get("SO") not in ("", so):
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行的 SO 已变化"}
+    row_sod = str(row.get("SOD") or "").strip()
+    if row_sod and row_sod not in member_sods and row_sod != combined:
+        return {"verdict": "conflict", "reason": "目标行 SOD 不属于本次合并组"}
+    target = op.get("target_five_cols") or {}
+    receivable = common.to_number(row.get("应收金额"))
+    if (
+        receivable is not None
+        and abs(float(receivable) - float(op["so_delivery"])) <= 0.011
+        and _matches_planned_fields(row, target)
+        and (not row.get("_差异列存在") or _norm(row.get("差异")) in ("", "None"))
+    ):
+        return {"verdict": "skip", "reason": "同 SO 多 SOD 已按 SO 交付金额合并写入，幂等跳过"}
+    source_receivable = common.to_number(op.get("source_receivable"))
+    if source_receivable is None or receivable is None or abs(float(receivable) - float(source_receivable)) > 0.011:
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行的原应收已变化"}
+    if not _matches_planned_fields(row, op.get("source_five_cols") or {}):
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行在判定后被改动"}
+    source_derived = op.get("source_derived_cols") or {}
+    if "差异" in source_derived and _norm(row.get("差异")) != _norm(source_derived.get("差异")):
+        return {"verdict": "conflict", "reason": "同 SO 多 SOD 合并目标行差异列在判定后被改动"}
+    return {"verdict": "write", "reason": "同一 SO 完整多 SOD 组金额守恒，可合并写入一行"}
+
+
+def _absorbed_multi_sod_error(item: dict, target: Optional[dict]) -> str:
+    marker = item.get("same_so_multi_sod_absorbed") or {}
+    if not marker:
+        return ""
+    if target is None:
+        return "多 SOD 合并引用的目标不存在"
+    op = target.get("row_operation") or {}
+    if op.get("type") != "same_so_multi_sod_aggregate":
+        return "多 SOD 合并引用的目标不是合法合并计划"
+    if (
+        str(marker.get("target_case_id") or "") != str(target.get("case_id") or "")
+        or str(item.get("case_id") or "") not in set(op.get("member_case_ids") or [])
+        or set(marker.get("member_sods") or []) != set(op.get("member_sods") or [])
+        or common.to_number(marker.get("so_delivery")) != common.to_number(op.get("so_delivery"))
+    ):
+        return "多 SOD 合并引用与目标审计信息不一致"
+    return _same_so_multi_sod_error(op)
+
+
 def _absorbed_tail_item_error(item: dict, target: Optional[dict]) -> str:
     marker = item.get("tail_tolerance_absorbed") or {}
     if not marker:
@@ -587,6 +711,98 @@ def resolve_split_chain_row(item: dict, rows: Dict[int, dict]) -> tuple[Optional
     return resolve_item_row(item, rows)
 
 
+def _check_so_accrual_backfills(item: dict, rows: Dict[int, dict]) -> dict:
+    """逐行复核 SO 全 SOD 结清后要补填的历史计提。"""
+    checked: List[dict] = []
+    write_count = 0
+    for source in item.get("so_accrual_backfills") or []:
+        entry = dict(source)
+        ref = entry.get("ledger_row_ref")
+        so = str(entry.get("so") or "").strip()
+        sod = str(entry.get("sod") or "").strip()
+        accrual = common.to_number(entry.get("accrual"))
+        reason = ""
+        verdict = "skip"
+        row = rows.get(int(ref)) if ref is not None else None
+        if ref is None or row is None:
+            verdict, reason = "conflict", f"历史计提补填行 {ref!r} 不存在"
+        elif not _matches_identity(row, so, sod):
+            verdict, reason = (
+                "conflict",
+                f"历史计提补填第 {ref} 行身份变化：表里={row.get('SO')}/{row.get('SOD')}，计划={so}/{sod}",
+            )
+        elif accrual is None:
+            verdict, reason = "conflict", f"历史计提补填第 {ref} 行缺少有效交付金额"
+        else:
+            same_business_rows = [
+                row_no for row_no, current in rows.items()
+                if current.get("SO") == so and current.get("SOD") == sod
+            ]
+            if not same_business_rows or any(
+                str(rows[row_no].get("是否结账") or "").strip() != "是"
+                for row_no in same_business_rows
+            ):
+                verdict, reason = (
+                    "conflict",
+                    f"{so}/{sod} 仍存在未结账业务行，禁止补计提",
+                )
+            elif int(ref) != max(same_business_rows):
+                verdict, reason = (
+                    "conflict",
+                    f"历史计提必须写在 {so}/{sod} 最后一条已结清业务行 {max(same_business_rows)}，计划却是 {ref}",
+                )
+            else:
+                current_accrual = common.to_number(row.get("计提"))
+                if current_accrual is not None and abs(float(current_accrual) - float(accrual)) > 0.011:
+                    verdict, reason = (
+                        "conflict",
+                        f"第 {ref} 行计提已有值 {current_accrual}，与智云交付额 {float(accrual):.2f} 不一致，禁止覆盖",
+                    )
+                else:
+                    needs_write = current_accrual is None
+                    difference = common.to_number(entry.get("difference"))
+                    if entry.get("difference") is not None:
+                        if difference is None:
+                            verdict, reason = "conflict", f"第 {ref} 行差异不是有效数字"
+                        elif not row.get("_差异列存在"):
+                            verdict, reason = "conflict", f"第 {ref} 行需要写差异，但盈亏表没有差异列"
+                        else:
+                            current_difference = common.to_number(row.get("差异"))
+                            if (
+                                current_difference is not None
+                                and abs(float(current_difference) - float(difference)) > 0.011
+                            ):
+                                verdict, reason = (
+                                    "conflict",
+                                    f"第 {ref} 行差异已有值 {current_difference}，与计划 {float(difference):.2f} 不一致，禁止覆盖",
+                                )
+                            elif current_difference is None:
+                                needs_write = True
+                    if verdict != "conflict":
+                        verdict = "write" if needs_write else "skip"
+                        reason = (
+                            "SO 下全部 SOD 已结清，补填历史计提"
+                            if needs_write else "历史计提已与智云交付额一致"
+                        )
+        entry["_check"] = {"verdict": verdict, "reason": reason}
+        checked.append(entry)
+        if verdict == "conflict":
+            item["so_accrual_backfills"] = checked + [
+                dict(rest) for rest in (item.get("so_accrual_backfills") or [])[len(checked):]
+            ]
+            return {"verdict": "conflict", "reason": reason}
+        if verdict == "write":
+            write_count += 1
+    item["so_accrual_backfills"] = checked
+    return {
+        "verdict": "write" if write_count else "skip",
+        "reason": (
+            f"另有 {write_count} 条历史 SOD 计提需要补填"
+            if write_count else "无需补填历史 SOD 计提"
+        ),
+    }
+
+
 def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     """
     单条复核 → {verdict: write|skip|conflict, reason}
@@ -598,6 +814,8 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     five = item.get("five_cols") or {}
     derived = item.get("derived_cols") or {}
     so, sod = (item.get("so") or "").strip(), (item.get("sod") or "").strip()
+    op = item.get("row_operation") or {}
+    is_multi_sod_aggregate = op.get("type") == "same_so_multi_sod_aggregate"
 
     if not ref:
         return {"verdict": "conflict", "reason": "判定结果里没有行号，无法定位"}
@@ -606,7 +824,7 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
         return {"verdict": "conflict", "reason": f"第 {ref} 行在表里不存在了（表被删过行？）"}
 
     # ① 行号还指着同一单吗——她插过行的话这里必然对不上
-    if sod and row["SOD"] and row["SOD"] != sod:
+    if not is_multi_sod_aggregate and sod and row["SOD"] and row["SOD"] != sod:
         return {
             "verdict": "conflict",
             "reason": f"第 {ref} 行现在是 {row['SOD']}，不是计划里的 {sod}（表在判定之后被插过行）",
@@ -640,7 +858,6 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
         except (TypeError, ValueError):
             return {"verdict": "conflict", "reason": f"{k} 不是数字：{derived[k]!r}"}
 
-    op = item.get("row_operation") or {}
     if op:
         if op.get("type") == "split_payment_chain":
             chain_result = _check_split_payment_chain(item, rows, int(ref))
@@ -650,6 +867,8 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             return _check_preserved_aggregate_tail(item, rows, int(ref))
         elif op.get("type") == "settlement_tail_aggregate":
             return _check_settlement_tail_aggregate(item, rows, int(ref))
+        elif op.get("type") == "same_so_multi_sod_aggregate":
+            return _check_same_so_multi_sod_aggregate(item, rows, int(ref))
         elif op.get("type") != "split_below":
             return {"verdict": "conflict", "reason": f"未知行操作：{op.get('type')!r}"}
         if op.get("type") == "split_below" and row.get("_差异列存在") and _norm(row.get("差异")) not in ("", "None"):
@@ -821,15 +1040,29 @@ def validate(
         original_ref = it.get("ledger_row_ref")
         operation_type = (it.get("row_operation") or {}).get("type")
         is_split_chain = operation_type == "split_payment_chain"
+        is_multi_sod_aggregate = operation_type == "same_so_multi_sod_aggregate"
         is_guarded_aggregate = operation_type in {
             "preserve_aggregate_tail_tolerance", "settlement_tail_aggregate",
+            "same_so_multi_sod_aggregate",
         }
         absorbed_marker = it.get("tail_tolerance_absorbed") or {}
+        multi_sod_marker = it.get("same_so_multi_sod_absorbed") or {}
         # 分笔链必须逐行复核完整性，不能因为其中已有一行结账就短路为“整单已写”。
         # 1元尾差聚合行也必须复核判定时快照，防止计划生成后被人工改动。
         settled_ref = None if (is_split_chain or is_guarded_aggregate) else settled_without_open_row(it, rows)
         if audit_error:
             res = {"verdict": "conflict", "reason": audit_error}
+        elif multi_sod_marker:
+            target = by_case_id.get(str(multi_sod_marker.get("target_case_id") or ""))
+            marker_error = _absorbed_multi_sod_error(it, target)
+            res = (
+                {"verdict": "conflict", "reason": marker_error}
+                if marker_error
+                else {
+                    "verdict": "skip",
+                    "reason": "该 SOD 已并入同一 SO 的合并核销行，不重复写金额",
+                }
+            )
         elif absorbed_marker:
             target = by_case_id.get(str(absorbed_marker.get("target_case_id") or ""))
             marker_error = _absorbed_tail_item_error(it, target)
@@ -852,6 +1085,8 @@ def validate(
         else:
             if is_split_chain:
                 resolved_ref, locate_error = resolve_split_chain_row(it, rows)
+            elif is_multi_sod_aggregate:
+                resolved_ref, locate_error = resolve_same_so_multi_sod_row(it, rows)
             else:
                 resolved_ref, locate_error = resolve_item_row(it, rows)
             if locate_error:
@@ -861,6 +1096,15 @@ def validate(
                     it["_relocated_from"] = int(original_ref)
                     it["ledger_row_ref"] = int(resolved_ref)
                 res = check_one(it, rows)
+        if it.get("so_accrual_backfills"):
+            backfill_res = _check_so_accrual_backfills(it, rows)
+            if backfill_res["verdict"] == "conflict":
+                res = backfill_res
+            elif backfill_res["verdict"] == "write" and res["verdict"] != "conflict":
+                res = {
+                    "verdict": "write",
+                    "reason": f"{res.get('reason') or ''}；{backfill_res['reason']}".strip("；"),
+                }
         ref = it.get("ledger_row_ref")
         # 合法分笔回款链允许多个父 AR 计划共享同一个源行；写入层会为每一笔创建
         # 独立业务行。没有同一链标记的重复行仍然冲突。
@@ -907,11 +1151,87 @@ def validate(
     return out
 
 
+def validate_by_year(
+    plan: dict,
+    rows_by_year: Dict[int, Dict[int, dict]],
+    ledger_paths: Optional[Dict[int, Path]] = None,
+) -> dict:
+    """分别校验各年度盈亏表，避免相同行号在不同年度之间被误判为冲突。"""
+    ledger_paths = ledger_paths or {}
+    grouped: Dict[int, List[dict]] = {}
+    missing_year_items: List[dict] = []
+    for item in plan.get("auto") or []:
+        if item.get("ledger_year") is None:
+            missing_year_items.append(item)
+            continue
+        year = int(item["ledger_year"])
+        grouped.setdefault(year, []).append(item)
+
+    merged = {"write": [], "skip": [], "conflict": []}
+    merged["conflict"].extend({
+        **dict(item),
+        "_check": {
+            "verdict": "conflict",
+            "reason": "项目交付年度未确定；禁止默认写入本年度盈亏表",
+        },
+    } for item in missing_year_items)
+    checks = {}
+    for year, items in grouped.items():
+        if year not in rows_by_year:
+            merged["conflict"].extend({
+                **dict(item),
+                "_check": {
+                    "verdict": "conflict",
+                    "reason": f"找不到 {year} 年盈亏核算表，无法执行写前校验",
+                },
+            } for item in items)
+            continue
+        subplan = {**plan, "auto": items}
+        path = ledger_paths.get(year)
+        checked = validate(subplan, rows_by_year[year], ledger_path=path)
+        for bucket in merged:
+            merged[bucket].extend(checked.get(bucket) or [])
+        if path is not None:
+            checks[str(year)] = {
+                "path": str(path),
+                "sha256": common.sha256_file(path),
+            }
+
+    out = {
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "hexiao_date": plan.get("hexiao_date") or "",
+        "counts": {key: len(value) for key, value in merged.items()},
+        "selection": {
+            "mode": "all_auto_by_delivery_year",
+            "selected": sum(len(v) for v in grouped.values()),
+            "total_auto": sum(len(v) for v in grouped.values()),
+        },
+        "duplicate_writeoff_audits": plan.get("duplicate_writeoff_audits") or {},
+        "duplicate_writeoff_audit_sha256": plan.get("duplicate_writeoff_audit_sha256") or "",
+        "parent_fallback_allocations": plan.get("parent_fallback_allocations") or {},
+        "business_rules": plan.get("business_rules") or {},
+        "ledger_targets": {
+            str(year): str(path) for year, path in sorted(ledger_paths.items())
+        },
+        "ledger_checks": checks,
+        **merged,
+    }
+    if len(checks) == 1:
+        only = next(iter(checks.values()))
+        out["ledger_path"] = only["path"]
+        out["ledger_sha256"] = only["sha256"]
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="写入前校验计划（plan→validate→execute）")
     # --plan / --ledger 都可不给：不给就去工作区自己找（脏活归程序，别让 AI/她填路径）
     ap.add_argument("--plan", default="", help="判定结果 json；不给则取 04_产出 最新")
-    ap.add_argument("--ledger", default="", help="盈亏核算表副本（只读）；不给则取 02_我的表副本/*盈亏*")
+    ap.add_argument("--ledger", default="", help="本年度盈亏核算表副本（只读）")
+    ap.add_argument(
+        "--ledger-year", action="append", default=[], metavar="YEAR=PATH",
+        help="其它年度盈亏工作副本，可重复，例如 2025=...xlsx",
+    )
     ap.add_argument("--out", default="", help="校验后计划 json")
     # 防呆：同上。--workspace 还用于在没给 --out 时把结果落进正确的 04_产出/
     ap.add_argument("--workspace", default="", help="工作区根（没给 --out 时用它定产出位置）")
@@ -926,15 +1246,6 @@ def main(argv=None) -> int:
         return c[-1] if c else None
 
     plan_p = Path(args.plan) if args.plan else (_latest("判定结果_*.json") or Path(""))
-    if args.ledger:
-        ledger_p = Path(args.ledger)
-    else:
-        cand = [
-            p for p in sorted((ws / "02_我的表副本").glob("*盈亏*"))
-            if not p.name.startswith(("~$", "."))
-        ] if (ws / "02_我的表副本").is_dir() else []
-        ledger_p = cand[0] if cand else Path("")
-
     if not plan_p.is_file():
         print(
             f"ERROR: 找不到判定结果{f' {plan_p}' if args.plan else f'（{out_dir} 里没有 判定结果_*.json）'}"
@@ -942,21 +1253,43 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 2
-    if not ledger_p.is_file():
-        print(
-            f"ERROR: 找不到盈亏表{f' {ledger_p}' if args.ledger else f'（{ws}/02_我的表副本/ 里没有 *盈亏* 文件）'}",
-            file=sys.stderr,
-        )
-        return 2
-
     plan = json.loads(plan_p.read_text(encoding="utf-8"))
     try:
-        rows = read_ledger_rows(ledger_p)
+        ledger_paths = {
+            int(year): Path(path).resolve()
+            for year, path in (plan.get("ledger_targets") or {}).items()
+            if path
+        }
+        if args.ledger or args.ledger_year:
+            ledger_paths.update(common.discover_year_ledgers(
+                ws, primary=args.ledger, year_specs=args.ledger_year
+            ))
+        elif not ledger_paths:
+            ledger_paths = common.discover_year_ledgers(ws)
+        if any(item.get("ledger_year") is None for item in (plan.get("auto") or [])):
+            raise ValueError("判定结果存在未确定交付年度的自动写入项；禁止默认使用本年度盈亏表")
+        needed_years = {
+            int(item["ledger_year"])
+            for item in (plan.get("auto") or [])
+        }
+        missing = sorted(
+            year for year in needed_years
+            if year not in ledger_paths or not ledger_paths[year].is_file()
+        )
+        if missing:
+            raise ValueError(
+                "缺少写前校验所需年度盈亏表：" + "、".join(map(str, missing))
+            )
+        rows_by_year = {
+            year: read_ledger_rows(path)
+            for year, path in ledger_paths.items()
+            if year in needed_years
+        }
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
-    result = validate(plan, rows, ledger_path=ledger_p)
+    result = validate_by_year(plan, rows_by_year, ledger_paths)
     # 没给 --out 就落进**解析后的工作区**的 04_产出/，别落到 plan 旁边（会跟日清分家）
     out_p = Path(args.out) if args.out else (out_dir / "写入计划_校验后.json")
     out_p.parent.mkdir(parents=True, exist_ok=True)

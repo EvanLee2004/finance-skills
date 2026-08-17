@@ -71,8 +71,53 @@ def test_settlement_relation_recovers_order_when_xiadan_is_empty():
         "rate": "",
         "currency": "人民币CNY",
         "name": "",
+        "delivery_date": "",
+        "delivery_date_status": "",
         "source": "结算",
     }]
+
+
+def test_related_order_reads_project_delivery_date_from_order_detail():
+    controls = [
+        {"controlId": "order", "controlName": "SO"},
+        {"controlId": "date", "controlName": "项目交付日期"},
+    ]
+    rows = [{"order": "SO24100160", "date": "2025-08-13"}]
+
+    got = F.extract_related_orders(rows, controls, F.REL_XIADAN)
+
+    assert got[0]["delivery_date"] == "2025-08-13"
+    assert got[0]["delivery_date_status"] == "关联下单明确值"
+
+
+def test_lookup_order_delivery_date_requires_unique_explicit_date():
+    controls = [
+        {"controlId": "order", "controlName": "SO"},
+        {"controlId": "date", "controlName": "项目交付日期"},
+    ]
+
+    class FakeClient:
+        @staticmethod
+        def name_map(ctrls):
+            return {c["controlId"]: c["controlName"] for c in ctrls}
+
+        @staticmethod
+        def option_maps(_ctrls):
+            return {}
+
+        @staticmethod
+        def search_rows(_worksheet_id, _so):
+            return [
+                {"order": "SO24100160", "date": "2025-08-13"},
+                {"order": "SO24100160", "date": "2025-08-13"},
+                {"order": "SO99999999", "date": "2024-01-01"},
+            ]
+
+    value, status = F.lookup_order_delivery_date(
+        FakeClient(), "orders", controls, "SO24100160"
+    )
+    assert value == "2025-08-13"
+    assert status == "订单详情明确值"
 
 
 def test_no_credentials_in_source():

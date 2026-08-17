@@ -3,6 +3,7 @@
 步骤6 判定 v2（单入口 · SOD 级）：展开、E 码、覆盖率硬校验、SOD 子集与整段对齐。
 """
 import datetime as dt
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,13 @@ def test_no_writeoff_means_full_settle():
     assert len(recs) == 3
     assert sum(r["amount_orig"] for r in recs) == 5800.0
     assert all("父回款总到账按交付额从小到大" in r["match_basis"] for r in recs)
+
+
+def test_expand_payment_propagates_payment_sales_name():
+    p = _pay(sales_name="销售甲")
+    recs = C.expand_payment(p, {})
+    assert recs
+    assert all(r["sales_name"] == "销售甲" for r in recs)
 
 
 def test_parent_fallback_stops_after_partial_smallest_order():
@@ -220,6 +228,8 @@ def test_sod_expansion_full():
     assert len(recs) == 3
     assert {r["sod"] for r in recs} == {"SOD1", "SOD2", "SOD3"}
     assert sum(r["amount_orig"] for r in recs) == 300.0
+    assert all(r["so_delivery_local"] == 300.0 for r in recs)
+    assert all(r["all_sods"] == ["SOD1", "SOD2", "SOD3"] for r in recs)
 
 
 def test_sod_expansion_subset():
@@ -239,6 +249,128 @@ def test_sod_ambiguous_holds_e5():
     recs = C.expand_payment(p, {})
     assert len(recs) == 1 and recs[0]["forced_code"] == "E5"
     assert "SOD1" in recs[0]["forced_reason"]  # 候选要摆出来给她挑
+
+
+def test_sod_ambiguous_amount_over_first_waterfalls_to_next_open_sod():
+    """首个未结清 SOD 核满后，余额必须继续核销下一行，最后不足时拆行。"""
+    p = _pay(
+        amount=250.0,
+        orders=[{"so": "SO1", "deliver": 300.0}],
+        writeoffs={"SO1": 250.0},
+    )
+    p["sod_lines"] = {"SO1": [
+        {"sod": "SOD1", "deliver": 100.0},
+        {"sod": "SOD2", "deliver": 100.0},
+        {"sod": "SOD3", "deliver": 100.0},
+    ]}
+    recs = C.expand_payment(p, {})
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0, "jiezhang": "否"},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0, "jiezhang": "否"},
+        12: {"so": "SO1", "sod": "SOD3", "yingshou": 100.0, "jiezhang": "否"},
+    })
+
+    result = C.classify_records(recs, led, {})
+
+    assert result["counts"] == {"auto": 3, "hold": 0, "exception": 0, "total": 3}
+    assert [(x["sod"], x["five_cols"]["回款明细"]) for x in result["auto"]] == [
+        ("SOD1", 100.0),
+        ("SOD2", 100.0),
+        ("SOD3", 50.0),
+    ]
+    # 新规则：同一 SO 的 SOD3 尚未结清时，前两个已结清 SOD 也暂不计提。
+    assert result["auto"][0]["five_cols"]["计提"] is None
+    assert result["auto"][1]["five_cols"]["计提"] is None
+    assert result["auto"][2]["row_operation"]["type"] == "split_below"
+    assert result["auto"][2]["row_operation"]["unpaid_receivable"] == 50.0
+    assert all(
+        "W_AMBIGUOUS_SOD_WATERFALL" in x["warning_codes"]
+        for x in result["auto"]
+    )
+
+
+def test_sod_ambiguous_waterfall_skips_closed_sod():
+    """历史已结清 SOD 不占用本次金额，从首个未结清行开始。"""
+    p = _pay(
+        amount=150.0,
+        orders=[{"so": "SO1", "deliver": 300.0}],
+        writeoffs={"SO1": 150.0},
+    )
+    p["sod_lines"] = {"SO1": [
+        {"sod": "SOD1", "deliver": 100.0},
+        {"sod": "SOD2", "deliver": 100.0},
+        {"sod": "SOD3", "deliver": 100.0},
+    ]}
+    recs = C.expand_payment(p, {})
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0, "huikuan": 100.0, "jiezhang": "是"},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0, "jiezhang": "否"},
+        12: {"so": "SO1", "sod": "SOD3", "yingshou": 100.0, "jiezhang": "否"},
+    })
+
+    result = C.classify_records(recs, led, {})
+
+    assert [(x["sod"], x["five_cols"]["回款明细"]) for x in result["auto"]] == [
+        ("SOD2", 100.0),
+        ("SOD3", 50.0),
+    ]
+
+
+def test_sod_ambiguous_waterfall_rejects_amount_over_all_open_capacity():
+    """全部未结清 SOD 都不够承接时整笔挂起，不允许只写前半段。"""
+    p = _pay(
+        amount=250.0,
+        orders=[{"so": "SO1", "deliver": 300.0}],
+        writeoffs={"SO1": 250.0},
+    )
+    p["sod_lines"] = {"SO1": [
+        {"sod": "SOD1", "deliver": 100.0},
+        {"sod": "SOD2", "deliver": 100.0},
+        {"sod": "SOD3", "deliver": 100.0},
+    ]}
+    recs = C.expand_payment(p, {})
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0, "huikuan": 100.0, "jiezhang": "是"},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0, "jiezhang": "否"},
+        12: {"so": "SO1", "sod": "SOD3", "yingshou": 100.0, "jiezhang": "否"},
+    })
+
+    result = C.classify_records(recs, led, {})
+
+    assert result["counts"] == {"auto": 0, "hold": 0, "exception": 1, "total": 1}
+    assert result["exception"][0]["code"] == "E4"
+    assert "可承接金额合计 200.00" in result["exception"][0]["reason"]
+
+
+def test_sod_ambiguous_waterfall_regression_amount_exceeds_first_delivery():
+    """回归：12219.27 不得再直接与首个 SOD 的 4045.34 比较后报 E4。"""
+    p = _pay(
+        amount=12219.27,
+        orders=[{"so": "SO1", "deliver": 29765.91}],
+        writeoffs={"SO1": 12219.27},
+    )
+    p["sod_lines"] = {"SO1": [
+        {"sod": "SOD1", "deliver": 4045.34},
+        {"sod": "SOD2", "deliver": 5000.00},
+        {"sod": "SOD3", "deliver": 20720.57},
+    ]}
+    recs = C.expand_payment(p, {})
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 4045.34, "jiezhang": "否"},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 5000.00, "jiezhang": "否"},
+        12: {"so": "SO1", "sod": "SOD3", "yingshou": 20720.57, "jiezhang": "否"},
+    })
+
+    result = C.classify_records(recs, led, {})
+
+    assert result["counts"]["exception"] == 0
+    assert result["counts"]["hold"] == 0
+    assert [(x["sod"], x["five_cols"]["回款明细"]) for x in result["auto"]] == [
+        ("SOD1", 4045.34),
+        ("SOD2", 5000.00),
+        ("SOD3", 3173.93),
+    ]
+    assert round(sum(x["five_cols"]["回款明细"] for x in result["auto"]), 2) == 12219.27
 
 
 def test_no_sod_falls_back_to_so():
@@ -379,6 +511,60 @@ def test_match_multi_same_amount_is_e8():
     assert how == "E8" and row is None and len(cands) == 2
 
 
+def test_match_multi_same_amount_uses_unique_sod_within_candidates():
+    """同 SO 同金额时，实收金额列已有唯一 SOD 就应安全消歧。"""
+    led = _led({
+        1: {"so": "SO1", "sod": "SOD1", "yingshou": 18.7},
+        2: {"so": "SO1", "sod": "SOD2", "yingshou": 18.7},
+    })
+    assert led.match("SO1", "SOD1", 18.7) == (1, "SO+应收金额+SOD", [1, 2])
+    assert led.match("SO1", "SOD2", 18.7) == (2, "SO+应收金额+SOD", [1, 2])
+
+
+def test_match_multi_same_amount_does_not_use_sod_outside_amount_candidates():
+    """SOD 即使存在，也不能跨出当前金额候选集选另一行。"""
+    led = _led({
+        1: {"so": "SO1", "sod": "SOD1", "yingshou": 18.7},
+        2: {"so": "SO1", "sod": "SOD2", "yingshou": 18.7},
+        3: {"so": "SO1", "sod": "SOD3", "yingshou": 99.0},
+    })
+    row, how, cands = led.match("SO1", "SOD3", 18.7)
+    assert row is None and how == "E8" and cands == [1, 2]
+
+
+def test_match_multi_same_amount_duplicate_sod_uses_only_outstanding_row():
+    """同金额同 SOD 的拆分行只有一个未结清承接行时，沿用既有安全规则。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": 18.7, "jiezhang": "是",
+        },
+        2: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": None, "jiezhang": "否",
+        },
+    })
+    assert led.match("SO1", "SOD1", 18.7) == (
+        2, "SO+应收金额+SOD未结清行", [1, 2]
+    )
+
+
+def test_match_multi_same_amount_duplicate_sod_multiple_open_rows_stays_e8():
+    """同金额同 SOD 仍有多个未结清候选时必须继续挂起。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": None, "jiezhang": "否",
+        },
+        2: {
+            "so": "SO1", "sod": "SOD1", "yingshou": 18.7,
+            "huikuan": None, "jiezhang": "否",
+        },
+    })
+    row, how, cands = led.match("SO1", "SOD1", 18.7)
+    assert row is None and how == "E8" and cands == [1, 2]
+
+
 def test_positional_alignment_resolves_equal_amounts():
     """整段逐位对齐（SOD 降序 ↔ 行号升序）能严格消掉等额歧义。"""
     led = _led({
@@ -450,6 +636,21 @@ def _rec(so="SO26010001", sod="SOD26010001", amount=100.0, **kw):
     }
     r.update(kw)
     return r
+
+
+def test_classify_equal_amount_rows_use_existing_unique_sod():
+    """SO26060458 类：同额 SOD 已在实收金额列时应分别定位，不得误报 E8。"""
+    led = _led({
+        10: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0},
+        11: {"so": "SO1", "sod": "SOD2", "yingshou": 100.0},
+        12: {"so": "SO1", "sod": "SOD3", "yingshou": 50.0},
+    })
+    first = C.classify_one(_rec("SO1", "SOD1", 100.0), led, {}, 0.0, 2026)
+    second = C.classify_one(_rec("SO1", "SOD2", 100.0), led, {}, 0.0, 2026)
+    third = C.classify_one(_rec("SO1", "SOD3", 50.0), led, {}, 0.0, 2026)
+    assert (first["bucket"], first["ledger_row_ref"]) == ("auto", 10)
+    assert (second["bucket"], second["ledger_row_ref"]) == ("auto", 11)
+    assert (third["bucket"], third["ledger_row_ref"]) == ("auto", 12)
 
 
 def test_auto_happy_path():
@@ -629,12 +830,107 @@ def test_repeated_partial_only_counts_current_sod():
 
 
 def test_cross_year_only_after_ledger_miss():
-    """2025 的单**在表里有行**就正常填；只有表里找不到才判 E3。"""
+    """单表底层判定仍按传入的目标年度表定位。"""
     led = _led({1: {"so": "SO25120734", "sod": "", "yingshou": 52200.0}})
     r = C.classify_one(_rec("SO25120734", "SOD25121039", 52200.0), led, {}, 0.0, 2026)
     assert r["bucket"] == "auto", r
-    r2 = C.classify_one(_rec("SO25080089", "SOD25080128", 1.0), led, {}, 0.0, 2026)
+    r2 = C.classify_one(
+        _rec(
+            "SO25080089", "SOD25080128", 1.0,
+            delivery_date=dt.date(2025, 8, 1), target_ledger_year=2025,
+        ),
+        led, {}, 0.0, 2026,
+    )
     assert r2["code"] == "E3" and r2["bucket"] == "hold"
+
+
+def test_cross_year_routes_only_to_matching_annual_ledger():
+    current = _led({
+        10: {"so": "SO26010001", "sod": "SOD26010001", "yingshou": 100.0},
+        11: {"so": "SO25010001", "sod": "SOD25010001", "yingshou": 50.0},
+    })
+    prior = _led({
+        20: {"so": "SO25010001", "sod": "SOD25010001", "yingshou": 50.0},
+    })
+    result = C.classify_records_by_year(
+        [
+            _rec("SO26010001", "SOD26010001", 100.0, delivery_date=dt.date(2026, 1, 1)),
+            _rec("SO25010001", "SOD25010001", 50.0, delivery_date=dt.date(2025, 1, 1)),
+        ],
+        {2026: current, 2025: prior},
+        {},
+        {2026: Path("2026年盈亏.xlsx"), 2025: Path("2025年盈亏.xlsx")},
+    )
+    assert result["counts"] == {"auto": 2, "hold": 0, "exception": 0, "total": 2}
+    routed = {item["so"]: item for item in result["auto"]}
+    assert routed["SO26010001"]["ledger_year"] == 2026
+    assert routed["SO26010001"]["ledger_row_ref"] == 10
+    assert routed["SO25010001"]["ledger_year"] == 2025
+    assert routed["SO25010001"]["ledger_row_ref"] == 20
+
+
+def test_cross_year_missing_annual_ledger_holds_even_if_current_table_has_order():
+    current = _led({
+        11: {"so": "SO25010001", "sod": "SOD25010001", "yingshou": 50.0},
+    })
+    result = C.classify_records_by_year(
+        [_rec("SO25010001", "SOD25010001", 50.0, delivery_date=dt.date(2025, 1, 1))],
+        {2026: current},
+        {},
+        {2026: Path("2026年盈亏.xlsx")},
+    )
+    item = result["hold"][0]
+    assert item["code"] == "E3"
+    assert "没有提供 2025 年盈亏" in item["reason"]
+
+
+def test_cross_year_annual_ledger_missing_order_holds_e3():
+    prior = _led({
+        20: {"so": "SO25019999", "sod": "SOD25019999", "yingshou": 50.0},
+    })
+    result = C.classify_records_by_year(
+        [_rec("SO25010001", "SOD25010001", 50.0, delivery_date=dt.date(2025, 1, 1))],
+        {2025: prior},
+        {},
+        {2025: Path("2025年盈亏.xlsx")},
+    )
+    item = result["hold"][0]
+    assert item["code"] == "E3"
+    assert "已检查 2025 年盈亏表" in item["reason"]
+
+
+def test_delivery_year_uses_explicit_project_delivery_date_not_order_number():
+    prior = _led({
+        20: {"so": "SO24100160", "sod": "SOD24100238", "yingshou": 100.0},
+    })
+    result = C.classify_records_by_year(
+        [_rec(
+            "SO24100160", "SOD24100238", 100.0,
+            delivery_date=dt.date(2025, 8, 13),
+        )],
+        {2025: prior},
+        {},
+        {2025: Path("2025年盈亏.xlsx")},
+    )
+    item = result["auto"][0]
+    assert item["ledger_year"] == 2025
+    assert item["delivery_date"] == "2025-08-13"
+
+
+def test_missing_project_delivery_date_holds_without_number_inference():
+    result = C.classify_records_by_year(
+        [_rec(
+            "SO24100160", "SOD24100238", 100.0,
+            delivery_date=None,
+            delivery_date_issue="项目交付日期缺失：订单详情没有明确值",
+        )],
+        {2024: _led({20: {"so": "SO24100160", "sod": "SOD24100238", "yingshou": 100.0}})},
+        {},
+        {2024: Path("2024年盈亏.xlsx")},
+    )
+    item = result["hold"][0]
+    assert item["code"] == "E_DELIVERY_DATE_MISSING"
+    assert item["ledger_year"] is None
 
 
 def test_missing_so_is_e2():
@@ -704,6 +1000,60 @@ def test_same_row_hit_twice_both_held():
     res = C.classify_records([_rec("SO1", "SODA", 100.0), _rec("SO1", "SODB", 100.0)], led, {})
     assert res["counts"]["auto"] == 0
     assert all(h["code"] == "E8" for h in res["hold"])
+
+
+def test_same_physical_writeoff_multi_sod_same_row_aggregates_by_so_delivery():
+    """完整多 SOD 属于同一物理核销记录时，共用一行并按 SO 交付金额写一次。"""
+    led = _led({
+        1: {
+            "so": "SO1", "sod": "SODA", "yingshou": 40.0,
+            "jiti": None, "huikuan": None, "jiezhang": "否",
+            "shoukuan_time": None, "shoukuan_way": None, "chayi": None,
+        }
+    })
+    common = {
+        "ar": "AR1",
+        "so_delivery_local": 100.0,
+        "all_sods": ["SODA", "SODB"],
+        "writeoff_sequence_key": ["2026-08-06", "HX1", "RID1", "AR1", "SO1"],
+    }
+    first = _rec("SO1", "SODA", 40.0, deliver_local=40.0, **common)
+    second = _rec("SO1", "SODB", 60.0, deliver_local=60.0, **common)
+
+    result = C.classify_records([first, second], led, {})
+
+    assert result["counts"] == {"auto": 2, "hold": 0, "exception": 0, "total": 2}
+    target = next(item for item in result["auto"] if item.get("row_operation"))
+    absorbed = next(item for item in result["auto"] if item.get("same_so_multi_sod_absorbed"))
+    operation = target["row_operation"]
+    assert operation["type"] == "same_so_multi_sod_aggregate"
+    assert operation["so_delivery"] == 100.0
+    assert target["five_cols"] == {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-07-21", "收款方式": "汇",
+        "实收SOD": "SODA、SODB",
+    }
+    assert absorbed["five_cols"] == {}
+    assert "W_SAME_SO_MULTI_SOD_AGGREGATE" in target["warning_codes"]
+
+
+def test_same_row_multi_sod_from_different_writeoffs_still_holds():
+    led = _led({1: {"so": "SO1", "sod": "SODA", "yingshou": 40.0}})
+    first = _rec(
+        "SO1", "SODA", 40.0, ar="AR1", deliver_local=40.0,
+        so_delivery_local=100.0, all_sods=["SODA", "SODB"],
+        writeoff_sequence_key=["2026-08-06", "HX1", "RID1", "AR1", "SO1"],
+    )
+    second = _rec(
+        "SO1", "SODB", 60.0, ar="AR2", deliver_local=60.0,
+        so_delivery_local=100.0, all_sods=["SODA", "SODB"],
+        writeoff_sequence_key=["2026-08-06", "HX2", "RID2", "AR2", "SO1"],
+    )
+
+    result = C.classify_records([first, second], led, {})
+
+    assert result["counts"]["auto"] == 0
+    assert result["counts"]["hold"] == 2
 
 
 def test_same_so_sod_distinct_ar_builds_sequential_split_chain():

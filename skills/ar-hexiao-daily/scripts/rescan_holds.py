@@ -22,11 +22,14 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+import workbook_finalize  # noqa: E402
 
 HEADERS = [
     "案例ID",   # = AR|SO：一笔到账挂多个 SO 时每个 SO 独立跟踪，否则状态互相覆盖
     "AR",
     "SO",
+    "项目交付日期",
+    "交付年度",
     "挂起日",
     "E码",
     "原因",
@@ -81,6 +84,8 @@ def load_ledger(path: Path) -> List[dict]:
                 "案例ID": cid,
                 "AR": ar,
                 "SO": so,
+                "项目交付日期": str(g("项目交付日期") or "")[:10],
+                "交付年度": int(g("交付年度") or 0) or None,
                 "挂起日": str(g("挂起日") or "")[:10],
                 "E码": str(g("E码") or "").strip(),
                 "原因": str(g("原因") or "").strip(),
@@ -109,6 +114,8 @@ def save_ledger(path: Path, rows: List[dict]) -> None:
                 r.get("案例ID") or f"{r.get('AR') or '-'}|{r.get('SO') or '-'}",
                 r.get("AR") or "",
                 r.get("SO") or "",
+                r.get("项目交付日期") or "",
+                r.get("交付年度") or "",
                 r.get("挂起日") or "",
                 r.get("E码") or "",
                 r.get("原因") or "",
@@ -120,6 +127,7 @@ def save_ledger(path: Path, rows: List[dict]) -> None:
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(path))
+    workbook_finalize.finalize_static_report(path)
 
 
 def revisit_condition(code: str) -> str:
@@ -127,7 +135,9 @@ def revisit_condition(code: str) -> str:
     return {
         "E1": "该到账后续回满、系统给出逐单核销金额后",
         "E2": "月初把上月交付数据贴进盈亏表后（并处理流转表空/部分/红字）",
-        "E3": "拿到对应年度盈亏表，或确认老单走人工",
+        "E3": "补入对应年度盈亏工作副本，并确认该订单已进入对应年度明细",
+        "E_DELIVERY_DATE_MISSING": "在智云订单详情补齐项目交付日期后重新取数",
+        "E_DELIVERY_DATE_CONFLICT": "统一智云订单详情中的项目交付日期后重新取数",
         "E4": "销售/财务核对超额核销并修正后",
         "E0": "补登到账流转表、或确认这笔到账在哪张渠道表",
         "E12": "人工指定这笔到账对应流转表的哪一行",
@@ -186,11 +196,15 @@ def merge_from_classify(rows: List[dict], result: dict, today: str) -> List[dict
             rec["复查条件"] = revisit_condition(rec["E码"])
             rec["AR"] = ar or rec.get("AR") or ""
             rec["SO"] = so or rec.get("SO") or ""
+            rec["项目交付日期"] = item.get("delivery_date") or rec.get("项目交付日期") or ""
+            rec["交付年度"] = item.get("ledger_year") or rec.get("交付年度")
         else:
             by_case[cid] = {
                 "案例ID": cid,
                 "AR": ar,
                 "SO": so,
+                "项目交付日期": item.get("delivery_date") or "",
+                "交付年度": item.get("ledger_year"),
                 "挂起日": today,
                 "E码": code,
                 "原因": item.get("reason") or "",
@@ -239,6 +253,8 @@ def snapshot(rows: List[dict]) -> str:
                 "案例ID": r.get("案例ID"),
                 "AR": r.get("AR"),
                 "SO": r.get("SO"),
+                "项目交付日期": r.get("项目交付日期"),
+                "交付年度": r.get("交付年度"),
                 "复查条件": r.get("复查条件"),
                 "挂起日": r.get("挂起日"),
                 "E码": r.get("E码"),
@@ -254,7 +270,10 @@ def snapshot(rows: List[dict]) -> str:
 # 本地可自行复查的码：只要盈亏表变了就能重判，不必等它再出现在当日导出里
 LOCAL_RECHECKABLE = {"E2", "E3", "E8"}
 # 必须有新的智云导出才能判的码（本地重扫无能为力，如实说明）
-NEEDS_FRESH_EXPORT = {"E1", "E4", "E9", "E0", "E12"}
+NEEDS_FRESH_EXPORT = {
+    "E1", "E4", "E9", "E0", "E12",
+    "E_DELIVERY_DATE_MISSING", "E_DELIVERY_DATE_CONFLICT",
+}
 
 
 def reclassify_against_ledger(rows: List[dict], ledger, today: str) -> Dict[str, int]:
@@ -283,7 +302,17 @@ def reclassify_against_ledger(rows: List[dict], ledger, today: str) -> Dict[str,
         if code and code not in LOCAL_RECHECKABLE:
             stat["本地判不动"] += 1
             continue
-        hits = list(getattr(ledger, "so_index", {}).get(so, []) or [])
+        target = ledger
+        if isinstance(ledger, dict):
+            year = common.to_number(r.get("交付年度"))
+            if year is None:
+                stat["本地判不动"] += 1
+                continue
+            target = ledger.get(int(year))
+        if target is None:
+            stat["跳过"] += 1
+            continue
+        hits = list(getattr(target, "so_index", {}).get(so, []) or [])
         if not hits:
             stat["跳过"] += 1
             continue
@@ -321,7 +350,11 @@ def main(argv=None) -> int:
     ap.add_argument("--workspace", default=str(common.WORK))
     ap.add_argument("--result", default="", help="今日判定结果 json（可选）")
     ap.add_argument("--init-from-result", action="store_true", help="用判定 hold 初始化台账")
-    ap.add_argument("--ledger", default="", help="盈亏核算表副本（只读）；给了就对挂起项真重判")
+    ap.add_argument("--ledger", default="", help="本年度盈亏核算表副本（只读）")
+    ap.add_argument(
+        "--ledger-year", action="append", default=[], metavar="YEAR=PATH",
+        help="其它年度盈亏工作副本，可重复，例如 2025=...xlsx",
+    )
     ap.add_argument("--no-reclassify", action="store_true", help="只合并，不拿盈亏表重判")
     args = ap.parse_args(argv)
 
@@ -357,24 +390,23 @@ def main(argv=None) -> int:
     stat = None
     if not args.no_reclassify:
         ledger = None
-        lp = Path(args.ledger) if args.ledger else None
-        if lp is None:
-            cand = list((ws / "02_我的表副本").glob("*盈亏*")) if (ws / "02_我的表副本").is_dir() else []
-            lp = cand[0] if cand else None
-        if lp and lp.is_file():
-            try:
+        try:
+            paths = common.discover_year_ledgers(
+                ws, primary=args.ledger, year_specs=args.ledger_year
+            )
+            if paths:
                 sys.path.insert(0, str(HERE))
                 from classify_hexiao import LedgerIndex
 
-                ledger = LedgerIndex(lp)
-            except Exception as e:  # 读不动就如实说，不静默
-                print(f"WARN: 盈亏表读取失败，跳过重判：{e}", file=sys.stderr)
+                ledger = {year: LedgerIndex(path) for year, path in paths.items()}
+        except Exception as e:  # 读不动就如实说，不静默
+            print(f"WARN: 盈亏表读取失败，跳过重判：{e}", file=sys.stderr)
         if ledger is not None:
             stat = reclassify_against_ledger(rows, ledger, today)
         else:
             print(
                 "WARN: 未提供盈亏表 → 本轮只合并、未做重判。"
-                "挂账里等交付数据的笔不会被自动捞出来（用 --ledger 指一份副本）",
+                "挂账里等交付数据的笔不会被自动捞出来（补入对应年度盈亏工作副本）",
                 file=sys.stderr,
             )
 

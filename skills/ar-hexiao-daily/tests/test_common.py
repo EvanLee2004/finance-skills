@@ -45,9 +45,27 @@ def test_is_cny():
     assert not common.is_cny("美元USD")
 
 
-def test_year_from_so():
-    assert common.year_from_so("SO26030412") == 2026
-    assert common.year_from_so("SOD25120001") == 2025
+def test_discover_year_ledgers_routes_each_annual_copy(tmp_path):
+    ws = tmp_path / "工作区"
+    folder = ws / "02_我的表副本"
+    folder.mkdir(parents=True)
+    current = folder / "2026年盈亏工作副本.xlsx"
+    prior = folder / "2025年盈亏工作副本.xlsx"
+    portable = folder / "2026年盈亏工作副本_便携版.xlsx"
+    for path in (current, prior, portable):
+        path.write_bytes(b"xlsx")
+    found = common.discover_year_ledgers(ws)
+    assert found == {2025: prior.resolve(), 2026: current.resolve()}
+
+
+def test_discover_year_ledgers_rejects_duplicate_year(tmp_path):
+    ws = tmp_path / "工作区"
+    folder = ws / "02_我的表副本"
+    folder.mkdir(parents=True)
+    (folder / "2025年盈亏A.xlsx").write_bytes(b"a")
+    (folder / "2025年盈亏B.xlsx").write_bytes(b"b")
+    with pytest.raises(ValueError, match="多份 2025 年盈亏表"):
+        common.discover_year_ledgers(ws)
 
 
 def test_receipt_time_same_month():

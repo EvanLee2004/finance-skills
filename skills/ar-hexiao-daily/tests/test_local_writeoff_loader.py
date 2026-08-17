@@ -35,8 +35,10 @@ def test_loader_keeps_current_local_and_cross_ar_cumulative_writeoffs(tmp_path):
     )
     _xlsx(
         export_dir / "订单交付_20260724.xlsx",
-        ["回款记录ID", "SO", "交付额/原币", "汇率", "结算币种", "订单名称"],
-        [["AR1", "SO1", 4083.60, None, "美元USD", "订单甲"]],
+        ["回款记录ID", "SO", "交付额/原币", "汇率", "结算币种", "订单名称",
+         "项目交付日期", "交付日期取数状态"],
+        [["AR1", "SO1", 4083.60, None, "美元USD", "订单甲",
+          dt.date(2025, 8, 13), "订单详情明确值"]],
     )
     _xlsx(
         export_dir / "核销明细_20260724.xlsx",
@@ -62,3 +64,4 @@ def test_loader_keeps_current_local_and_cross_ar_cumulative_writeoffs(tmp_path):
     assert payment["writeoffs_local"] == {"SO1": 7410.12}
     assert payment["cumulative_writeoffs"] == {"SO1": 4083.60}
     assert payment["cumulative_writeoffs_local"] == {"SO1": 29359.30}
+    assert payment["orders"][0]["delivery_date"] == dt.date(2025, 8, 13)

@@ -239,14 +239,75 @@ def is_cny(currency: str) -> bool:
     return c in CNY_ALIASES or "人民币" in c or c.upper() in {"CNY", "RMB"}
 
 
-def year_from_so(so: str) -> Optional[int]:
-    """SO26030412 → 2026；SOD2512xx → 2025。"""
-    s = _norm(so)
-    m = re.search(r"(?:SO|SOD)(\d{2})", s, re.I)
-    if not m:
-        return None
-    yy = int(m.group(1))
-    return 2000 + yy
+def ledger_year_from_name(path: Path) -> Optional[int]:
+    """从盈亏表文件名识别年度；例如“2025年盈亏核算表.xlsx”→2025。"""
+    m = re.search(r"(?<!\d)(20\d{2})(?:年)?", Path(path).stem)
+    return int(m.group(1)) if m else None
+
+
+def parse_year_ledger_specs(specs: Sequence[str]) -> Dict[int, Path]:
+    """解析重复参数 ``--ledger-year 2025=路径``。"""
+    out: Dict[int, Path] = {}
+    for raw in specs or []:
+        text = str(raw or "").strip()
+        if "=" not in text:
+            raise ValueError(f"年度盈亏表参数格式错误：{text!r}（应为 2025=文件路径）")
+        year_s, path_s = text.split("=", 1)
+        if not re.fullmatch(r"20\d{2}", year_s.strip()) or not path_s.strip():
+            raise ValueError(f"年度盈亏表参数格式错误：{text!r}（应为 2025=文件路径）")
+        year = int(year_s.strip())
+        path = Path(path_s.strip()).resolve()
+        if not path.is_file():
+            raise ValueError(f"找不到 {year} 年盈亏表：{path}")
+        if year in out and out[year] != path:
+            raise ValueError(f"{year} 年指定了两份不同盈亏表，无法确定写哪一份")
+        out[year] = path
+    return out
+
+
+def discover_year_ledgers(
+    workspace: Path,
+    *,
+    primary: str = "",
+    year_specs: Sequence[str] = (),
+) -> Dict[int, Path]:
+    """发现工作区内各年度盈亏工作副本；显式参数优先，年度重复时拒绝猜测。"""
+    current = current_year()
+    explicit = parse_year_ledger_specs(year_specs)
+    if primary:
+        path = Path(primary).resolve()
+        if not path.is_file():
+            raise ValueError(f"找不到盈亏表：{path}")
+        year = ledger_year_from_name(path) or current
+        if year in explicit and explicit[year] != path:
+            raise ValueError(f"{year} 年指定了两份不同盈亏表，无法确定写哪一份")
+        explicit[year] = path
+
+    base = Path(workspace) / "02_我的表副本"
+    discovered: Dict[int, List[Path]] = {}
+    if base.is_dir():
+        for path in sorted(base.glob("*盈亏*")):
+            if (
+                not path.is_file()
+                or path.name.startswith(("~$", "."))
+                or "便携版" in path.stem
+                or path.suffix.lower() not in {".xlsx", ".xlsm"}
+            ):
+                continue
+            year = ledger_year_from_name(path) or current
+            if year not in explicit:
+                discovered.setdefault(year, []).append(path.resolve())
+
+    for year, paths in discovered.items():
+        unique = list(dict.fromkeys(paths))
+        if len(unique) > 1:
+            names = "、".join(p.name for p in unique)
+            raise ValueError(
+                f"工作区里有多份 {year} 年盈亏表：{names}；"
+                f"请用 --ledger-year {year}=文件路径 明确指定"
+            )
+        explicit[year] = unique[0]
+    return dict(sorted(explicit.items()))
 
 
 def mask_customer(name: str) -> str:

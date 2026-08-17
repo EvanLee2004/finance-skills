@@ -34,6 +34,7 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+import workbook_finalize  # noqa: E402
 
 # 状态 → (排序权重, 颜色, 这行该干嘛)
 STATUS = {
@@ -54,6 +55,14 @@ HEADERS = [
 ]
 
 FIVE = ["计提", "回款明细", "是否结账", "收款时间", "收款方式"]
+
+CROSS_MONTH_HEADERS = [
+    "SO", "本次核销SOD", "历史待补计提SOD", "该SO全部SOD",
+    "本次核销日期", "历史核销日期", "历史核销月份", "是否确认跨月",
+    "历史日期来源", "历史来源文件", "盈亏表收款时间",
+    "当前计提", "本次补填计提", "本次补填业务差异", "盈亏年度", "目标行",
+    "写前校验结果", "处理说明",
+]
 
 
 def _norm(v) -> str:
@@ -86,7 +95,8 @@ def _diff_text(five: dict, cur: dict, derived: dict) -> str:
 # 这些码的 reason 是**逐笔算出来的、自带操作指引**（插哪一行、候选 SOD 是哪几个…），
 # 比 config 里的通用建议有用得多 → 「怎么办」直接用 reason。
 SPECIFIC_CODES = {
-    "E4", "E5", "E7", "E8",
+    "E3", "E4", "E5", "E7", "E8",
+    "E_DELIVERY_DATE_MISSING", "E_DELIVERY_DATE_CONFLICT",
     "E_PARENT_WRITEOFF_MISMATCH",
     "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED",
 }
@@ -161,6 +171,70 @@ def collect_rows(result: dict, checked: Optional[dict]) -> List[List[Any]]:
     return rows
 
 
+def collect_cross_month_accrual_rows(
+    result: dict, checked: Optional[dict]
+) -> List[List[Any]]:
+    """提取 SO 跨月历史 SOD 计提补填提示；写前校验结论优先。"""
+    sources: List[tuple[dict, str]] = []
+    if checked:
+        for bucket, parent_status in (
+            ("write", "可补填"), ("skip", "已一致"), ("conflict", "冲突·不写")
+        ):
+            sources.extend((item, parent_status) for item in (checked.get(bucket) or []))
+    else:
+        sources.extend((item, "待写前校验") for item in (result.get("auto") or []))
+
+    rows: List[List[Any]] = []
+    seen = set()
+    for item, parent_status in sources:
+        for backfill in item.get("so_accrual_backfills") or []:
+            notice = backfill.get("cross_month_accrual_notice") or {}
+            if not notice:
+                continue
+            key = (
+                notice.get("so"), notice.get("historical_sod"),
+                notice.get("ledger_year"), notice.get("ledger_row_ref"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            check = backfill.get("_check") or {}
+            backfill_status = check.get("verdict") or ""
+            if parent_status == "冲突·不写" or backfill_status == "conflict":
+                status = "冲突·不写"
+            elif backfill_status == "skip":
+                status = "已一致"
+            elif backfill_status == "write":
+                status = "可补填"
+            else:
+                status = parent_status
+            explanation = notice.get("reason") or ""
+            if check.get("reason"):
+                explanation = f"{explanation}；{check['reason']}".strip("；")
+            rows.append([
+                notice.get("so") or "",
+                "\n".join(notice.get("current_batch_sods") or []),
+                notice.get("historical_sod") or "",
+                "\n".join(notice.get("all_sods") or []),
+                notice.get("current_hexiao_date") or "",
+                "\n".join(notice.get("historical_hexiao_dates") or []) or "待确认",
+                "\n".join(notice.get("historical_hexiao_months") or []) or "待确认",
+                notice.get("cross_month_status") or "待确认",
+                notice.get("history_source") or "",
+                "\n".join(notice.get("history_source_files") or []),
+                notice.get("historical_receipt_time") or "",
+                notice.get("current_accrual"),
+                notice.get("planned_accrual"),
+                notice.get("planned_difference"),
+                notice.get("ledger_year") or "",
+                notice.get("ledger_row_ref") or "",
+                status,
+                explanation,
+            ])
+    rows.sort(key=lambda row: (str(row[0]), str(row[2]), str(row[15])))
+    return rows
+
+
 def build_workbook(
     result: dict,
     checked: Optional[dict],
@@ -192,13 +266,17 @@ def build_workbook(
         day: info for day, info in (result.get("shifted_detail_dates") or {}).items()
         if info.get("needs_rerun") and day != result.get("hexiao_date")
     }
+    cross_month_rows = collect_cross_month_accrual_rows(result, checked)
+    cross_month_so_count = len({str(row[0]) for row in cross_month_rows if row[0]})
+    confirmed_cross_month_count = sum(1 for row in cross_month_rows if row[7] == "是")
+    pending_cross_month_count = sum(1 for row in cross_month_rows if row[7] == "待确认")
     # 日期抬头：她可能今天补跑上周三的批次，也可能隔天才回来确认。
     # 不把「这是哪一天的」印在最显眼的地方，她核对的就可能是另一天的账。
     hx = result.get("hexiao_date") or ""
     lines = [
         ["《核销日清》—— 一份就够，别的表都不用开"],
         [f"★ 核销日期：{common.date_cn(hx) if hx else '(数据里没有核销日期，请核对取数)'}"],
-        [f"  （这批算的是**销售在这一天核销**的到账；跟钱哪天到银行、你哪天建的回款没关系）"],
+        ["  （这批算的是**销售在这一天核销**的到账；跟钱哪天到银行、你哪天建的回款没关系）"],
         [f"  清单生成时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"],
         [""],
         [f"这次一共 {result.get('payment_count', '?')} 笔到账，拆成 {counts.get('total', 0)} 个订单行。"],
@@ -228,6 +306,12 @@ def build_workbook(
                 )
                 if pending_shifted else "无"
             )
+        ],
+        [
+            "跨月计提补填提醒："
+            f"{cross_month_so_count} 个 SO、{len(cross_month_rows)} 个历史 SOD；"
+            f"已确认跨月 {confirmed_cross_month_count} 个，待确认 {pending_cross_month_count} 个。"
+            + (" 详情见《跨月计提补填》。" if cross_month_rows else " 本批没有。")
         ],
         [""],
         ["【盈亏明细】"],
@@ -274,6 +358,37 @@ def build_workbook(
     ws.auto_filter.ref = f"A1:{chr(64 + len(HEADERS))}{len(rows) + 1}" if len(HEADERS) <= 26 else None
     for col, w in (("A", 16), ("B", 14), ("C", 46), ("D", 14), ("E", 14), ("F", 16), ("T", 52), ("U", 40)):
         ws.column_dimensions[col].width = w
+
+    # ── 跨月历史 SOD 计提补填提示 ──────────────────────────
+    wcross = wb.create_sheet("跨月计提补填")
+    wcross.append(CROSS_MONTH_HEADERS)
+    for cell in wcross[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+    if cross_month_rows:
+        for row in cross_month_rows:
+            wcross.append(row)
+        for row_no, row in enumerate(cross_month_rows, start=2):
+            color = "FCE4D6" if row[7] == "是" else "FFF2CC"
+            if row[16] == "冲突·不写":
+                color = "FFC7CE"
+            for col_no in (1, 3, 8, 17):
+                wcross.cell(row=row_no, column=col_no).fill = PatternFill(
+                    "solid", fgColor=color
+                )
+            for cell in wcross[row_no]:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+    else:
+        wcross.append(["本批没有触发跨月历史 SOD 计提补填。"])
+    wcross.freeze_panes = "A2"
+    wcross.auto_filter.ref = f"A1:R{max(wcross.max_row, 1)}"
+    for col, width in {
+        "A": 16, "B": 20, "C": 20, "D": 24, "E": 14, "F": 20,
+        "G": 16, "H": 14, "I": 28, "J": 28, "K": 22, "L": 14,
+        "M": 16, "N": 18, "O": 12, "P": 10, "Q": 16, "R": 54,
+    }.items():
+        wcross.column_dimensions[col].width = width
 
     # ── 按到账汇总（流转表建议 + 写入方式）──────────
     summary = result.get("ar_summary") or []
@@ -322,6 +437,7 @@ def build_workbook(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(out_path))
+    workbook_finalize.finalize_static_report(out_path)
     return out_path
 
 

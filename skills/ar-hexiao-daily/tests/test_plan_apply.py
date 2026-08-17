@@ -13,6 +13,7 @@ from conftest import LEDGER_FULL  # noqa: E402
 
 import validate_plan as V  # noqa: E402
 import apply_to_copy as A  # noqa: E402
+import apply_all as AA  # noqa: E402
 
 HDR = ["部门", "销售人员", "客户名称", "单号", "新智云单号", "应收金额",
        "计提金额", "回款明细", "是否结账（是/否）", "收款时间", "收款方式(支/汇/现)", "实收金额",
@@ -92,6 +93,69 @@ def test_empty_row_is_writable(tmp_path):
     led = _ledger(tmp_path, [("SO26010001", "SOD26010001", None)])
     rows = V.read_ledger_rows(led)
     assert V.check_one(_item(2), rows)["verdict"] == "write"
+
+
+def test_validate_by_year_keeps_same_row_number_isolated(tmp_path):
+    y25 = tmp_path / "y25"
+    y26 = tmp_path / "y26"
+    y25.mkdir()
+    y26.mkdir()
+    led25 = _ledger(y25, [("SO25010001", "SOD25010001", None)])
+    led26 = _ledger(y26, [("SO26010001", "SOD26010001", None)])
+    old_item = _item(2, so="SO25010001", sod="SOD25010001")
+    new_item = _item(2, so="SO26010001", sod="SOD26010001")
+    old_item["ledger_year"] = 2025
+    new_item["ledger_year"] = 2026
+    checked = V.validate_by_year(
+        {"auto": [old_item, new_item]},
+        {2025: V.read_ledger_rows(led25), 2026: V.read_ledger_rows(led26)},
+        {2025: led25, 2026: led26},
+    )
+    assert checked["counts"] == {"write": 2, "skip": 0, "conflict": 0}
+    assert {item["ledger_year"] for item in checked["write"]} == {2025, 2026}
+    assert set(checked["ledger_checks"]) == {"2025", "2026"}
+
+
+def test_apply_all_writes_two_annual_ledgers_and_builds_combined_reports(tmp_path):
+    ws = tmp_path / "工作区"
+    ledger_dir = ws / "02_我的表副本"
+    out_dir = ws / "04_产出"
+    ledger_dir.mkdir(parents=True)
+    out_dir.mkdir(parents=True)
+    source25_dir = tmp_path / "source25"
+    source26_dir = tmp_path / "source26"
+    source25_dir.mkdir()
+    source26_dir.mkdir()
+    source25 = _ledger(source25_dir, [("SO25010001", "SOD25010001", None)])
+    source26 = _ledger(source26_dir, [("SO26010001", "SOD26010001", None)])
+    ledger25 = ledger_dir / "2025年盈亏工作副本.xlsx"
+    ledger26 = ledger_dir / "2026年盈亏工作副本.xlsx"
+    source25.replace(ledger25)
+    source26.replace(ledger26)
+
+    old_item = _item(2, so="SO25010001", sod="SOD25010001")
+    new_item = _item(2, so="SO26010001", sod="SOD26010001")
+    old_item["ledger_year"] = 2025
+    new_item["ledger_year"] = 2026
+    checked = V.validate_by_year(
+        {"auto": [old_item, new_item], "hexiao_date": "2026-08-10"},
+        {2025: V.read_ledger_rows(ledger25), 2026: V.read_ledger_rows(ledger26)},
+        {2025: ledger25, 2026: ledger26},
+    )
+    checked_path = out_dir / "写入计划_校验后.json"
+    checked_path.write_text(json.dumps(checked, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert AA.main([
+        "--checked", str(checked_path),
+        "--workspace", str(ws),
+        "--in-place",
+    ]) == 0
+    rows25 = V.read_ledger_rows(ledger25)
+    rows26 = V.read_ledger_rows(ledger26)
+    assert rows25[2]["回款明细"] == 100
+    assert rows26[2]["回款明细"] == 100
+    assert (out_dir / "变更清单_20260810.xlsx").is_file()
+    assert (out_dir / "订单写入差异_20260810.xlsx").is_file()
 
 
 def test_default_jiezhang_no_is_still_writable(tmp_path):
@@ -710,6 +774,8 @@ def test_apply_partial_inserts_unpaid_row_below_and_preserves_other_fields(tmp_p
     assert ws.cell(2, 7).value is None
     assert ws.cell(2, 8).value == 50.0
     assert ws.cell(2, 9).value == "是"
+
+
     assert ws.cell(2, 13).value is None
     assert ws.cell(3, 1).value == ws.cell(2, 1).value
     assert ws.cell(3, 5).value == "SO26010001"
@@ -722,6 +788,62 @@ def test_apply_partial_inserts_unpaid_row_below_and_preserves_other_fields(tmp_p
     assert ws.cell(3, 12).value == "SOD26010001"
     assert ws.cell(3, 13).value is None
     assert ws.cell(4, 5).value == "SO_OTHER"
+
+
+def test_same_so_multi_sod_aggregate_validates_writes_once_and_is_idempotent(tmp_path):
+    ledger = _ledger(tmp_path, [("SO_MULTI", "SODA", None)])
+    wb = openpyxl.load_workbook(str(ledger))
+    wb["明细"].cell(2, 6).value = 40.0
+    wb.save(str(ledger))
+    target_five = {
+        "计提": 100.0, "回款明细": 100.0, "是否结账": "是",
+        "收款时间": "2026-08-05", "收款方式": "汇", "实收SOD": "SODA、SODB",
+    }
+    operation = {
+        "type": "same_so_multi_sod_aggregate",
+        "source_receivable": 40.0,
+        "source_five_cols": {
+            "计提": None, "回款明细": None, "是否结账": None,
+            "收款时间": None, "收款方式": None, "实收SOD": "SODA",
+        },
+        "source_derived_cols": {"差异": None},
+        "so": "SO_MULTI", "ar": "AR1", "so_delivery": 100.0,
+        "current_received": 100.0, "combined_sod": "SODA、SODB",
+        "member_sods": ["SODA", "SODB"],
+        "member_case_ids": ["AR1|SO_MULTI|SODA", "AR1|SO_MULTI|SODB"],
+        "member_amounts": [40.0, 60.0], "member_deliveries": [40.0, 60.0],
+        "writeoff_sequence_key": ["2026-08-06", "HX1", "RID1", "AR1", "SO_MULTI"],
+        "target_case_id": "AR1|SO_MULTI|SODA",
+        "target_five_cols": dict(target_five), "target_derived_cols": {},
+    }
+    target = {
+        "case_id": "AR1|SO_MULTI|SODA", "ar": "AR1", "so": "SO_MULTI", "sod": "SODA",
+        "ledger_row_ref": 2, "five_cols": dict(target_five), "derived_cols": {},
+        "row_operation": operation,
+    }
+    absorbed = {
+        "case_id": "AR1|SO_MULTI|SODB", "ar": "AR1", "so": "SO_MULTI", "sod": "SODB",
+        "ledger_row_ref": 2, "five_cols": {}, "derived_cols": {},
+        "same_so_multi_sod_absorbed": {
+            "target_case_id": target["case_id"], "group_id": "same-so-multi-sod|2|SO_MULTI|AR1",
+            "member_sods": ["SODA", "SODB"], "so_delivery": 100.0,
+        },
+    }
+    plan = {"auto": [target, absorbed]}
+
+    checked = V.validate(plan, V.read_ledger_rows(ledger))
+    assert checked["counts"] == {"write": 1, "skip": 1, "conflict": 0}
+
+    out = tmp_path / "同SO多SOD合并.xlsx"
+    A.write_plan(ledger, out, checked["write"])
+    assert A.verify_written(out, checked["write"]) == []
+    row = V.read_ledger_rows(out)[2]
+    assert row["应收金额"] == 100.0
+    assert row["回款明细"] == 100.0
+    assert row["SOD"] == "SODA、SODB"
+
+    rerun = V.validate(plan, V.read_ledger_rows(out))
+    assert rerun["counts"] == {"write": 0, "skip": 2, "conflict": 0}
 
 
 def test_old_ledger_without_difference_column_still_writes_normal_payment(tmp_path):

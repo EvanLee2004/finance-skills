@@ -369,42 +369,141 @@ def audit_parent_writeoffs(
         audit["reason"] = "没有有效逐SO本次核销金额，回退父回款总到账金额"
         return [], audit
 
-    local_complete = all(_cents(row.get("amount_local")) is not None for row in physical_kept)
-    original_complete = all(_cents(row.get("amount")) is not None for row in physical_kept)
-    if not local_complete and not original_complete:
-        audit["status"] = "parent_fallback"
-        audit["comparison_basis"] = "parent_fallback"
-        audit["reason"] = "逐SO本次核销金额不完整，回退父回款金额"
+    parent_local = _cents(
+        payment.get("total_amount_local")
+        if payment.get("total_amount_local") is not None
+        else payment.get("amount_local")
+    )
+    parent_orig = _cents(
+        payment.get("total_amount_orig")
+        if payment.get("total_amount_orig") is not None
+        else payment.get("amount_orig")
+    )
+    parent_currency = _currency(payment.get("currency"))
+    local_comparable = parent_local is not None and all(
+        _cents(row.get("amount_local")) is not None for row in physical_kept
+    )
+    original_comparable = (
+        parent_orig is not None
+        and bool(parent_currency)
+        and all(
+            _cents(row.get("amount")) is not None
+            and _currency(row.get("currency")) == parent_currency
+            for row in physical_kept
+        )
+    )
+    basis = "detail_local" if local_comparable else (
+        "detail_original" if original_comparable else ""
+    )
+    parent_cents = parent_local if local_comparable else parent_orig
+
+    if not basis or parent_cents is None:
+        audit["status"] = "unresolved"
+        audit["comparison_basis"] = "unavailable"
+        audit["error_code"] = "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"
+        audit["reason"] = "父回款与逐单核销无法形成统一本币或同币种原币比较口径"
         return [], audit
 
-    basis = "detail_local" if local_complete else "detail_original"
-    raw_total_cents = sum(
-        _cents(row.get("amount_local") if local_complete else row.get("amount")) or 0
-        for row in physical_kept
-    )
-    audit["status"] = "detail_authoritative"
+    def amount_cents(row: dict) -> int:
+        value = row.get("amount_local") if basis == "detail_local" else row.get("amount")
+        cents = _cents(value)
+        assert cents is not None
+        return cents
+
+    raw_total_cents = sum(amount_cents(row) for row in physical_kept)
+    delta_raw_cents = parent_cents - raw_total_cents
     audit["comparison_basis"] = basis
     audit["raw_total"] = _money(raw_total_cents)
     audit["logical_total"] = _money(raw_total_cents)
-    audit["reason"] = "逐SO本次核销金额为真相源；父回款净到账不反向拦截"
+    audit["delta_raw"] = _money(delta_raw_cents)
+    audit["delta_dedup"] = _money(delta_raw_cents)
+    audit["delta"] = _money(delta_raw_cents)
 
-    # 父子差额只保留为审计信息，不再决定挂账或折叠不同核销记录NUM。
-    parent_cents = _cents(
-        (
-            payment.get("total_amount_local")
-            if payment.get("total_amount_local") is not None
-            else payment.get("amount_local")
+    if delta_raw_cents >= -tolerance_cents:
+        audit["status"] = "tolerance" if delta_raw_cents < 0 else "normal"
+        audit["reason"] = (
+            "负差在1元容差内，不启动相同SO同金额业务去重"
+            if delta_raw_cents < 0
+            else "未出现明显超核销，不启动业务去重"
         )
-        if local_complete
-        else (
-            payment.get("total_amount_orig")
-            if payment.get("total_amount_orig") is not None
-            else payment.get("amount_orig")
-        )
+        return physical_kept, audit
+
+    if any(not str(row.get("record_id") or "").strip() for row in physical_kept):
+        audit["status"] = "unresolved"
+        audit["error_code"] = "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"
+        audit["reason"] = "明显超核销且存在缺少核销记录NUM的明细，无法安全区分系统重复"
+        return [], audit
+
+    grouped: Dict[tuple, List[dict]] = defaultdict(list)
+    both_amounts = all(
+        _cents(row.get("amount")) is not None
+        and _cents(row.get("amount_local")) is not None
+        for row in physical_kept
     )
-    if parent_cents is not None:
-        delta = parent_cents - raw_total_cents
-        audit["delta_raw"] = _money(delta)
-        audit["delta_dedup"] = _money(delta)
-        audit["delta"] = _money(delta)
-    return physical_kept, audit
+    for row in physical_kept:
+        key = [
+            str(row.get("so") or "").strip(),
+            amount_cents(row),
+            _currency(row.get("currency")),
+        ]
+        if both_amounts:
+            key.extend([_cents(row.get("amount")), _cents(row.get("amount_local"))])
+        grouped[tuple(key)].append(row)
+
+    duplicate_groups: List[dict] = []
+    proposed_ignored_ids = set()
+    for group in grouped.values():
+        ids = sorted(str(row.get("record_id") or "").strip() for row in group)
+        if len(ids) <= 1 or len(set(ids)) <= 1:
+            continue
+        kept_id = ids[0]
+        ignored_ids = ids[1:]
+        proposed_ignored_ids.update(ignored_ids)
+        sample = group[0]
+        duplicate_groups.append({
+            "so": str(sample.get("so") or "").strip(),
+            "amount": _money(amount_cents(sample)),
+            "record_ids": ids,
+            "kept_record_id": kept_id,
+            "ignored_record_ids": ignored_ids,
+        })
+    duplicate_groups.sort(key=lambda item: (item["so"], item["record_ids"]))
+    audit["duplicate_groups"] = duplicate_groups
+
+    if not duplicate_groups:
+        audit["status"] = "unresolved"
+        audit["error_code"] = "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"
+        audit["reason"] = "明显超核销，但不存在同父AR内相同SO同金额的精确重复组"
+        return [], audit
+
+    dedup_rows = [
+        row
+        for row in physical_kept
+        if str(row.get("record_id") or "").strip() not in proposed_ignored_ids
+    ]
+    logical_total_cents = sum(amount_cents(row) for row in dedup_rows)
+    delta_dedup_cents = parent_cents - logical_total_cents
+    audit["logical_record_count"] = len(dedup_rows)
+    audit["effective_detail_count"] = len(dedup_rows)
+    audit["logical_total"] = _money(logical_total_cents)
+    audit["delta_dedup"] = _money(delta_dedup_cents)
+    audit["delta"] = _money(delta_dedup_cents)
+
+    if delta_dedup_cents < -tolerance_cents:
+        audit["status"] = "unresolved"
+        audit["error_code"] = "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED"
+        audit["reason"] = "折叠全部精确重复组后仍明显超核销，禁止部分自动处理"
+        return [], audit
+
+    audit["status"] = "recovered"
+    audit["ignored_record_count"] = len(proposed_ignored_ids)
+    audit["reason"] = "智云疑似系统重复核销，本次每组只按一次处理"
+    for index, row in enumerate(rows):
+        record_id = str(row.get("record_id") or "").strip()
+        if record_id in proposed_ignored_ids and marked[index]["disposition"] == "kept":
+            marked[index] = _public_row(
+                row,
+                "system_duplicate_ignored",
+                "明显超核销且精确重复折叠后恢复到1元容差内",
+            )
+    return dedup_rows, audit

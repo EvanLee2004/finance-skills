@@ -6,6 +6,7 @@ from pathlib import Path
 import openpyxl
 
 import rescan_holds as R
+import workbook_finalize as W
 
 
 def test_save_load_roundtrip(tmp_path):
@@ -27,6 +28,10 @@ def test_save_load_roundtrip(tmp_path):
     assert len(loaded) == 1
     assert loaded[0]["AR"] == "AR1"
     assert loaded[0]["状态"] == "挂起"
+    audit = W.inspect_calculation(path)
+    assert audit.formula_cells == 0
+    assert audit.full_calc_on_load == "0"
+    assert audit.force_full_calc == "0"
 
 
 def test_rescan_idempotent_same_day(tmp_path):

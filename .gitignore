@@ -20,6 +20,7 @@ skills/*/工作区/output/*
 *.pem
 secrets.*
 *.local.json
+*.playwright-state.json
 
 # ===== 运行 / 缓存 / 系统 =====
 .DS_Store

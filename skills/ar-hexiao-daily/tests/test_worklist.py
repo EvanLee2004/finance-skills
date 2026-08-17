@@ -119,6 +119,64 @@ def test_flow_sheet_has_policy():
     assert "公式策略" in h and "颜色标注" in h
 
 
+def test_cross_month_accrual_backfill_has_separate_sheet_and_user_notice():
+    item = _auto_item(so="SO_MULTI", sod="SOD_NEW")
+    item["so_accrual_backfills"] = [{
+        "so": "SO_MULTI",
+        "sod": "SOD_OLD",
+        "ledger_row_ref": 88,
+        "accrual": 320.0,
+        "difference": -20.0,
+        "current_accrual": None,
+        "_check": {"verdict": "write", "reason": "SO 下全部 SOD 已结清，补填历史计提"},
+        "cross_month_accrual_notice": {
+            "so": "SO_MULTI",
+            "current_batch_sods": ["SOD_NEW"],
+            "historical_sod": "SOD_OLD",
+            "all_sods": ["SOD_OLD", "SOD_NEW"],
+            "current_hexiao_date": "2026-08-12",
+            "historical_hexiao_dates": ["2026-07-22"],
+            "historical_hexiao_months": ["2026-07"],
+            "cross_month_status": "是",
+            "history_source": "历史核销日清",
+            "history_source_files": ["判定结果_20260722.json"],
+            "historical_receipt_time": "2026-07-20",
+            "current_accrual": None,
+            "planned_accrual": 320.0,
+            "planned_difference": -20.0,
+            "ledger_year": 2026,
+            "ledger_row_ref": 88,
+            "reason": "本次核销完成后该 SO 的全部 SOD 已结清，因此同步补填历史计提",
+        },
+    }]
+    checked = {
+        "write": [item], "skip": [], "conflict": [],
+        "counts": {"write": 1, "skip": 0, "conflict": 0},
+    }
+    result = _sample_result()
+    result["hexiao_date"] = "2026-08-12"
+    out = Path(tempfile.mkdtemp()) / "日清.xlsx"
+
+    W.build_workbook(result, checked, out)
+
+    wb = openpyxl.load_workbook(out)
+    assert "跨月计提补填" in wb.sheetnames
+    headers, columns = _cols(wb["跨月计提补填"])
+    assert "历史核销月份" in headers
+    row = list(next(wb["跨月计提补填"].iter_rows(min_row=2, max_row=2, values_only=True)))
+    assert row[columns["SO"]] == "SO_MULTI"
+    assert row[columns["本次核销SOD"]] == "SOD_NEW"
+    assert row[columns["历史待补计提SOD"]] == "SOD_OLD"
+    assert row[columns["历史核销月份"]] == "2026-07"
+    assert row[columns["是否确认跨月"]] == "是"
+    assert row[columns["写前校验结果"]] == "可补填"
+    overview = "\n".join(
+        str(values[0]) for values in wb["先看这里"].iter_rows(values_only=True)
+        if values and values[0]
+    )
+    assert "跨月计提补填提醒：1 个 SO、1 个历史 SOD" in overview
+
+
 def test_hold_row_carries_action():
     out = Path(tempfile.mkdtemp()) / "日清.xlsx"
     W.build_workbook(_sample_result(), None, out)
