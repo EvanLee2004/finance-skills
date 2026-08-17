@@ -50,8 +50,10 @@
 目录里每个官方 skill 一个夹（如 `labor-invoice-check`、`ar-hexiao-daily`）。  
 **更新只动财务包白名单夹**；同事自己装的其他 skill 不许删、不许改、不许挪。
 
-**财务包白名单（16）**  
-`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `qige-invoice-to-kingdee` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf` · `env-doctor`
+**财务包白名单（17）**  
+`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `qige-invoice-to-kingdee` · `update-finance-skills` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf` · `env-doctor`
+
+**核销跟 main**：李尚最新已于 2026-08-17 合入 `main`。更新时覆盖 `ar-hexiao-daily`（含仓内 `config/` 业务规则）。凭据只留 `*.local.json`，不进仓。正本名单见 `skills/update-finance-skills/config/pack.json`。
 
 另：根下说明文件 `财务技能包_来源与更新.md` 一并覆盖更新（方便下次还能找到本说明）。
 
@@ -64,23 +66,25 @@
 ### 触发语（任选其一即可）
 
 - **「更新财务skills」**（推荐，最短）
-- 「更新财务技能」/「更新财务技能包」/「把财务 skills 更新到最新」
+- 「更新财务技能」/「更新财务技能包」/「把财务 skills 更新到最新」/「拉最新」
+
+命中技能：`update-finance-skills`。说什么用哪个见 `skills/财务技能_说什么用哪个.md`。
 
 ### Agent 必须执行的步骤（写死）
 
-1. **读来源**：若本机 skills 目录已有 `财务技能包_来源与更新.md` 或本仓 `SOURCE.md`，先打开确认仓库地址与本文一致。  
-2. **取最新源码**（优先国内 Gitee，GitHub 作备）：  
-   - 本机已有 clone：`git -C <clone路径> pull`（Gitee 或 GitHub 的 `main`）  
-   - 本机没有 clone：浅克隆到临时目录  
-     `git clone --depth 1 -b main https://gitee.com/Lee157/finance-skills.git`  
-     （Gitee 不通再试 `https://github.com/EvanLee2004/finance-skills.git`）  
-3. **白名单覆盖**到 opencode skills 目录：  
-   - 仅对白名单 16 个夹：覆盖 `SKILL.md`、`scripts/`、`README.md`、`references/` 等源码；白名单里本机还没有的夹整夹复制  
-   - **保留**本机各技能已有 `config/`（见第三节铁律）  
-   - 把 `skills/财务技能包_来源与更新.md` 放到 skills 目录根  
-4. **禁止**：清空整个 skills；删除/改动白名单外任何夹；为「只保留白名单这些」去删同事自装技能。  
+1. **读来源**：若本机已有 `update-finance-skills`，直接跑它的脚本，不要手搓复制。  
+2. **取最新源码必须先 Gitee**：  
+   ```bash
+   python3 "<本机 update-finance-skills>/scripts/update.py"
+   ```  
+   脚本内部：`git clone/pull` **https://gitee.com/Lee157/finance-skills** 的 `main`；Gitee 不通才 GitHub。  
+3. **白名单覆盖**到 opencode skills 目录（名单以 `pack.json` 为准）：  
+   - 覆盖 `SKILL.md`、`scripts/`、`README.md`、`references/` 等源码；本机没有的白名单夹整夹复制  
+   - **保留**本机各技能已有 `config/`（核销除外，业务规则跟仓库）  
+   - 把 `财务技能包_来源与更新.md` 和 `财务技能_说什么用哪个.md` 放到 skills 目录根  
+4. **禁止**：清空整个 skills；删除/改动白名单外任何夹。  
 5. **可选清理**（仅当存在才删，且只删这些已下线官方旧夹）：`payroll-info-match`、`insurance-fund-merge`、`bank-income-extract`。  
-6. **汇报**（必须逐条）：更新到的 **git short SHA**；更新/新增了哪些白名单技能；白名单外其他技能是否「未动」；config 是否保留；提醒 **重启 opencode**。
+6. **汇报**（必须逐条）：更新到的 **git short SHA**；更新/新增了哪些；核销是否跳过；白名单外是否「未动」；config 是否保留；提醒 **重启 opencode**。
 
 ### 可复制提示词（同事 / Agent 通用）
 
@@ -100,8 +104,8 @@
 - 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
-（另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+（另：把「财务技能包_来源与更新.md」「财务技能_说什么用哪个.md」放到 skills 目录根。核销已合入 main，更新时覆盖。）
 
 【装到哪】
 ~/.config/opencode/skills/（Windows = %USERPROFILE%\.config\opencode\skills\）；定位不到就找本机 opencode 实际加载技能的目录。
@@ -179,8 +183,9 @@ git push origin main    # origin 已配置双 push：GitHub + Gitee
   GitHub: EvanLee2004/finance-skills
   Gitee:  Lee157/finance-skills
   分支:   main
-用户说「更新财务skills」= 从上述仓库 pull/clone main → 白名单覆盖进 opencode skills
-  → 保留各技能本地 config/ → 绝不碰白名单外的技能。
+用户说「更新财务skills」= 跑 update-finance-skills（先 Gitee 再 GitHub）
+  → 白名单覆盖进 opencode skills → 保留各技能本地 config/
+  → 核销跟 main（李尚最新）→ 绝不碰白名单外的技能。
 不要再要求用户下 zip；不要自建平行仓库；不要只改本机 skills 却不回推开发仓。
 回推代码只在有写权限的开发机对 main 做；同事机默认只读 pull。
 ```

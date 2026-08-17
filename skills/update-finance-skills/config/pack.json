@@ -1,0 +1,38 @@
+{
+  "gitee": "https://gitee.com/Lee157/finance-skills.git",
+  "github": "https://github.com/EvanLee2004/finance-skills.git",
+  "branch": "main",
+  "whitelist": [
+    "receivables-merge",
+    "split-by-sales",
+    "labor-invoice-check",
+    "withholding-report-rename",
+    "compliance-spot-check",
+    "dreame-ar-progress-diff",
+    "dept-expense-alloc",
+    "ar-hexiao-daily",
+    "order-daily-summary",
+    "qige-invoice-to-kingdee",
+    "update-finance-skills",
+    "task-clarifier",
+    "xlsx",
+    "docx",
+    "pptx",
+    "pdf",
+    "env-doctor"
+  ],
+  "protected_from_overwrite": [],
+  "overwrite_config": [
+    "ar-hexiao-daily"
+  ],
+  "root_files": [
+    "财务技能包_来源与更新.md",
+    "财务技能_说什么用哪个.md"
+  ],
+  "skip_names": [
+    "__pycache__",
+    ".pytest_cache",
+    "工作区",
+    ".git"
+  ]
+}

@@ -21,7 +21,7 @@ import convert  # noqa: E402
 
 GOLD_INVOICE = Path(
     "/Users/evanlee/Documents/甲骨易实习/项目/长期项目/财务部skills"
-    "/技能/琪哥发票入金蝶/原始素材/20260814_改样发票/发票明昊.xlsx"
+    "/技能/金蝶/琪哥发票入金蝶/原始素材/20260814_改样发票/发票明昊.xlsx"
 )
 GOLD_MASTER = Path(
     "/Users/evanlee/Documents/甲骨易实习/项目/长期项目/自动化记账（金蝶）"
@@ -88,11 +88,9 @@ def _copy_template(path: Path):
 
 def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14", with_master=True):
     inv = tmp_path / "发票.xlsx"
-    tpl = tmp_path / "数据模板.xlsx"
     out = tmp_path / "out"
     out.mkdir()
     _write_invoice(inv, rows, org=org)
-    _copy_template(tpl)
     master_path = None
     if with_master:
         master_path = tmp_path / "master.json"
@@ -101,7 +99,6 @@ def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14", with
         invoice_path=inv,
         out_dir=out,
         booking_date=booking,
-        template_path=tpl,
         master_path=master_path,
     )
 
@@ -206,7 +203,7 @@ def test_three_lines_balance_and_tax_no_aux(tmp_path):
     assert lines[1][6] == "510103"
     assert lines[1][7] == "主营业务收入_多语本地化服务"
     assert lines[2][6] == "21710105"
-    assert lines[2][7] == "销项税额"
+    assert lines[2][7] == "应交税费_应交增值税_销项税额"
     assert lines[0][12] == "人民币"
     assert lines[2][17] in (None, "")
     assert lines[2][21] in (None, "")
@@ -269,15 +266,12 @@ def test_detail_covers_every_source_row(tmp_path):
 
 def test_missing_master_still_converts(tmp_path):
     inv = tmp_path / "发票.xlsx"
-    tpl = tmp_path / "数据模板.xlsx"
     out = tmp_path / "out"
     _write_invoice(inv, [_ok_row()])
-    _copy_template(tpl)
     result = convert.convert(
         invoice_path=inv,
         out_dir=out,
         booking_date="2026-08-14",
-        template_path=tpl,
         master_path=None,
     )
     assert result.bookable_count == 1
@@ -290,46 +284,44 @@ def test_missing_master_still_converts(tmp_path):
     kd.close()
 
 
-def test_result_filename_beside_template(tmp_path):
+def test_result_filename_beside_invoice(tmp_path):
     inv = tmp_path / "发票明昊.xlsx"
-    tpl = tmp_path / "数据模板_凭证引入引出模板_0813.xlsx"
+    leftover = tmp_path / "数据模板_凭证引入引出模板_0813.xlsx"
     _write_invoice(inv, [_ok_row()])
-    _copy_template(tpl)
+    _copy_template(leftover)
     result = convert.convert(
         invoice_path=inv,
         out_dir=tmp_path,
         booking_date="2026-08-14",
-        template_path=tpl,
     )
-    assert result.kingdee_path == tmp_path / "数据模板_凭证引入引出模板_0813_结果.xlsx"
+    assert result.kingdee_path == tmp_path / "凭证引入_结果.xlsx"
     assert result.detail_path == tmp_path / "发票明昊_明细结果.xlsx"
-    assert tpl.is_file()
+    assert leftover.is_file()
     assert result.kingdee_path.is_file()
-    assert result.kingdee_path != tpl
+    assert result.kingdee_path != leftover
 
 
-def test_inspect_two_excels_no_json(tmp_path):
+def test_inspect_invoice_only(tmp_path):
     inv = tmp_path / "发票.xlsx"
-    tpl = tmp_path / "数据模板.xlsx"
+    leftover = tmp_path / "数据模板.xlsx"
     _write_invoice(inv, [_ok_row()])
-    _copy_template(tpl)
-    leftover = tmp_path / "数据模板_结果.xlsx"
     _copy_template(leftover)
     found = convert.inspect_dir(tmp_path)
     assert Path(found["invoice"]).name == "发票.xlsx"
-    assert Path(found["template"]).name == "数据模板.xlsx"
+    assert found.get("template") in (None, "")
     assert found.get("master") in (None, "")
 
 
 def test_cli_writes_result_in_same_folder(tmp_path):
     inv = tmp_path / "发票.xlsx"
-    tpl = tmp_path / "数据模板.xlsx"
+    leftover = tmp_path / "数据模板.xlsx"
     _write_invoice(inv, [_ok_row()])
-    _copy_template(tpl)
+    _copy_template(leftover)
     rc = convert.main(["--input-dir", str(tmp_path), "--date", "2026-08-14"])
     assert rc == 0
-    assert (tmp_path / "数据模板_结果.xlsx").is_file()
-    assert tpl.is_file()
+    assert (tmp_path / "凭证引入_结果.xlsx").is_file()
+    assert leftover.is_file()
+    assert not (tmp_path / "数据模板_结果.xlsx").is_file()
 
 
 @pytest.mark.skipif(not GOLD_INVOICE.is_file(), reason="本机金标文件不在")

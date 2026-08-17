@@ -24,7 +24,21 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
-**当前源码共 16 个技能进更新白名单**（另有 `project-detail-to-ledger` 已在仓内、尚未进白名单）。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
+**当前源码共 17 个技能进更新白名单**（另有 `project-detail-to-ledger` 已在仓内、尚未进白名单）。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
+
+> ### ⭐ 启动时说什么（同事开口、agent 认技能）
+>
+> 总表：[`skills/财务技能_说什么用哪个.md`](./skills/财务技能_说什么用哪个.md)。每个业务技能 README 标题下也有「启动时说」。
+>
+> | 你说 | 它干嘛 |
+> |------|--------|
+> | **更新财务skills** | 从 **Gitee** 拉官方包（核销已合入 main，一并更新） |
+> | 跑本周应收 | 应收合并 |
+> | 把 all 拆给各销售 | 按销售拆分 |
+> | 核对劳务发票 | 劳务发票核对 |
+> | 跑昨天的核销 / 日清 | 应收核销日清 |
+> | 九点下单 | 下单汇总 |
+> | 琪哥发票入金蝶 | 销项填金蝶引入表 |
 
 > ### ⭐ 更新去哪？就这一个仓库 · 2026-07-25 起 git 即分发
 >
@@ -35,7 +49,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 > | **分支** | `main` |
 > | **形态** | **一个 monorepo**（全部 skill 在 `skills/` 下） |
 > | **开发交付** | 测绿 → `git push origin main`（双端）→ **完成**。**默认不再打 zip、不再飞书发压缩包** |
-> | **同事更新** | 对 opencode 说一句 **「更新财务skills」** → 拉云端 main → **只覆盖白名单** → 保留本地 config → **不动自装技能** |
+> | **同事更新** | 对 opencode 说一句 **「更新财务skills」** → 走 `update-finance-skills` 拉 **Gitee** main → 只覆盖白名单 → 保留本地 config（核销业务规则跟仓库） → **不动自装技能** |
 >
 > 详细流程、白名单、config 铁律、可复制提示词 → 必读 **[SOURCE.md](./SOURCE.md)**。  
 > 装进 opencode 后精简版见 `skills/财务技能包_来源与更新.md`。  
@@ -62,16 +76,17 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [dept-expense-alloc](skills/dept-expense-alloc/) | **部门费用归集分摊（月度）**：用友余额+收入底稿+人员归属+按人费用 → 部门科目余额表+利润表，主体合计=部门合计核对≈0 | ✅ v1.0.0 可交付 · **已入包** · 待真实月份试用 |
 | [ar-hexiao-daily](skills/ar-hexiao-daily/) | **应收核销日清**：出纳按核销日取智云数 → SOD 级判定 → 一份《核销日清》→ **她确认** → 写前复核 → 统一写盈亏明细 + 流转安全子集；含跑批台账查漏天（**永不写智云**） | ✅ 测试 186 · **opencode 端到端实测通过**（715 格与她手填逐格一致）· 待工位真 T-1 验收 |
 | [order-daily-summary](skills/order-daily-summary/) | **九点下单统计**：登录智云抓下单表 → 组织架构归多语（不含运保）/数据/游戏/其他 →「下单数据(万元)」xlsx | ✅ 单测 24 · **内网真机复测通过（2026-07-24）** |
-| [qige-invoice-to-kingdee](skills/qige-invoice-to-kingdee/) | **琪哥发票入金蝶**：发票簿 + 金蝶空模 → 按模板填好的引入表（文件名加「结果」）；缺科目 hold | 🟡 两文件输入 · 合成 17 绿 |
+| [qige-invoice-to-kingdee](skills/qige-invoice-to-kingdee/) | **琪哥发票入金蝶**：改样发票簿 → 按技能自带空模填好的引入表（`凭证引入_结果.xlsx`）；缺科目 hold | 🟡 空模技能自带 · 合成测试绿 |
 
 > 链路示意：`receivables-merge` → `split-by-sales`（旁路 `compliance-spot-check`）；出纳核销独立走 `ar-hexiao-daily`；亮晶下单日报走 `order-daily-summary`。  
 > **规划中（未建 skill）**：销售反馈汇总 等。  
 > **已下线 / 迁出**：`payroll-info-match`、`insurance-fund-merge`（不做）；`bank-income-extract` 已改独立 Windows exe（日记账挑收入），不再随本包维护。
 
-### 行为 / 环境 · 2 个
+### 行为 / 环境 · 3 个
 
 | skill | 解决什么 | 状态 |
 |-------|----------|------|
+| [update-finance-skills](skills/update-finance-skills/) | **更新财务skills**：说「更新」从 **Gitee** 拉官方包；核销跟 main；也回答「该用哪个」 | ✅ 脚本 + 测 |
 | [task-clarifier](skills/task-clarifier/) | **理清需求**：需求含糊时先用带选项的选择题问清「要干啥 / 文件在哪 / 口径」，再动手——绝不猜 | ✅ 已入包（改编自 trailofbits/skills，CC BY-SA 4.0） |
 | [env-doctor](skills/env-doctor/) | **环境管家**：缺 Python 库 / LibreOffice·poppler·tesseract / Python 版本太老时，查《依赖与安装清单》按**国内镜像优先**装齐再重试。纯提示词、不碰业务数据 | ✅ 清单覆盖全包技能 · 清华镜像实装验证 · 已入包 |
 
@@ -84,7 +99,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx，批注修订、插图、提正文 | ✅ 已入库 · 已入包 |
 | [pptx](skills/pptx/) | **PPT 演示文稿**：做幻灯片、改模板、抽正文、合并拆分 deck | ✅ 已入库 · 已入包 |
 
-**合计：10 业务 + 2 行为/环境 + 4 基座 = 16（更新白名单）。** `project-detail-to-ledger` 在仓内但不进白名单，直至另定。
+**合计：10 业务 + 3 行为/环境（含更新）+ 4 基座 = 17（更新白名单）。** `project-detail-to-ledger` 在仓内但不进白名单，直至另定。
 
 > **环境依赖（部署到同事机器时注意）**：① 四类通用基座的"校验"脚本 `office/validate.py` 用了 `match` 语法，**需 Python ≥3.10**（3.9 会报 SyntaxError）——核心读写不受影响，仅可选校验步骤受限。② `xlsx/recalc.py`、`pptx/thumbnail.py`、`docx/accept_changes.py` 依赖 **LibreOffice（soffice）**重算/转图/接受修订；没装 LibreOffice 时这几个功能降级，openpyxl/python-docx/pypdf 的基本读写仍正常。  
 > **以上环境问题统一交给 `env-doctor` 处理**——任何技能缺库/缺工具，agent 查它的清单按国内镜像装齐再重试。  
@@ -160,7 +175,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 更新财务skills
 ```
 
-Agent 从 Gitee/GitHub `main` 拉最新 → 只覆盖财务包白名单夹 → 保留本机 `config/` → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
+Agent 走 `update-finance-skills`：从 **Gitee** `main` 拉最新 → 只覆盖白名单 → 保留本机 `config/`（核销业务规则跟仓库） → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
 
 完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v19 第三节 B 段一致）。
 
@@ -192,7 +207,7 @@ git log -1 --oneline
 - 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
 （另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
 
 【装到哪】

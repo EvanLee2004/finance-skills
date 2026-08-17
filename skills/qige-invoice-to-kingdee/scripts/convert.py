@@ -24,6 +24,7 @@ HERE = Path(__file__).resolve().parent
 SKILL_DIR = HERE.parent
 CONFIG_DIR = SKILL_DIR / "config"
 TEMPLATE_PATH = CONFIG_DIR / "凭证引入空模.xlsx"
+KINGDEE_RESULT_NAME = "凭证引入_结果.xlsx"
 TWOPLACES = Decimal("0.01")
 KINGDEE_SHEET = "sheet1（名称勿改）"
 
@@ -539,9 +540,9 @@ def convert(
     holds = [x for x in lines if x.status != "可入账"]
     out_dir.mkdir(parents=True, exist_ok=True)
     detail_path = out_dir / f"{invoice_path.stem}_明细结果.xlsx"
-    kingdee_path = out_dir / f"{template.stem}_结果.xlsx"
+    kingdee_path = out_dir / KINGDEE_RESULT_NAME
     if kingdee_path.resolve() == template.resolve():
-        kingdee_path = out_dir / f"{template.stem}_填写结果.xlsx"
+        kingdee_path = out_dir / "凭证引入_填写结果.xlsx"
     write_detail(detail_path, lines)
     write_kingdee(kingdee_path, bookable, rules, booking, template)
     return ConvertResult(
@@ -579,18 +580,6 @@ def sniff_invoice(path: Path) -> bool:
         return False
 
 
-def sniff_template(path: Path) -> bool:
-    if is_result_file(path):
-        return False
-    try:
-        wb = load_workbook(path, read_only=True, data_only=False)
-        names = wb.sheetnames
-        wb.close()
-        return KINGDEE_SHEET in names and "发票" not in names
-    except Exception:
-        return False
-
-
 def sniff_master(path: Path) -> bool:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -600,13 +589,10 @@ def sniff_master(path: Path) -> bool:
 
 
 def inspect_dir(input_dir: Path) -> dict:
-    found = {"invoice": None, "template": None, "master": None}
+    found = {"invoice": None, "master": None}
     for p in sorted(Path(input_dir).iterdir()):
-        if p.suffix.lower() in {".xlsx", ".xlsm"}:
-            if sniff_invoice(p) and not found["invoice"]:
-                found["invoice"] = str(p)
-            elif sniff_template(p) and not found["template"]:
-                found["template"] = str(p)
+        if p.suffix.lower() in {".xlsx", ".xlsm"} and sniff_invoice(p) and not found["invoice"]:
+            found["invoice"] = str(p)
         if p.suffix.lower() == ".json" and sniff_master(p) and not found["master"]:
             found["master"] = str(p)
     return found
@@ -626,7 +612,7 @@ def main(argv=None) -> int:
         target = Path(args.input_dir or SKILL_DIR / "工作区" / "input")
         found = inspect_dir(target)
         print(json.dumps(found, ensure_ascii=False, indent=2))
-        return 0 if found["invoice"] and found["template"] else 2
+        return 0 if found["invoice"] else 2
     invoice = Path(args.invoice) if args.invoice else None
     template = Path(args.template) if args.template else None
     master = Path(args.master) if args.master else None
@@ -634,15 +620,14 @@ def main(argv=None) -> int:
     if input_dir:
         found = inspect_dir(input_dir)
         invoice = invoice or (Path(found["invoice"]) if found["invoice"] else None)
-        template = template or (Path(found["template"]) if found["template"] else None)
         master = master or (Path(found["master"]) if found["master"] else None)
     if not invoice:
-        log("缺发票 Excel。把改样发票簿和金蝶空模放进同一文件夹。")
+        log("缺发票 Excel。把改样发票簿放进文件夹即可，金蝶空模技能自带。")
         return 2
     if not template:
         template = TEMPLATE_PATH
     if not template.is_file():
-        log("缺金蝶引入空模。把官方凭证引入模板和发票簿放进同一文件夹。")
+        log("技能缺金蝶引入空模 config/凭证引入空模.xlsx。")
         return 2
     out_dir = Path(args.out_dir) if args.out_dir else (input_dir or invoice.parent)
     result = convert(
