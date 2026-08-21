@@ -217,19 +217,61 @@ def test_three_lines_balance_and_tax_no_aux(tmp_path):
     kd.close()
 
 
-def test_pack_five_per_voucher(tmp_path):
-    rows = [_ok_row(inv=str(i), tot=1060, amt=1000, tax=60) for i in range(12)]
-    result = _run(tmp_path, rows)
-    assert result.bookable_count == 12
-    kd = load_workbook(result.kingdee_path)
+def _voucher_nums(path, invoices):
+    kd = load_workbook(path)
     ws = kd["sheet1（名称勿改）"]
     nums = []
-    for row in ws.iter_rows(min_row=4, max_row=3 + 12 * 3, max_col=3, values_only=True):
+    for row in ws.iter_rows(min_row=4, max_row=3 + invoices * 3, max_col=3, values_only=True):
         nums.append(row[2])
+    kd.close()
+    return nums
+
+
+def test_pack_five_per_voucher(tmp_path):
+    rows = [
+        _ok_row(name=f"客户{i}有限公司", inv=str(i), tot=1060, amt=1000, tax=60)
+        for i in range(12)
+    ]
+    result = _run(tmp_path, rows)
+    assert result.bookable_count == 12
+    nums = _voucher_nums(result.kingdee_path, 12)
     assert nums.count(1) == 15
     assert nums.count(2) == 15
     assert nums.count(3) == 6
-    kd.close()
+
+
+def test_pack_keeps_consecutive_company_across_five(tmp_path):
+    rows = (
+        [_ok_row(name=f"散户{i}", inv=str(i)) for i in range(5)]
+        + [_ok_row(name="连号甲", inv=f"a{i}") for i in range(3)]
+        + [_ok_row(name="连号乙", inv=f"b{i}") for i in range(4)]
+    )
+    result = _run(tmp_path, rows)
+    nums = _voucher_nums(result.kingdee_path, 12)
+    assert nums.count(1) == 15
+    assert nums.count(2) == 21
+    assert 3 not in nums
+
+
+def test_formula_account_without_cache_holds(tmp_path):
+    result = _run(tmp_path, [_ok_row(ar="=VLOOKUP(1,A1:B2,1,0)")])
+    assert result.bookable_count == 0
+    assert result.hold_count == 1
+    assert result.holds[0]["原因"] == "缺科目编码"
+
+
+def test_pick_code_uses_cached_value_for_formula():
+    assert convert.pick_code("=VLOOKUP(1,A1:B2,1,0)", 113103) == "113103"
+    assert convert.pick_code("=VLOOKUP(1,A1:B2,1,0)", None) == ""
+    assert convert.pick_code("113103", None) == "113103"
+
+
+def test_pack_same_company_over_five_one_voucher(tmp_path):
+    rows = [_ok_row(name="同一家", inv=str(i)) for i in range(8)]
+    result = _run(tmp_path, rows)
+    nums = _voucher_nums(result.kingdee_path, 8)
+    assert nums.count(1) == 24
+    assert 2 not in nums
 
 
 def test_booking_date_not_invoice_date(tmp_path):

@@ -85,6 +85,7 @@ def load_rules() -> dict:
     return {
         "tax_account": str(data.get("tax_account") or "21710105"),
         "pack_size": int(data.get("pack_size") or 5),
+        "pack_keep_consecutive": bool(data.get("pack_keep_consecutive", True)),
         "voucher_word": str(data.get("voucher_word") or "记"),
         "currency": str(data.get("currency") or "RMB"),
         "exchange_rate": Decimal(str(data.get("exchange_rate") or 1)),
@@ -224,6 +225,12 @@ def load_org(ws, aliases: dict) -> tuple[dict[str, list[str]], str | None]:
     return mapping, None
 
 
+def pick_code(formula_cell, value_cell) -> str:
+    if isinstance(formula_cell, str) and formula_cell.startswith("="):
+        return code_str(value_cell)
+    return code_str(formula_cell) or code_str(value_cell)
+
+
 def pick_amount(formula_cell, value_cell, fallback: Decimal | None) -> Decimal | None:
     got = money(value_cell)
     if got is not None:
@@ -286,8 +293,14 @@ def read_invoices(path: Path, aliases: dict, divisor: Decimal) -> tuple[list[dic
                 "total": total,
                 "amount": amount,
                 "tax": tax,
-                "ar": code_str(cell_at(row_f, idx, "应收账款编码")),
-                "rev": code_str(cell_at(row_f, idx, "主营业务收入编码")),
+                "ar": pick_code(
+                    cell_at(row_f, idx, "应收账款编码"),
+                    cell_at(row_v, idx, "应收账款编码"),
+                ),
+                "rev": pick_code(
+                    cell_at(row_f, idx, "主营业务收入编码"),
+                    cell_at(row_v, idx, "主营业务收入编码"),
+                ),
                 "org": org,
             }
         )
@@ -376,6 +389,37 @@ def summary_of(line: Line) -> str:
     return f"{typ}：{line.unit_name}"
 
 
+def company_key(line: Line) -> str:
+    return norm_customer(line.unit_name)
+
+
+def assign_vouchers(bookable: list[Line], pack_size: int, keep_consecutive: bool = True) -> None:
+    """按表顺序大约 pack_size 张一记。连续同公司不拆到下一记，可以超过 pack_size。"""
+    if not keep_consecutive:
+        for batch, start in enumerate(range(0, len(bookable), pack_size), start=1):
+            for line in bookable[start : start + pack_size]:
+                line.voucher_no = batch
+        return
+    batch = 0
+    current: list[Line] = []
+    for line in bookable:
+        if not current:
+            current = [line]
+            continue
+        same = company_key(line) == company_key(current[-1])
+        if same or len(current) < pack_size:
+            current.append(line)
+            continue
+        batch += 1
+        for item in current:
+            item.voucher_no = batch
+        current = [line]
+    if current:
+        batch += 1
+        for item in current:
+            item.voucher_no = batch
+
+
 def col_by_label(ws, needle: str) -> int:
     for cell in ws[3]:
         if needle in str(cell.value or ""):
@@ -410,45 +454,47 @@ def write_kingdee(path: Path, bookable: list[Line], rules: dict, booking: str, t
         "emp_code": col_by_label(ws, "辅助核算.职员.编码"),
         "emp_name": col_by_label(ws, "辅助核算.职员.名称"),
     }
-    pack = rules["pack_size"]
+    assign_vouchers(
+        bookable,
+        rules["pack_size"],
+        keep_consecutive=rules.get("pack_keep_consecutive", True),
+    )
     row_i = 4
-    for batch, start in enumerate(range(0, len(bookable), pack), start=1):
-        chunk = bookable[start : start + pack]
-        for line in chunk:
-            line.voucher_no = batch
-            expl = summary_of(line)
-            entries = [
-                (line.ar, line.total, True, True),
-                (line.rev, line.amount, False, True),
-                (rules["tax_account"], line.tax, False, False),
-            ]
-            for account, amt, is_debit, with_aux in entries:
-                ws.cell(row_i, cols["date"], booking)
-                ws.cell(row_i, cols["word"], rules["voucher_word"])
-                ws.cell(row_i, cols["number"], batch)
-                ws.cell(row_i, cols["expl"], expl)
-                ws.cell(row_i, cols["account"], account)
-                acc_name = rules["account_names"].get(str(account), "")
-                if acc_name:
-                    ws.cell(row_i, cols["account_name"], acc_name)
-                ws.cell(row_i, cols["currency"], rules["currency"])
-                if rules.get("currency_name"):
-                    ws.cell(row_i, cols["currency_name"], rules["currency_name"])
-                ws.cell(row_i, cols["rate"], float(rules["exchange_rate"]))
-                val = float(amt)
-                ws.cell(row_i, cols["amountfor"], val)
-                if is_debit:
-                    ws.cell(row_i, cols["debit"], val)
-                else:
-                    ws.cell(row_i, cols["credit"], val)
-                if with_aux:
-                    ws.cell(row_i, cols["cus_code"], line.customer_code)
-                    ws.cell(row_i, cols["cus_name"], line.customer_name)
-                    ws.cell(row_i, cols["dep_code"], line.dept_code)
-                    ws.cell(row_i, cols["dep_name"], line.dept_name)
-                    ws.cell(row_i, cols["emp_code"], line.emp_code)
-                    ws.cell(row_i, cols["emp_name"], line.emp_name)
-                row_i += 1
+    for line in bookable:
+        batch = line.voucher_no
+        expl = summary_of(line)
+        entries = [
+            (line.ar, line.total, True, True),
+            (line.rev, line.amount, False, True),
+            (rules["tax_account"], line.tax, False, False),
+        ]
+        for account, amt, is_debit, with_aux in entries:
+            ws.cell(row_i, cols["date"], booking)
+            ws.cell(row_i, cols["word"], rules["voucher_word"])
+            ws.cell(row_i, cols["number"], batch)
+            ws.cell(row_i, cols["expl"], expl)
+            ws.cell(row_i, cols["account"], account)
+            acc_name = rules["account_names"].get(str(account), "")
+            if acc_name:
+                ws.cell(row_i, cols["account_name"], acc_name)
+            ws.cell(row_i, cols["currency"], rules["currency"])
+            if rules.get("currency_name"):
+                ws.cell(row_i, cols["currency_name"], rules["currency_name"])
+            ws.cell(row_i, cols["rate"], float(rules["exchange_rate"]))
+            val = float(amt)
+            ws.cell(row_i, cols["amountfor"], val)
+            if is_debit:
+                ws.cell(row_i, cols["debit"], val)
+            else:
+                ws.cell(row_i, cols["credit"], val)
+            if with_aux:
+                ws.cell(row_i, cols["cus_code"], line.customer_code)
+                ws.cell(row_i, cols["cus_name"], line.customer_name)
+                ws.cell(row_i, cols["dep_code"], line.dept_code)
+                ws.cell(row_i, cols["dep_name"], line.dept_name)
+                ws.cell(row_i, cols["emp_code"], line.emp_code)
+                ws.cell(row_i, cols["emp_name"], line.emp_name)
+            row_i += 1
     wb.save(path)
     wb.close()
     return path
@@ -538,6 +584,11 @@ def convert(
     lines = [classify(item, master, rules["tax_account"]) for item in items]
     bookable = [x for x in lines if x.status == "可入账"]
     holds = [x for x in lines if x.status != "可入账"]
+    assign_vouchers(
+        bookable,
+        rules["pack_size"],
+        keep_consecutive=rules.get("pack_keep_consecutive", True),
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     detail_path = out_dir / f"{invoice_path.stem}_明细结果.xlsx"
     kingdee_path = out_dir / KINGDEE_RESULT_NAME
