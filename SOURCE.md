@@ -83,8 +83,8 @@
    - **保留**本机各技能已有 `config/`（核销除外，业务规则跟仓库）  
    - 把 `财务技能包_来源与更新.md` 和 `财务技能_说什么用哪个.md` 放到 skills 目录根  
 4. **禁止**：清空整个 skills；删除/改动白名单外任何夹。  
-5. **可选清理**（仅当存在才删，且只删这些已下线官方旧夹）：`payroll-info-match`、`insurance-fund-merge`、`bank-income-extract`。  
-6. **汇报**（必须逐条）：更新到的 **git short SHA**；更新/新增了哪些；核销是否跳过；白名单外是否「未动」；config 是否保留；提醒 **重启 opencode**。
+5. **汇报**（必须逐条）：更新到的 **git short SHA**；更新/新增了哪些；白名单外是否「未动」；config 是否保留；提醒 **重启 opencode**。  
+   不要再装、不要再点名已下线的旧技能。白名单以 `pack.json` 为准。
 
 ### 可复制提示词（同事 / Agent 通用）
 
@@ -116,9 +116,8 @@ receivables-merge、split-by-sales、labor-invoice-check、withholding-report-re
 【步骤】
 1）git 拉到最新 main，记下 short SHA。
 2）只对白名单：用仓内 skills/ 覆盖安装目录源码；新技能整夹复制。
-3）⚠ 保留我本地 config：某技能本机已有 config/ 则绝不覆盖；没有才从仓库复制。
-4）可选：若存在已下线旧夹 payroll-info-match / insurance-fund-merge / bank-income-extract 才删它们。
-5）依赖可顺手补（国内镜像）：
+3）⚠ 保留我本地 config：某技能本机已有 config/ 则绝不覆盖；没有才从仓库复制。核销业务规则跟仓库。
+4）依赖可顺手补（国内镜像）：
    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pandas openpyxl xlrd pypdf pdfplumber pdf2image python-docx python-pptx markitdown lxml defusedxml Pillow requests playwright
    playwright install chromium
 

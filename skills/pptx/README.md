@@ -30,4 +30,4 @@ pptx/
 
 ## 维护
 
-研发：李明昊 · 甲骨易财务部 · 改动走 `finance-skills` 仓库 commit/push，同步重打 `部署/财务技能包.zip`。
+研发：李明昊 · 甲骨易财务部 · 改动走 `finance-skills` 仓库 `git push origin main`。同事说「更新财务skills」。不要再打 zip。

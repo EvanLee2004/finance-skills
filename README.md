@@ -177,7 +177,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 
 Agent 走 `update-finance-skills`：从 **Gitee** `main` 拉最新 → 只覆盖白名单 → 保留本机 `config/`（核销业务规则跟仓库） → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
 
-完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v19 第三节 B 段一致）。
+完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v20 第三节 B 段一致）。
 
 ### 开发机已 clone 时（可选手工）
 
@@ -219,9 +219,8 @@ receivables-merge、split-by-sales、labor-invoice-check、withholding-report-re
 【步骤】
 1）git 拉到最新 main，记下 short SHA。
 2）只对白名单：用仓内 skills/ 覆盖安装目录源码；新技能整夹复制。
-3）⚠ 保留我本地 config：某技能本机已有 config/ 则绝不覆盖；没有才从仓库复制。
-4）可选：若存在已下线旧夹 payroll-info-match / insurance-fund-merge / bank-income-extract 才删它们。
-5）依赖可顺手补（国内镜像）：
+3）⚠ 保留我本地 config：某技能本机已有 config/ 则绝不覆盖；没有才从仓库复制。核销业务规则跟仓库。
+4）依赖可顺手补（国内镜像）：
    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pandas openpyxl xlrd pypdf pdfplumber pdf2image python-docx python-pptx markitdown lxml defusedxml Pillow requests playwright
    playwright install chromium
 

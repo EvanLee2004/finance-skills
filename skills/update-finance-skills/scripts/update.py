@@ -151,7 +151,7 @@ def format_report(report: dict[str, list[str]], sha: str, remote: str, dest: Pat
         f"装到 {dest}",
         f"更新：{', '.join(report['updated']) or '无'}",
         f"新装：{', '.join(report['installed']) or '无'}",
-        f"核销等受保护未覆盖：{', '.join(report['skipped_protected']) or '无'}",
+        f"跳过（保护名单）：{', '.join(report['skipped_protected']) or '无'}",
         f"本地 config 保留：{', '.join(report['config_kept']) or '无'}",
         "白名单外其他技能：未动",
         "请重启 opencode。",
