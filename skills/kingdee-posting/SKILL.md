@@ -37,7 +37,7 @@ python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <绝对目�
 
 不要问金蝶登录密码。问开放平台「甲骨易财务连接器」的 **应用 ID（Client ID）和 Client Secret**。  
 填完写入 `~/.config/finance/kingdee.local.json`（权限 600）。更新财务skills **不得覆盖**这份。  
-她暂时没有密钥：仍跑 `--no-api`，编码可空，照样出引入表。
+没有密钥、档案查询失败或本机缓存过期：**不生成引入表**。先恢复只读档案查询，再重跑；不能用 `--no-api` 绕过这个闸门。
 
 ## 3. 跑转换
 
@@ -64,6 +64,7 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene
 | `config/客户别名.json` | 收款三户映射 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
 | 本机 `kingdee.local.json` | 应用号；不进仓 |
+| 本机 `~/.cache/finance/kingdee-master.json` | 只读 API 档案短缓存（默认 15 分钟）；自动生成，不手改、不进仓 |
 
 口径说明：`config/业务规则.md`、`config/场景/`。维护步骤和后台链接：`README.md`。
 
@@ -72,4 +73,4 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene
 - 夹里同时像销项又像收款 → 停，问跑哪一句。
 - 付款认不清专普、票合计小于应付 → 待确认，不要猜税率。
 - 收款出现「公安」且不是已映射户 → 待确认。
-- 本机没应用号仍能出表，但要告诉她编码可能是空的。
+- 本机没有应用号、查档失败或缓存过期 → 停止，不交空编码的引入表。

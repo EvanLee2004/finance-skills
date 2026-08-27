@@ -16,14 +16,58 @@ from urllib.parse import quote
 import requests
 
 DEFAULT_LOCAL = Path.home() / ".config" / "finance" / "kingdee.local.json"
+DEFAULT_CACHE = Path.home() / ".cache" / "finance" / "kingdee-master.json"
 API_HOST = "https://api.kingdee.com"
 AUTH_PATH = "/jdyconnector/app_management/kingdee_auth_token"
 NEED_KEYS = ("client_id", "client_secret", "app_key", "app_secret")
+MASTER_KINDS = ("customer", "employee", "supplier", "department")
+MASTER_CACHE_TTL_SECONDS = 15 * 60
 
 
 def local_path() -> Path:
     override = os.environ.get("KINGDEE_LOCAL_JSON", "").strip()
     return Path(override) if override else DEFAULT_LOCAL
+
+
+def cache_path() -> Path:
+    override = os.environ.get("KINGDEE_MASTER_CACHE", "").strip()
+    return Path(override) if override else DEFAULT_CACHE
+
+
+def cache_ttl_seconds() -> int:
+    raw = os.environ.get("KINGDEE_MASTER_CACHE_TTL_SECONDS", "").strip()
+    try:
+        return max(0, int(raw)) if raw else MASTER_CACHE_TTL_SECONDS
+    except ValueError:
+        return MASTER_CACHE_TTL_SECONDS
+
+
+def load_fresh_cache() -> dict | None:
+    path = cache_path()
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        cached_at = float(payload["cached_at"])
+        data = payload["data"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if time.time() - cached_at > cache_ttl_seconds():
+        return None
+    if not isinstance(data, dict) or any(not isinstance(data.get(kind), list) for kind in MASTER_KINDS):
+        return None
+    return data
+
+
+def save_cache(data: dict) -> None:
+    path = cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"cached_at": time.time(), "data": data}, ensure_ascii=False), encoding="utf-8")
+        path.chmod(0o600)
+    except OSError:
+        # 缓存只是性能优化；写缓存失败不能改变本次已成功的只读查档结果。
+        return
 
 
 def load_local() -> dict | None:
@@ -157,8 +201,10 @@ def _code_name(item: dict) -> dict | None:
     return {"code": code, "name": name}
 
 
-def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int = 100) -> list[dict]:
-    host = (domain or API_HOST).rstrip("/")
+def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int = 2000) -> list[dict]:
+    # app-token 的 domain 是租户域名；基础档案 OpenAPI 固定走官方网关。
+    # 使用租户域名会返回 404，不能静默降级为空档案。
+    host = API_HOST
     out: list[dict] = []
     page = 1
     extra = {"app-token": token}
@@ -184,6 +230,9 @@ def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int =
 
 
 def try_load_master() -> dict:
+    cached = load_fresh_cache()
+    if cached is not None:
+        return {"ok": True, "missing_credentials": False, "source": "cache", "data": cached}
     creds = load_local()
     if not creds:
         return {"ok": False, "missing_credentials": True, "data": None}
@@ -195,11 +244,12 @@ def try_load_master() -> dict:
             "supplier": fetch_list(creds, token, domain, "/jdy/v2/bd/supplier"),
             "department": fetch_list(creds, token, domain, "/jdy/v2/bd/department"),
         }
-        return {"ok": True, "missing_credentials": False, "data": data}
+        save_cache(data)
+        return {"ok": True, "missing_credentials": False, "source": "live", "data": data}
     except Exception as e:
         return {
             "ok": False,
             "missing_credentials": False,
-            "error": type(e).__name__,
+            "error": f"{type(e).__name__}: {str(e)[:200]}",
             "data": None,
         }

@@ -200,7 +200,7 @@ class Master:
             return None, "缺部门编码"
         name = self.dept.get(code)
         if not name:
-            return (code, ""), None
+            return None, "部门档案没有该编码"
         return (code, name), None
 
     def supplier_fuzzy(self, name: str):
@@ -243,6 +243,15 @@ def assign_vouchers(lines: list[VoucherLine], pack_size: int, keep_consecutive: 
         batch += 1
         for item in current:
             item.voucher_no = batch
+
+
+def _write_aux(ws, row: int, col: int, value) -> None:
+    if value is None or value == "":
+        return
+    text = str(value).strip()
+    if not text or text.startswith("="):
+        return
+    ws.cell(row, col, value)
 
 
 def col_by_label(ws, needle: str) -> int:
@@ -309,18 +318,14 @@ def write_kingdee(path: Path, lines: list[VoucherLine], rules: dict, booking: st
             if credit is not None:
                 ws.cell(row_i, cols["credit"], float(credit))
             if ent.get("aux"):
-                if ent.get("cus_code") or ent.get("cus_name"):
-                    ws.cell(row_i, cols["cus_code"], ent.get("cus_code") or "")
-                    ws.cell(row_i, cols["cus_name"], ent.get("cus_name") or "")
-                if ent.get("dep_code") or ent.get("dep_name"):
-                    ws.cell(row_i, cols["dep_code"], ent.get("dep_code") or "")
-                    ws.cell(row_i, cols["dep_name"], ent.get("dep_name") or "")
-                if ent.get("emp_code") or ent.get("emp_name"):
-                    ws.cell(row_i, cols["emp_code"], ent.get("emp_code") or "")
-                    ws.cell(row_i, cols["emp_name"], ent.get("emp_name") or "")
-                if ent.get("sup_code") or ent.get("sup_name"):
-                    ws.cell(row_i, cols["sup_code"], ent.get("sup_code") or "")
-                    ws.cell(row_i, cols["sup_name"], ent.get("sup_name") or "")
+                _write_aux(ws, row_i, cols["cus_code"], ent.get("cus_code"))
+                _write_aux(ws, row_i, cols["cus_name"], ent.get("cus_name"))
+                _write_aux(ws, row_i, cols["dep_code"], ent.get("dep_code"))
+                _write_aux(ws, row_i, cols["dep_name"], ent.get("dep_name"))
+                _write_aux(ws, row_i, cols["emp_code"], ent.get("emp_code"))
+                _write_aux(ws, row_i, cols["emp_name"], ent.get("emp_name"))
+                _write_aux(ws, row_i, cols["sup_code"], ent.get("sup_code"))
+                _write_aux(ws, row_i, cols["sup_name"], ent.get("sup_name"))
             row_i += 1
     wb.save(path)
     wb.close()
@@ -338,25 +343,6 @@ def write_detail(path: Path, lines: list[VoucherLine], scene: str) -> Path:
     wb.save(path)
     wb.close()
     return path
-
-
-def load_org(ws, aliases: dict):
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return {}, "组织架构是空的"
-    idx = header_index(list(rows[0]), aliases)
-    if "姓名" not in idx or "部门编码" not in idx:
-        return {}, "组织架构缺姓名或部门编码列"
-    mapping: dict[str, list[str]] = {}
-    for row in rows[1:]:
-        if not row:
-            continue
-        name = str(cell_at(row, idx, "姓名") or "").strip()
-        dept = code_str(cell_at(row, idx, "部门编码"))
-        if not name:
-            continue
-        mapping.setdefault(name, []).append(dept)
-    return mapping, None
 
 
 def sales_sheet(wb) -> str | None:
@@ -387,11 +373,6 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
         wb_f.close()
         wb_v.close()
         raise SystemExit("发票表缺列：" + "、".join(missing))
-    org = {}
-    if "组织架构" in wb_f.sheetnames:
-        org, org_err = load_org(wb_f["组织架构"], aliases.get("组织架构_列别名") or {})
-        if org_err:
-            org = {}
     lines: list[VoucherLine] = []
     max_row = ws_f.max_row or 1
     for r in range(2, max_row + 1):
@@ -411,7 +392,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
         applicant = str(cell_at(row_f, idx, "申请人") or "").strip()
         ar = pick_code(cell_at(row_f, idx, "应收账款编码"), cell_at(row_v, idx, "应收账款编码"))
         rev = pick_code(cell_at(row_f, idx, "主营业务收入编码"), cell_at(row_v, idx, "主营业务收入编码"))
-        dept = code_str(cell_at(row_f, idx, "部门编码"))
+        dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码"))
         prefix = typ
         if total is not None and total < 0 and "红字" not in typ:
             prefix = "红字" + typ
@@ -442,38 +423,28 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
             line.status, line.reason = "待确认", "缺申请人"
             lines.append(line)
             continue
-        if org:
-            depts = org.get(applicant) or []
-            uniq = list(dict.fromkeys(depts))
-            if len(uniq) != 1 or not uniq[0]:
-                line.status, line.reason = "待确认", "组织架构无此申请人或一对多"
-                lines.append(line)
-                continue
-            dept = uniq[0]
         if not dept:
             line.status, line.reason = "待确认", "缺部门编码"
             lines.append(line)
             continue
-        dep_name = ""
-        dhit, _ = master.department(dept)
-        if dhit:
-            dept, dep_name = dhit
-        emp_code, emp_name = "", applicant
+        dhit, derr = master.department(dept)
+        if not dhit:
+            line.status, line.reason = "待确认", derr or "部门档案未核验"
+            lines.append(line)
+            continue
+        dept, dep_name = dhit
         ehit, eerr = master.employee(applicant)
-        if eerr == "many":
-            line.status, line.reason = "待确认", "职员档案一对多"
+        if not ehit:
+            line.status, line.reason = "待确认", "职员档案一对多" if eerr == "many" else "职员档案没有此人"
             lines.append(line)
             continue
-        if ehit:
-            emp_code, emp_name = ehit
-        cus_code, cus_name = "", unit
+        emp_code, emp_name = ehit
         chit, cerr = master.customer(unit)
-        if cerr == "many":
-            line.status, line.reason = "待确认", "客户档案一对多"
+        if not chit:
+            line.status, line.reason = "待确认", "客户档案一对多" if cerr == "many" else "客户档案没有此抬头"
             lines.append(line)
             continue
-        if chit:
-            cus_code, cus_name = chit
+        cus_code, cus_name = chit
         aux = {
             "aux": True,
             "cus_code": cus_code,
@@ -588,27 +559,43 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
             line.status, line.reason = "待确认", "票合计小于应付"
             lines.append(line)
             continue
-        if master.enabled:
-            hit, why = master.supplier_fuzzy(vendor)
-            if why == "none":
-                hit, why = master.supplier_fuzzy(strip_ge(vendor))
-            if why == "none":
-                hit, why = master.supplier_fuzzy(seller)
-            if why == "many" or why == "none" or not hit:
-                sup_code, sup_name = fallback["code"], fallback["name"]
-            else:
-                sup_code, sup_name = hit
+        hit, why = master.supplier_fuzzy(vendor)
+        if why == "none":
+            hit, why = master.supplier_fuzzy(strip_ge(vendor))
+        if why == "none":
+            hit, why = master.supplier_fuzzy(seller)
+        if why == "many":
+            line.status, line.reason = "待确认", "供应商档案一对多"
+            lines.append(line)
+            continue
+        if hit:
+            sup_code, sup_name = hit
         else:
-            sup_code, sup_name = "", vendor
-        dep_code = str(cfg.get("dept_code") or "0405")
-        dep_name = str(cfg.get("dept_name") or "")
-        emp_name = str(cfg.get("emp_name") or "项目总监")
+            fallback_hit, fallback_why = master.supplier_fuzzy(str(fallback.get("name") or ""))
+            if not fallback_hit or fallback_why:
+                line.status, line.reason = "待确认", "其他供应商档案未核验"
+                lines.append(line)
+                continue
+            sup_code, sup_name = fallback_hit
+        dhit, derr = master.department(str(cfg.get("dept_code") or ""))
+        if not dhit:
+            line.status, line.reason = "待确认", derr or "付款部门档案未核验"
+            lines.append(line)
+            continue
+        dep_code, dep_name = dhit
+        ehit, eerr = master.employee(str(cfg.get("emp_name") or ""))
+        if not ehit:
+            line.status, line.reason = "待确认", "职员档案一对多" if eerr == "many" else "付款职员档案未核验"
+            lines.append(line)
+            continue
+        emp_code, emp_name = ehit
         aux = {
             "aux": True,
             "sup_code": sup_code,
             "sup_name": sup_name,
             "dep_code": dep_code,
             "dep_name": dep_name,
+            "emp_code": emp_code,
             "emp_name": emp_name,
         }
         cost_acc = str(cfg.get("cost_account") or "540103")
@@ -671,7 +658,7 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> l
             continue
         amt = pick_amount(cell_at(row_f, idx, "借方（增加）"), cell_at(row_v, idx, "借方（增加）"), None)
         sales = str(cell_at(row_f, idx, "销售") or "").strip()
-        dept = code_str(cell_at(row_f, idx, "部门编码"))
+        dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码"))
         ar = pick_code(cell_at(row_f, idx, "应收账款编码"), cell_at(row_v, idx, "应收账款编码"))
         line = VoucherLine(
             status="可入账",
@@ -692,34 +679,29 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> l
             line.status, line.reason = "待确认", "缺应收账款编码"
             lines.append(line)
             continue
-        if not dept:
+        if not dept or dept.startswith("="):
             line.status, line.reason = "待确认", "缺部门编码"
             lines.append(line)
             continue
         lookup_name = alias_map.get(cust, cust)
-        cus_code, cus_name = "", lookup_name
-        if master.enabled:
-            chit, cerr = master.customer(lookup_name)
-            if cerr == "many":
-                line.status, line.reason = "待确认", "客户档案一对多"
-                lines.append(line)
-                continue
-            if cerr == "none":
-                line.status, line.reason = "待确认", "客户档案没有此抬头"
-                lines.append(line)
-                continue
-            if chit:
-                cus_code, cus_name = chit
-        dep_name = ""
-        dhit, _ = master.department(dept)
-        if dhit:
-            dept, dep_name = dhit
-        emp_code, emp_name = "", sales
+        chit, cerr = master.customer(lookup_name)
+        if not chit:
+            line.status, line.reason = "待确认", "客户档案一对多" if cerr == "many" else "客户档案没有此抬头"
+            lines.append(line)
+            continue
+        cus_code, cus_name = chit
+        dhit, derr = master.department(dept)
+        if not dhit:
+            line.status, line.reason = "待确认", derr or "部门档案未核验"
+            lines.append(line)
+            continue
+        dept, dep_name = dhit
         ehit, eerr = master.employee(sales)
-        if eerr == "many" or eerr == "none" or not ehit:
-            emp_code, emp_name = "", ""
-        else:
-            emp_code, emp_name = ehit
+        if not ehit:
+            line.status, line.reason = "待确认", "职员档案一对多" if eerr == "many" else "职员档案没有此人"
+            lines.append(line)
+            continue
+        emp_code, emp_name = ehit
         aux = {
             "aux": True,
             "cus_code": cus_code,
@@ -796,12 +778,17 @@ def main(argv=None) -> int:
     master_data = None
     if args.master:
         master_data = json.loads(Path(args.master).read_text(encoding="utf-8"))
-    elif not args.no_api:
+    elif args.no_api:
+        log("本次入账必须先读取总部当前档案；--no-api 只可用于开发排查，未生成引入表。")
+        return 2
+    else:
         loaded = kingdee_api.try_load_master()
         if loaded.get("ok"):
             master_data = loaded["data"]
-        elif loaded.get("missing_credentials"):
-            log("本机还没有金蝶应用号。先出引入表，编码可空。第一次请在本机填开放平台应用 ID 和密钥。")
+        else:
+            reason = "本机没有金蝶应用号" if loaded.get("missing_credentials") else loaded.get("error") or "读取失败"
+            log(f"总部档案未核验（{reason}）；未生成引入表。请检查本机应用号和只读权限后重试。")
+            return 2
     try:
         result = run_dir(root, args.scene, args.date, master_data)
     except SystemExit as e:

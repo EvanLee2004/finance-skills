@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,7 +33,7 @@ kingdee_api = _load("kingdee_posting_api", SCRIPTS / "kingdee_api.py")
 
 def _master():
     return {
-        "employee": [{"code": "103", "name": "于占国"}, {"code": "011", "name": "陈霞"}],
+        "employee": [{"code": "103", "name": "于占国"}, {"code": "011", "name": "陈霞"}, {"code": "113", "name": "项目总监"}],
         "department": [{"code": "15", "name": "本地化事业部"}, {"code": "0405", "name": "项目总监及助理"}],
         "customer": [
             {"code": "1001", "name": "甲科技有限公司"},
@@ -40,7 +41,7 @@ def _master():
             {"code": "2002", "name": "中国广播电影电视交易中心"},
             {"code": "2003", "name": "商务部培训中心（商务部国际商务官员研修学院）"},
         ],
-        "supplier": [{"code": "8001", "name": "北京某翻译店"}],
+        "supplier": [{"code": "8001", "name": "北京某翻译店"}, {"code": "9999", "name": "其他供应商"}],
     }
 
 
@@ -172,15 +173,11 @@ def test_sales_hold_missing_account(tmp_path):
     assert result["hold_count"] == 1
 
 
-def test_sales_unknown_customer_still_books(tmp_path):
+def test_sales_unknown_customer_holds(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name="不存在客户甲有限公司")])
     result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
-    assert result["bookable_count"] == 1
-    kd = load_workbook(result["kingdee_path"])
-    ws = kd[convert.KINGDEE_SHEET]
-    assert ws.cell(4, 19).value == "不存在客户甲有限公司"
-    assert ws.cell(4, 18).value in (None, "")
-    kd.close()
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
 
 
 def test_sales_tax_no_aux_and_balance(tmp_path):
@@ -203,18 +200,20 @@ def test_sales_pack_keeps_consecutive(tmp_path):
     rows += [_ok_sales(name="连号甲", inv=f"a{i}") for i in range(3)]
     rows += [_ok_sales(name="连号乙", inv=f"b{i}") for i in range(4)]
     _write_sales(tmp_path / "发票.xlsx", rows)
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
+    master = _master()
+    master["customer"] += [{"code": str(3000 + i), "name": name} for i, name in enumerate(dict.fromkeys(row[3] for row in rows))]
+    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", master)
     nums = _voucher_nums(result["kingdee_path"], 12 * 3)
     assert nums.count(1) == 15
     assert nums.count(2) == 21
     assert 3 not in nums
 
 
-def test_sales_no_master_still_writes(tmp_path):
+def test_sales_no_master_holds(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", None)
-    assert result["bookable_count"] == 1
-    assert Path(result["kingdee_path"]).is_file()
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
 
 
 def test_payment_special_and_normal(tmp_path, monkeypatch):
@@ -243,6 +242,11 @@ def test_payment_special_and_normal(tmp_path, monkeypatch):
     # 无档 → 9999
     sup_codes = [ws.cell(r, 20).value for r in range(4, 9)]
     assert "9999" in sup_codes
+    # 业务规则只给查找键；实际辅助核算值必须来自已核验的档案。
+    dept_codes = [ws.cell(r, 22).value for r in range(4, 9)]
+    employee_codes = [ws.cell(r, 24).value for r in range(4, 9)]
+    assert "0405" in dept_codes
+    assert "113" in employee_codes
     kd.close()
 
 
@@ -279,30 +283,32 @@ def test_receipt_pack_alias_pingdu_and_empty_emp(tmp_path):
     rows.append(["2026-08-01", "平度市公安局", 30, "于占国", "15", "113101"])
     _write_receipt(tmp_path / "收款.xlsx", rows)
     result = convert.run_dir(tmp_path, "收款", "2026-08-27", _master())
-    assert result["hold_count"] == 1
-    assert result["bookable_count"] == 11
+    assert result["hold_count"] == 2
+    assert result["bookable_count"] == 10
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
     nums = _voucher_nums(result["kingdee_path"], 22)
     assert 1 in nums
     assert nums.count(1) == 20  # 10 笔 × 2 行
-    # 第 11 笔因连续同公司不拆，仍可能并进第 1 记或新记；国广是另一家
+    # 职员档案没有销售时必须待确认，不得只填名称。
     names = [ws.cell(r, 19).value for r in range(4, 30)]
-    assert "国广国际在线网络（北京）有限公司" in names
+    assert "国广国际在线网络（北京）有限公司" not in names
     assert "平度市公安局" not in names
-    # 销售对不上职员留空但仍入账
-    emp_empty = False
-    for r in range(4, 30):
-        if ws.cell(r, 19).value == "国广国际在线网络（北京）有限公司" and ws.cell(r, 7).value not in ("100201",):
-            emp_empty = ws.cell(r, 24).value in (None, "") and ws.cell(r, 25).value in (None, "")
-    assert emp_empty
     kd.close()
 
 
-def test_receipt_no_master_still_books(tmp_path):
+def test_receipt_no_master_holds(tmp_path):
     _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
     result = convert.run_dir(tmp_path, "收款", "2026-08-27", None)
-    assert result["bookable_count"] == 1
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+
+
+def test_pick_code_uses_cached_value_not_formula():
+    formula = "=VLOOKUP(D:D,[1]组织架构!A$1:B$65536,2,0)"
+    assert convert.pick_code(formula, "0302") == "0302"
+    assert convert.pick_code(formula, None) == ""
+    assert convert.pick_code("15", None) == "15"
 
 
 def test_parse_invoice_text_special():
@@ -316,9 +322,59 @@ def test_parse_invoice_text_special():
 
 def test_kingdee_api_missing_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(tmp_path / "nope.json"))
+    monkeypatch.setenv("KINGDEE_MASTER_CACHE", str(tmp_path / "no-cache.json"))
     loaded = kingdee_api.try_load_master()
     assert loaded["missing_credentials"] is True
     assert loaded["ok"] is False
+
+
+def test_fetch_list_uses_official_api_host_not_token_domain(monkeypatch):
+    seen = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": {"rows": [], "count": "0"}}
+
+    def fake_request(method, url, creds, path, params=None, extra_headers=None, timeout=30):
+        seen.append((url, params))
+        return Response()
+
+    monkeypatch.setattr(kingdee_api, "_request", fake_request)
+    got = kingdee_api.fetch_list(
+        {"client_id": "test", "client_secret": "test"},
+        "token",
+        "https://tf.jdy.com",
+        "/jdy/v2/bd/customer",
+    )
+    assert got == []
+    assert seen == [
+        (
+            "https://api.kingdee.com/jdy/v2/bd/customer",
+            {"page": "1", "page_size": "2000"},
+        )
+    ]
+
+
+def test_master_uses_fresh_local_cache_before_network(tmp_path, monkeypatch):
+    cache = tmp_path / "kingdee-master.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "cached_at": time.time(),
+                "data": {"customer": [], "employee": [], "supplier": [], "department": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KINGDEE_MASTER_CACHE", str(cache))
+    monkeypatch.setattr(kingdee_api, "load_local", lambda: (_ for _ in ()).throw(AssertionError("不应联网")))
+    loaded = kingdee_api.try_load_master()
+    assert loaded["ok"] is True
+    assert loaded["source"] == "cache"
+    assert loaded["data"] == {"customer": [], "employee": [], "supplier": [], "department": []}
 
 
 def test_sign_plain_path_encoding():
@@ -337,5 +393,9 @@ def test_sign_plain_path_encoding():
 def test_cli_inspect_then_convert(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     assert convert.main(["--inspect", "--input-dir", str(tmp_path), "--scene", "销项发票"]) == 0
-    assert convert.main(["--input-dir", str(tmp_path), "--scene", "销项发票", "--date", "2026-08-27", "--no-api"]) == 0
-    assert (tmp_path / "凭证引入_结果.xlsx").is_file()
+
+
+def test_cli_refuses_to_create_unverified_auxiliaries_without_api(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    assert convert.main(["--input-dir", str(tmp_path), "--scene", "销项发票", "--no-api"]) == 2
+    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
