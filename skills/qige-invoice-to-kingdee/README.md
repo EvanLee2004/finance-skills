@@ -1,5 +1,7 @@
 # 琪哥发票入金蝶（qige-invoice-to-kingdee）
 
+> **2026-08-27**：新口径在 [`kingdee-posting`](../kingdee-posting/README.md)。对外说「销项发票入金蝶」。本夹测试保留。
+
 > 一句话定位：改样发票簿 → 按技能自带空模填好的金蝶凭证引入表（`凭证引入_结果.xlsx`）。未点金蝶引入。
 
 ## 启动时说

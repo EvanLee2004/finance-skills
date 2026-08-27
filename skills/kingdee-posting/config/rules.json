@@ -1,0 +1,33 @@
+{
+  "voucher_word": "记",
+  "currency": "RMB",
+  "currency_name": "人民币",
+  "exchange_rate": 1,
+  "tax_rate_divisor": "1.06",
+  "fallback_supplier": { "code": "9999", "name": "其他供应商" },
+  "account_names": {
+    "21710105": "销项税额",
+    "21710101": "进项税额",
+    "540103": "翻译语言服务",
+    "100206": "中信银行广安门支行",
+    "100201": "中行宣武门支行1001"
+  },
+  "sales": {
+    "tax_account": "21710105",
+    "pack_size": 5,
+    "pack_keep_consecutive": true
+  },
+  "payment": {
+    "cost_account": "540103",
+    "bank_account": "100206",
+    "input_tax_account": "21710101",
+    "dept_code": "0405",
+    "dept_name": "项目总监及助理",
+    "emp_name": "项目总监"
+  },
+  "receipt": {
+    "bank_account": "100201",
+    "pack_size": 10,
+    "pack_keep_consecutive": true
+  }
+}

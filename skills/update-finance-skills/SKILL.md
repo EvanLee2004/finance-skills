@@ -32,7 +32,7 @@ Windows 同事的目录一般是 `%USERPROFILE%\.config\opencode\skills\`。找�
 3. **禁止**清空整个 skills；**禁止**删白名单外她自己装的夹。
 4. 汇报照抄脚本打印：SHA、更新了哪些、config 保住没。提醒**重启 opencode**。
 
-核销已于 2026-08-17 合入 `main`（李尚 `agent/ar-hexiao-daily-1-3-0`）。同事说「更新财务skills」会拿到这份核销。`config.local.json` 一类本机凭据仍不进仓、不覆盖。
+核销已合入 `main`（李尚 `agent/ar-hexiao-daily-1-3-0`）。`pack.json` 的 `overwrite_config` 含 `ar-hexiao-daily`：核销业务规则跟仓库走。`config.local.json` / 金蝶 `kingdee.local.json` 一类本机凭据仍不进仓、不覆盖。
 
 ## 说什么用哪个（先对这张表，再开对应技能）
 
@@ -48,7 +48,7 @@ Windows 同事的目录一般是 `%USERPROFILE%\.config\opencode\skills\`。找�
 | 跑本月部门费用归集 / 部门科目余额表 | `dept-expense-alloc` |
 | 跑昨天的核销 / 日清 / 重扫挂账 | `ar-hexiao-daily`（只跑，不覆盖她本机那份） |
 | 九点下单 / 跑下单汇总 | `order-daily-summary` |
-| 琪哥发票入金蝶 / 销项票填金蝶模板 | `qige-invoice-to-kingdee` |
+| 销项发票入金蝶 / 付款入金蝶 / 收款入金蝶 / 琪哥发票入金蝶 | `kingdee-posting`（旧触发仍可进销项） |
 | 帮我理清需求 / 我不知道怎么说 | `task-clarifier` |
 | 配下环境 / 缺库跑不起来 | `env-doctor` |
 | 做 Excel / 改这张表（零散、不够独立技能） | `xlsx` |
@@ -62,5 +62,5 @@ Windows 同事的目录一般是 `%USERPROFILE%\.config\opencode\skills\`。找�
 
 - 不要用 GitHub 当第一源。
 - 不要为了「目录只保留白名单」去删她别的技能。
-- 不要覆盖已装的 `ar-hexiao-daily`。
-- 不要在更新时跑核销写表。
+- 不要为了「目录整齐」去删她别的技能。核销 config 跟仓库（见 `overwrite_config`）。
+- 不要在更新时跑核销写表或金蝶引入。

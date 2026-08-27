@@ -28,6 +28,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest-tmp/
+.pytest_cache/
 node_modules/
 *.log
 
