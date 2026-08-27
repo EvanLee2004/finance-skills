@@ -304,6 +304,16 @@ def test_receipt_no_master_holds(tmp_path):
     assert result["hold_count"] == 1
 
 
+def test_receipt_accepts_word_spelling_without_programme(tmp_path):
+    _write_receipt(
+        tmp_path / "收款.xlsx",
+        [["2026-08-01", "中国广播电影电视交易中心有限公司", 10, "于占国", "15", "113101"]],
+    )
+    result = convert.run_dir(tmp_path, "收款", "2026-08-27", _master())
+    assert result["bookable_count"] == 1
+    assert result["hold_count"] == 0
+
+
 def test_pick_code_uses_cached_value_not_formula():
     formula = "=VLOOKUP(D:D,[1]组织架构!A$1:B$65536,2,0)"
     assert convert.pick_code(formula, "0302") == "0302"
