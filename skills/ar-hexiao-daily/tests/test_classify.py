@@ -825,8 +825,9 @@ def test_repeated_partial_only_counts_current_sod():
     )
     assert r["ledger_row_ref"] == 2
     assert r["row_operation"]["existing_received"] == 15000.0
-    assert r["row_operation"]["paid_receivable"] == 10000.0
-    assert r["row_operation"]["unpaid_receivable"] == 6000.0
+    assert r["row_operation"]["receivable_mode"] == "preserve_baseline_blank_carry"
+    assert r["row_operation"]["source_row_receivable"] == 16000.0
+    assert r["row_operation"]["remaining_unreceived"] == 6000.0
 
 
 def test_cross_year_only_after_ledger_miss():
@@ -1081,6 +1082,56 @@ def test_same_so_sod_distinct_ar_builds_sequential_split_chain():
     assert op["steps"][0]["five_cols"]["计提"] is None
     assert op["steps"][1]["five_cols"]["计提"] == 100.0
     assert op["final_unpaid"] is None
+
+
+def test_delivery_above_baseline_split_chain_preserves_only_original_receivable():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    first = _rec(
+        "SO1", "SOD1", 80.0, ar="AR1", deliver_local=150.0,
+        cumulative_received_local=80.0,
+        writeoff_sequence_key=["2026-07-22", "HX1", "1", "AR1", "SO1"],
+    )
+    second = _rec(
+        "SO1", "SOD1", 40.0, ar="AR2", deliver_local=150.0,
+        cumulative_received_local=120.0,
+        writeoff_sequence_key=["2026-07-22", "HX2", "2", "AR2", "SO1"],
+    )
+
+    result = C.classify_records([first, second], led, {})
+
+    assert result["counts"] == {"auto": 2, "hold": 0, "exception": 0, "total": 2}
+    operation = result["auto"][0]["row_operation"]
+    assert operation["type"] == "split_payment_chain"
+    assert operation["receivable_mode"] == "preserve_baseline_blank_carry"
+    assert operation["baseline_receivable"] == 100.0
+    assert operation["source_row_receivable"] == 100.0
+    assert [step["receivable"] for step in operation["steps"]] == [100.0, None]
+    assert [step["remaining_after"] for step in operation["steps"]] == [70.0, 30.0]
+    assert operation["final_unpaid"]["receivable"] is None
+    assert operation["final_unpaid"]["remaining_unreceived"] == 30.0
+
+
+def test_delivery_above_baseline_split_chain_does_not_absorb_sub_yuan_parent():
+    led = _led({1: {"so": "SO1", "sod": "SOD1", "yingshou": 100.0}})
+    small = _rec(
+        "SO1", "SOD1", 0.5, ar="AR_SMALL", deliver_local=150.0,
+        cumulative_received_local=0.5,
+        writeoff_sequence_key=["2026-07-22", "HX1", "1", "AR_SMALL", "SO1"],
+    )
+    main = _rec(
+        "SO1", "SOD1", 149.5, ar="AR_MAIN", deliver_local=150.0,
+        cumulative_received_local=150.0,
+        writeoff_sequence_key=["2026-07-22", "HX2", "2", "AR_MAIN", "SO1"],
+    )
+
+    result = C.classify_records([small, main], led, {})
+
+    assert result["counts"]["auto"] == 2
+    assert all("row_operation" in item for item in result["auto"]), result
+    operation = result["auto"][0]["row_operation"]
+    assert operation["type"] == "split_payment_chain"
+    assert [step["current_received"] for step in operation["steps"]] == [0.5, 149.5]
+    assert operation["tail_tolerance_audit"] == {}
 
 
 def test_settled_snapshot_split_chain_uses_each_parent_payment_amount():

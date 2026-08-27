@@ -84,10 +84,10 @@ def test_skill_md_documents_full_flow():
 
 
 def test_skill_md_has_comms_guidance():
-    """跟明妹说话要短、要点、主动要料——这条行为要求必须在 SKILL 里，且有话术模板可依。"""
+    """跟明妹说话要短、要点、自动推进——这条行为要求必须在 SKILL 里，且有话术模板可依。"""
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "怎么跟她说话" in text
-    assert "主动要料" in text or "主动要材料" in text
+    assert "自动推进" in text
     assert (ROOT / "references" / "跟明妹沟通.md").is_file()
 
 
@@ -124,7 +124,7 @@ def test_scripts_exist():
 
 
 def test_skill_md_has_review_gate():
-    """回填必须：日清 → 确认 → apply_all --confirmed；确认后可写流转安全子集。"""
+    """回填必须：日清 → 写前校验 → apply_all；通过后自动写流转安全子集。"""
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "--confirmed" in text and "确认" in text
     assert "核销日清" in text

@@ -135,8 +135,8 @@ def resolve_batch_date(s: Any, today: Optional[dt.date] = None) -> Optional[dt.d
 
 def prev_workday(d: Optional[dt.date] = None) -> dt.date:
     """
-    上一个工作日。周一跑时"昨天"是周日——销售周末不核销，取回来必是空批。
-    注意：这**只是默认值的猜测**，不是漏天的兜底；真正防漏天靠 batch_ledger 的空档检测。
+    上一个工作日。仅在用户明确说“上个工作日”时使用；普通“昨天”可以是周末。
+    真正防漏天靠 batch_ledger 的空档检测。
     """
     d = d or dt.date.today()
     cur = d - dt.timedelta(days=1)

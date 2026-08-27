@@ -138,6 +138,12 @@ def _norm(v) -> str:
         return s
 
 
+def _optional_number_equal(left, right, tolerance: float = 0.011) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return abs(float(left) - float(right)) <= tolerance
+
+
 def read_ledger_rows(path: Path) -> Dict[int, dict]:
     """把盈亏『明细』整表读成 {行号: {列名: 值}}，用于逐条复核。"""
     import openpyxl
@@ -311,6 +317,7 @@ def resolve_same_so_multi_sod_row(
 def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> Optional[dict]:
     """复核逐笔分笔链的结构、金额守恒及完整幂等状态。"""
     op = item.get("row_operation") or {}
+    special_mode = op.get("receivable_mode") == "preserve_baseline_blank_carry"
     steps = op.get("steps") or []
     if len(steps) < 2:
         return {"verdict": "conflict", "reason": "分笔回款链至少需要两笔不同父回款"}
@@ -318,9 +325,25 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
         source = round(float(op["source_receivable"]), 2)
         initial = round(float(op["initial_cumulative"]), 2)
         latest = round(float(op["latest_delivery"]), 2)
+        if special_mode:
+            baseline = round(float(op["baseline_receivable"]), 2)
+            opening_unreceived = round(float(op["opening_unreceived"]), 2)
+            source_row_receivable = common.to_number(op.get("source_row_receivable"))
+        else:
+            baseline = opening_unreceived = source_row_receivable = None
     except (KeyError, TypeError, ValueError):
         return {"verdict": "conflict", "reason": "分笔回款链基线参数缺失或不是数字"}
-    if source < 0 or initial < 0 or latest <= 0 or abs((latest - initial) - source) > 0.011:
+    if special_mode:
+        if (
+            source != baseline
+            or latest <= baseline
+            or initial < 0
+            or abs((latest - initial) - opening_unreceived) > 0.011
+            or source_row_receivable is not None
+            and abs(float(source_row_receivable) - baseline) > 0.011
+        ):
+            return {"verdict": "conflict", "reason": "特殊分笔链基线或内部未收金额不成立"}
+    elif source < 0 or initial < 0 or latest <= 0 or abs((latest - initial) - source) > 0.011:
         return {"verdict": "conflict", "reason": "分笔链起点不守恒：最新交付额-历史累计必须等于当前应收"}
 
     tail_error = _tail_tolerance_audit_error(op, source)
@@ -337,15 +360,15 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
     if any(len(key) < 2 or not key[1] for key in order_keys) or order_keys != sorted(order_keys):
         return {"verdict": "conflict", "reason": "分笔链缺少或打乱核销记录顺序"}
 
-    previous_remaining = source
+    previous_remaining = opening_unreceived if special_mode else source
     expected_cumulative = initial
     for index, step in enumerate(steps):
         five = step.get("five_cols") or {}
         try:
             current = round(float(step["current_received"]), 2)
             cumulative = round(float(step["cumulative_received"]), 2)
-            receivable = round(float(step["receivable"]), 2)
             remaining = round(float(step["remaining_after"]), 2)
+            receivable = common.to_number(step.get("receivable"))
         except (KeyError, TypeError, ValueError):
             return {"verdict": "conflict", "reason": "分笔链步骤金额缺失或不是数字"}
         expected_cumulative = round(expected_cumulative + current, 2)
@@ -355,9 +378,18 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
         if abs(remaining - expected_remaining) > 0.011:
             return {"verdict": "conflict", "reason": "分笔链剩余应收公式不成立"}
         settled = bool(step.get("settled"))
-        expected_receivable = previous_remaining if settled else round(previous_remaining - remaining, 2)
-        if receivable < 0 or abs(receivable - expected_receivable) > 0.011:
-            return {"verdict": "conflict", "reason": "分笔链拆行后的单步应收不守恒"}
+        if special_mode:
+            expected_receivable = source_row_receivable if index == 0 else None
+            if (
+                (receivable is None) != (expected_receivable is None)
+                or receivable is not None
+                and abs(float(receivable) - float(expected_receivable)) > 0.011
+            ):
+                return {"verdict": "conflict", "reason": "特殊分笔链只能在原行保留原始应收"}
+        else:
+            expected_receivable = previous_remaining if settled else round(previous_remaining - remaining, 2)
+            if receivable is None or receivable < 0 or abs(receivable - expected_receivable) > 0.011:
+                return {"verdict": "conflict", "reason": "分笔链拆行后的单步应收不守恒"}
         if settled and index != len(steps) - 1:
             return {"verdict": "conflict", "reason": "只有分笔链最后一笔允许结清"}
         if not settled and five.get("计提") is not None:
@@ -370,8 +402,14 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
 
     final_unpaid = op.get("final_unpaid")
     if previous_remaining > 0.011:
-        if not final_unpaid or abs(float(final_unpaid.get("receivable") or 0) - previous_remaining) > 0.011:
+        final_remaining = common.to_number(
+            (final_unpaid or {}).get("remaining_unreceived")
+            if special_mode else (final_unpaid or {}).get("receivable")
+        )
+        if not final_unpaid or final_remaining is None or abs(float(final_remaining) - previous_remaining) > 0.011:
             return {"verdict": "conflict", "reason": "分笔链未结清但缺少最终未回款承接行"}
+        if special_mode and common.to_number(final_unpaid.get("receivable")) is not None:
+            return {"verdict": "conflict", "reason": "特殊分笔链最终未回款行应收必须留空"}
         unpaid_five = final_unpaid.get("five_cols") or {}
         if unpaid_five.get("是否结账") != "否" or any(
             unpaid_five.get(key) is not None for key in ("计提", "回款明细", "收款时间", "收款方式")
@@ -382,15 +420,28 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
 
     row = rows.get(ref)
     current_receivable = common.to_number((row or {}).get("应收金额"))
-    if current_receivable is not None and abs(float(current_receivable) - float(steps[0]["receivable"])) <= 0.011:
+    first_receivable = common.to_number(steps[0].get("receivable"))
+    current_matches_first = (
+        current_receivable is None and first_receivable is None
+    ) or (
+        current_receivable is not None
+        and first_receivable is not None
+        and abs(float(current_receivable) - float(first_receivable)) <= 0.011
+    )
+    first_fields_match = _matches_planned_fields(
+        rows.get(ref), steps[0].get("five_cols") or {}
+    )
+    if current_matches_first and first_fields_match:
         so = str(item.get("so") or "").strip()
         sod = str(item.get("sod") or "").strip()
         for offset, step in enumerate(steps):
             actual = rows.get(ref + offset)
             if (
                 not _matches_identity(actual, so, sod)
-                or common.to_number((actual or {}).get("应收金额")) is None
-                or abs(float(actual["应收金额"]) - float(step["receivable"])) > 0.011
+                or not _optional_number_equal(
+                    common.to_number((actual or {}).get("应收金额")),
+                    common.to_number(step.get("receivable")),
+                )
                 or not _matches_planned_fields(actual, step.get("five_cols") or {})
             ):
                 return {"verdict": "conflict", "reason": "分笔回款链看似已写入，但某个父回款行不完整或被改动"}
@@ -399,13 +450,16 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
             expected = final_unpaid.get("five_cols") or {}
             if (
                 not _matches_identity(actual, so, sod)
-                or common.to_number((actual or {}).get("应收金额")) is None
-                or abs(float(actual["应收金额"]) - float(final_unpaid["receivable"])) > 0.011
+                or not _optional_number_equal(
+                    common.to_number((actual or {}).get("应收金额")),
+                    common.to_number(final_unpaid.get("receivable")),
+                )
                 or not _matches_planned_fields(actual, expected)
             ):
                 return {"verdict": "conflict", "reason": "分笔回款链最终未回款行不完整或被改动"}
         return {"verdict": "skip", "reason": "分笔回款链全部父回款行已完整写入，幂等跳过"}
-    if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
+    expected_source_row = source_row_receivable if special_mode else source
+    if not _optional_number_equal(current_receivable, expected_source_row):
         return {"verdict": "conflict", "reason": f"分笔链源行应收已变化：表里={current_receivable} 计划基线={source}"}
 
     source_five = op.get("source_five_cols") or {}
@@ -880,20 +934,38 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
                 ),
             }
         if op.get("type") == "split_below":
+          receivable_mode = op.get("receivable_mode") or "conserve_receivable"
           try:
             source = round(float(op["source_receivable"]), 2)
-            paid = round(float(op["paid_receivable"]), 2)
-            unpaid = round(float(op["unpaid_receivable"]), 2)
             latest = round(float(op["latest_delivery"]), 2)
             cumulative = round(float(op["cumulative_received"]), 2)
+            if receivable_mode == "preserve_baseline_blank_carry":
+              baseline = round(float(op["baseline_receivable"]), 2)
+              remaining = round(float(op["remaining_unreceived"]), 2)
+              planned_current = common.to_number(
+                  op.get("source_row_receivable", source)
+              )
+              paid = unpaid = None
+            else:
+              paid = round(float(op["paid_receivable"]), 2)
+              unpaid = round(float(op["unpaid_receivable"]), 2)
+              baseline = remaining = planned_current = None
           except (KeyError, TypeError, ValueError):
             return {"verdict": "conflict", "reason": "部分回款拆行参数缺失或不是数字"}
-          if paid < 0 or unpaid <= 0:
-            return {"verdict": "conflict", "reason": f"拆行应收异常：已收侧={paid} 未收侧={unpaid}"}
-          if abs((paid + unpaid) - source) > 0.011:
-            return {"verdict": "conflict", "reason": f"拆行不守恒：{paid}+{unpaid}!={source}"}
-          if abs((latest - cumulative) - unpaid) > 0.011:
-            return {"verdict": "conflict", "reason": f"未回款公式不成立：{latest}-{cumulative}!={unpaid}"}
+          if receivable_mode == "preserve_baseline_blank_carry":
+            if latest <= baseline or source != baseline:
+              return {"verdict": "conflict", "reason": "特殊拆行必须满足交付额大于原始应收且保留原始应收基线"}
+            if planned_current is not None and abs(float(planned_current) - baseline) > 0.011:
+              return {"verdict": "conflict", "reason": "特殊拆行首行的非空应收必须等于原始应收基线"}
+            if remaining <= 0 or abs((latest - cumulative) - remaining) > 0.011:
+              return {"verdict": "conflict", "reason": f"特殊拆行内部未收公式不成立：{latest}-{cumulative}!={remaining}"}
+          else:
+            if paid < 0 or unpaid <= 0:
+              return {"verdict": "conflict", "reason": f"拆行应收异常：已收侧={paid} 未收侧={unpaid}"}
+            if abs((paid + unpaid) - source) > 0.011:
+              return {"verdict": "conflict", "reason": f"拆行不守恒：{paid}+{unpaid}!={source}"}
+            if abs((latest - cumulative) - unpaid) > 0.011:
+              return {"verdict": "conflict", "reason": f"未回款公式不成立：{latest}-{cumulative}!={unpaid}"}
           inserted = op.get("inserted_five_cols") or {}
           if inserted.get("是否结账") != "否":
             return {"verdict": "conflict", "reason": "拆出的未回款行必须是否结账=否"}
@@ -904,10 +976,24 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
         # 写后重跑：原行已变成已收侧、下一行已是未收侧时，识别为完整幂等状态。
         # 不能继续拿拆前 source_receivable 要求当前行，否则受控拆行必然假报冲突。
           current_receivable = common.to_number(row.get("应收金额"))
-          if (
-            current_receivable is not None
-            and abs(float(current_receivable) - paid) <= 0.011
-          ):
+          special_mode = receivable_mode == "preserve_baseline_blank_carry"
+          special_current_matches = special_mode and (
+            (current_receivable is None and planned_current is None)
+            or (
+              current_receivable is not None
+              and planned_current is not None
+              and abs(float(current_receivable) - float(planned_current)) <= 0.011
+            )
+          )
+          current_matches_written = (
+            special_current_matches
+            or (
+              not special_mode
+              and current_receivable is not None
+              and abs(float(current_receivable) - paid) <= 0.011
+            )
+          )
+          if current_matches_written:
             next_row = rows.get(int(ref) + 1)
             next_receivable = (
                 common.to_number(next_row.get("应收金额"))
@@ -925,8 +1011,12 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             )
             if (
                 same_next_identity
-                and next_receivable is not None
-                and abs(float(next_receivable) - unpaid) <= 0.011
+                and (
+                    next_receivable is None
+                    if special_mode
+                    else next_receivable is not None
+                    and abs(float(next_receivable) - unpaid) <= 0.011
+                )
                 and paid_matches
                 and unpaid_matches
             ):
@@ -934,14 +1024,24 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
                     "verdict": "skip",
                     "reason": "部分回款拆行已完整写入（已收行+紧邻未收行），幂等跳过",
                 }
+            if paid_matches:
+              return {
+                  "verdict": "conflict",
+                  "reason": "当前行看似已拆分，但已收行或紧邻未收行与计划不一致",
+              }
+          source_matches = (
+              special_current_matches
+              if special_mode
+              else current_receivable is not None
+              and abs(float(current_receivable) - source) <= 0.011
+          )
+          if not source_matches:
             return {
                 "verdict": "conflict",
-                "reason": "当前行看似已拆分，但已收行或紧邻未收行与计划不一致",
-            }
-          if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
-            return {
-                "verdict": "conflict",
-                "reason": f"当前行应收已变化：表里={current_receivable} 计划基线={source}",
+                "reason": (
+                    f"当前行应收已变化：表里={current_receivable} "
+                    f"计划目标={planned_current if special_mode else source}"
+                ),
             }
 
     # ③ 目标格现在是什么

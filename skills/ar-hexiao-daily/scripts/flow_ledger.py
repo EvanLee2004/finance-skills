@@ -12,10 +12,12 @@
   1. 先按到账日期 + 到账额筛选候选行；PayPal/美元户若金额格为
      `原币金额*流转汇率`，改用公式中的原币金额与智云原币到账额比较；
   2. 再以智云销售名称/客户名称匹配流转表公司名称/汇款人，四种组合任一成立即名称命中；
+     PayPal/美元户的英文付款方名称可通过「到账名称→系统客户名称」对照表转换后，
+     与智云客户名称比较；对照缺失或一对多不自动猜；
   3. 微信/支付宝另允许到账日期 +（净额 + 手续费）按同样名称规则匹配；
-  4. 日期金额命中但四种名称组合都不成立 → **弱命中**，仍要人确认。
+  4. 日期金额命中但四种名称组合都不成立 → **弱命中**，列入人工处理。
 - 命中 0 → E0；命中 >1 → E12；命中 1 → 给出行号与建议单号。
-- 匹配只读；**写入**见 `apply_flow.py`（确认后、仅强三键唯一命中）。
+- 匹配只读；**写入**见 `apply_flow.py`（日清和写前校验通过后、仅强三键唯一命中）。
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
@@ -37,6 +39,8 @@ _REQUIRED_HINTS = ("单号",)
 _SIGNATURE_COLS = ("是否更新应收款", "是否已登记系统", "收款形式")
 _NAME_HINTS = ("公司名称", "汇款人", "对方户名")
 _REMITTER_ALIASES = ("汇款人", "汇款人名称", "对方户名")
+_NAME_MAP_SOURCE = "到账名称"
+_NAME_MAP_TARGET = "系统客户名称"
 # 盈亏表专有列：出现即判定"这不是流转表"
 _LEDGER_MARKERS = ("计提金额", "新智云单号", "回款明细", "是否结账")
 
@@ -50,7 +54,7 @@ _FORMULA_ORIGINAL_FORMS = frozenset({"paypal", "美元户"})
 
 def normalize_name(s: str) -> str:
     """公司名归一：去噪声词与标点，便于子串比对。"""
-    return _NOISE.sub("", str(s or "")).strip().lower()
+    return _NOISE.sub("", str(s or "")).strip().casefold()
 
 
 def name_similar(a: str, b: str) -> bool:
@@ -92,6 +96,11 @@ class FlowLedger:
     def __init__(self, rows: Optional[List[dict]] = None):
         self.rows: List[dict] = rows or []
         self.sources: List[str] = []
+        # 英文到账名称 -> 一个或多个系统客户名称。集合长度大于 1 时是歧义，
+        # 只能人工处理，不能挑一个写入。
+        self.name_map: Dict[str, Set[str]] = {}
+        self.name_map_sources: List[str] = []
+        self.name_map_issues: List[str] = []
 
     # ---------- 装载 ----------
 
@@ -107,13 +116,79 @@ class FlowLedger:
             return False  # 没有流转表专有列 → 不认
         return any(h in joined for h in _NAME_HINTS)
 
+    @staticmethod
+    def _name_map_columns(headers: Sequence[str]) -> Optional[Tuple[int, int]]:
+        """按表头识别中英文名称对照表，不依赖文件名。"""
+        source = common.fuzzy_find_col(headers, (_NAME_MAP_SOURCE,))
+        target = common.fuzzy_find_col(headers, (_NAME_MAP_TARGET,))
+        if source is None or target is None or source == target:
+            return None
+        return source, target
+
+    def _load_name_map_sheet(
+        self,
+        all_rows: Sequence[Sequence[object]],
+        source_label: str,
+    ) -> None:
+        """读取一张名称对照表；空值和一对多关系只记问题，不做猜测。"""
+        if not all_rows:
+            return
+        hrow, headers = common.find_header_row(
+            all_rows, "名称对照", [_NAME_MAP_SOURCE, _NAME_MAP_TARGET]
+        )
+        cols = self._name_map_columns(headers)
+        if cols is None:
+            return
+        if source_label not in self.name_map_sources:
+            self.name_map_sources.append(source_label)
+        source_idx, target_idx = cols
+        for row_no, row in enumerate(all_rows[hrow + 1 :], hrow + 2):
+            values = list(row)
+            source = (
+                str(values[source_idx]).strip()
+                if source_idx < len(values) and values[source_idx] is not None
+                else ""
+            )
+            target = (
+                str(values[target_idx]).strip()
+                if target_idx < len(values) and values[target_idx] is not None
+                else ""
+            )
+            if not source and not target:
+                continue
+            if not source:
+                self.name_map_issues.append(
+                    f"{source_label} 第{row_no}行：到账名称为空"
+                )
+                continue
+            if not target:
+                self.name_map_issues.append(
+                    f"{source_label} 第{row_no}行：系统客户名称为空"
+                )
+                continue
+            key = normalize_name(source)
+            if not key:
+                self.name_map_issues.append(
+                    f"{source_label} 第{row_no}行：到账名称归一化后为空"
+                )
+                continue
+            self.name_map.setdefault(key, set()).add(target)
+
     @classmethod
-    def from_paths(cls, paths: Sequence[Path]) -> "FlowLedger":
+    def from_paths(
+        cls,
+        paths: Sequence[Path],
+        name_map_paths: Optional[Sequence[Path]] = None,
+    ) -> "FlowLedger":
         import openpyxl
 
         aliases = common.load_aliases()
         inst = cls()
-        for p in paths:
+        flow_paths = [Path(p) for p in paths]
+        map_paths = [Path(p) for p in (name_map_paths if name_map_paths is not None else paths)]
+        all_paths = list(dict.fromkeys(flow_paths + map_paths))
+        map_path_set = set(map_paths)
+        for p in all_paths:
             wb = None
             try:
                 wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
@@ -126,6 +201,11 @@ class FlowLedger:
                 all_rows = list(ws.iter_rows(values_only=True))
                 if not all_rows:
                     continue
+                if p in map_path_set:
+                    inst._load_name_map_sheet(
+                        all_rows,
+                        f"{p.name}#{ws.title}",
+                    )
                 hrow, headers = common.find_header_row(
                     all_rows, "到账流转", ["日期", "公司名称", "金额", "单号"], aliases
                 )
@@ -206,12 +286,17 @@ class FlowLedger:
         return inst
 
     @classmethod
-    def from_workspace(cls, workspace: Path) -> "FlowLedger":
-        """从 02_我的表副本 按内容识别所有流转表（不看文件名）。"""
+    def from_workspace(
+        cls,
+        workspace: Path,
+        name_map_paths: Optional[Sequence[Path]] = None,
+    ) -> "FlowLedger":
+        """从 02_我的表副本 按内容识别流转表和名称对照表（不看文件名）。"""
         d = Path(workspace) / "02_我的表副本"
         if not d.is_dir():
             return cls()
-        return cls.from_paths(sorted(d.glob("*.xlsx")))
+        paths = sorted(d.glob("*.xlsx"))
+        return cls.from_paths(paths, name_map_paths=name_map_paths or paths)
 
     # ---------- 匹配 ----------
 
@@ -226,7 +311,8 @@ class FlowLedger:
         """
         返回 {"hits": n, "rows": [...], "matched_by": str}
         matched_by ∈ 三键 / 三键(含手续费) / 三键(原币公式) /
-        三键(原币公式含手续费) / 日期+金额(名字不符) / ""
+        三键(原币公式含手续费) 及其「中英文对照」变体 /
+        日期+金额(名字不符) / ""
         """
         date = common.norm_date(arrival_date)
         gross = None
@@ -272,22 +358,45 @@ class FlowLedger:
             else []
         )
 
-        def names_match(row: dict) -> bool:
-            flow_names = {
-                str(row.get("company_name") or "").strip(),
-                str(row.get("remitter") or "").strip(),
-                str(row.get("payer") or "").strip(),
-            }
+        def name_match_kind(row: dict) -> str:
+            """返回直接匹配/中英文对照/空；对照一对多时不自动命中。"""
+            flow_names = tuple(dict.fromkeys(
+                str(row.get(key) or "").strip()
+                for key in ("company_name", "remitter", "payer")
+            ))
             zhiyun_names = {
                 str(sales_name or "").strip(),
                 str(customer or "").strip(),
             }
-            return any(
+            direct = any(
                 name_similar(flow_name, zhiyun_name)
                 for flow_name in flow_names
                 for zhiyun_name in zhiyun_names
                 if flow_name and zhiyun_name
             )
+            if direct:
+                return "直接"
+
+            # 对照表的 B 列语义是「系统客户名称」，所以转换后只与智云客户名称
+            # 比较；销售名称仍按原有直接匹配规则处理，避免把客户别名误当销售名。
+            normalized_form = re.sub(r"\s+", "", str(row.get("form") or "")).casefold()
+            if normalized_form not in _FORMULA_ORIGINAL_FORMS:
+                return ""
+            customer_name = str(customer or "").strip()
+            if not customer_name:
+                return ""
+            for flow_name in flow_names:
+                targets = self.name_map.get(normalize_name(flow_name), set())
+                if len(targets) == 1 and name_similar(next(iter(targets)), customer_name):
+                    return "中英文对照"
+            return ""
+
+        def add_alias_tag(tag: str) -> str:
+            if tag == "三键":
+                return "三键(中英文对照)"
+            if tag.endswith(")"):
+                return tag[:-1] + ",中英文对照)"
+            return tag + "(中英文对照)"
 
         def matched_tag(rows: List[dict], normal: str, formula: str) -> str:
             bases = {uses_formula_original(r) for r in rows}
@@ -303,12 +412,21 @@ class FlowLedger:
             (direct, "三键", "三键(原币公式)"),
             (with_fee, "三键(含手续费)", "三键(原币公式含手续费)"),
         ):
-            named = [r for r in pool if names_match(r)]
+            named: List[dict] = []
+            kinds: List[str] = []
+            for row in pool:
+                kind = name_match_kind(row)
+                if kind:
+                    named.append(row)
+                    kinds.append(kind)
             if named:
+                tag = matched_tag(named, normal_tag, formula_tag)
+                if kinds and all(kind == "中英文对照" for kind in kinds):
+                    tag = add_alias_tag(tag)
                 return {
                     "hits": len(named),
                     "rows": named,
-                    "matched_by": matched_tag(named, normal_tag, formula_tag),
+                    "matched_by": tag,
                 }
 
         weak = direct + [r for r in with_fee if r not in direct]
@@ -543,12 +661,22 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="到账流转表索引自检（只读）")
     ap.add_argument("--workspace", default=str(common.WORK))
     ap.add_argument("--paths", nargs="*", default=[])
+    ap.add_argument(
+        "--name-map", action="append", default=[],
+        help="名称对照表路径（表头为到账名称/系统客户名称），可重复；默认随流转表按表头自动识别",
+    )
     args = ap.parse_args(argv)
 
     flow = (
-        FlowLedger.from_paths([Path(p) for p in args.paths])
+        FlowLedger.from_paths(
+            [Path(p) for p in args.paths],
+            name_map_paths=[Path(p) for p in args.name_map] if args.name_map else None,
+        )
         if args.paths
-        else FlowLedger.from_workspace(Path(args.workspace))
+        else FlowLedger.from_workspace(
+            Path(args.workspace),
+            name_map_paths=[Path(p) for p in args.name_map] if args.name_map else None,
+        )
     )
     print(f"流转表来源: {flow.sources or '（无）'}")
     print(f"可用行数: {len(flow.rows)}")
@@ -560,6 +688,9 @@ def main(argv=None) -> int:
     formula_original = sum(1 for r in flow.rows if r.get("formula_orig_amount") is not None)
     print(f"已填单号行: {filled}；其中多 SO 行: {multi}")
     print(f"PayPal/美元户原币公式行: {formula_original}")
+    print(f"中英文名称对照: {len(flow.name_map)} 个有效英文名称，来源 {flow.name_map_sources or '（无）'}")
+    if flow.name_map_issues:
+        print(f"WARN: 名称对照表有 {len(flow.name_map_issues)} 个空值/格式问题，相关订单不自动猜测", file=sys.stderr)
     print(json.dumps({
         "sources": flow.sources,
         "rows": len(flow.rows),

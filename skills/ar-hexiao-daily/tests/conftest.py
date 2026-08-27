@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -28,3 +30,23 @@ LEDGER_FULL = TEST_DATA / "步骤7_回填" / "盈亏核算表2026全年_副本.x
 # 主回归闸：2026-07-22 真实 13 笔 + 明妹当天手工填完的副本（金标）
 # 真实财务数据不进仓库；本地没有就自动跳过相关用例。
 GOLD_DIR = TEST_DATA / "步骤6_核销判定" / "20260722_真实13笔_金标"
+
+REAL_FIXTURES = {
+    "金标盈亏表": GOLD_DIR / "02_我的表副本" / "2026年盈亏核算表1-12月（副本）.xlsx",
+    "银行日记账": BANK_XLSX,
+    "全年盈亏表": LEDGER_FULL,
+    "汇款到账流转表": TEST_DATA / "步骤7_回填" / "到账流转表_汇款7月_副本.xlsx",
+    "微信到账流转表": TEST_DATA / "步骤7_回填" / "到账流转表_微信全年_副本.xlsx",
+}
+
+
+def pytest_sessionstart(session) -> None:
+    """Private CI can require every controlled real-structure regression fixture."""
+    del session
+    if os.environ.get("AR_HEXIAO_REQUIRE_REAL_FIXTURES", "").strip() != "1":
+        return
+    missing = [name for name, path in REAL_FIXTURES.items() if not path.is_file()]
+    if missing:
+        raise pytest.UsageError(
+            "受控真实结构回归已启用，但缺少测试数据：" + "、".join(missing)
+        )

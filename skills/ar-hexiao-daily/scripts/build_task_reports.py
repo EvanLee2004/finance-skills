@@ -47,6 +47,11 @@ def _copy_sheet(source, target) -> None:
         for cell in row:
             out = target[cell.coordinate]
             out.value = cell.value
+            # 范围版和多年度合并版都是静态审计报表。源报表中的「公式原文」
+            # 以 = 开头，但它只是供人核对的说明文字；openpyxl 赋值到新
+            # 单元格时会把它重新识别成可执行公式，导致静态报表校验失败。
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                out.data_type = "s"
             if cell.has_style:
                 out._style = copy(cell._style)
             if cell.number_format:
@@ -82,6 +87,24 @@ def _daily_counts(out_dir: Path, day: dt.date) -> dict:
     }
 
 
+def _is_empty_fetched_day(workspace: Path, day: dt.date) -> bool:
+    summary_path = workspace / "01_智云导出" / f"取数摘要_{day.strftime('%Y%m%d')}.json"
+    if not summary_path.is_file():
+        return False
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(summary, dict):
+        return False
+    keys = ("回款记录笔数", "下单行数", "核销明细行数", "订单明细SOD行数")
+    values = [summary.get(key) for key in keys]
+    return bool(
+        all(isinstance(value, int) and not isinstance(value, bool) for value in values)
+        and all(value == 0 for value in values)
+    )
+
+
 def _daily_report_files(out_dir: Path, prefix: str, day: dt.date) -> list[Path]:
     """返回某核销日的正式日报及多年度内部报告，不误匹配范围版文件。"""
     token = day.strftime("%Y%m%d")
@@ -100,6 +123,7 @@ def build(workspace: Path, start: str, end: str) -> list[Path]:
         workspace = common.resolve_workspace(workspace)
     out_dir = workspace / "04_产出"
     days = list(_dates(start, end))
+    empty_days = {day for day in days if _is_empty_fetched_day(workspace, day)}
     outputs = []
     daily_sources: set[Path] = set()
     for prefix, label in REPORTS:
@@ -116,13 +140,20 @@ def build(workspace: Path, start: str, end: str) -> list[Path]:
             daily = out_dir / f"{prefix}_{token}.xlsx"
             daily_sources.update(_daily_report_files(out_dir, prefix, day))
             counts = _daily_counts(out_dir, day)
+            status = (
+                "已纳入"
+                if daily.is_file()
+                else "无核销记录，已跳过"
+                if day in empty_days
+                else "当日无该报表"
+            )
             summary.append([
-                day.isoformat(), "已纳入" if daily.is_file() else "当日无该报表",
+                day.isoformat(), status,
                 counts.get("到账笔数", ""), counts.get("订单行数", ""),
                 counts.get("自动", ""), counts.get("挂账", ""), counts.get("异常", ""),
             ])
             if not daily.is_file():
-                if prefix == "核销日清":
+                if prefix == "核销日清" and day not in empty_days:
                     raise FileNotFoundError(f"缺少日期级核销日清：{daily}")
                 continue
             source_wb = openpyxl.load_workbook(daily, data_only=False, read_only=False)

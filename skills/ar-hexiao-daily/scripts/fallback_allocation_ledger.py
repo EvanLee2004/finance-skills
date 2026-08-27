@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 import amount_policy
+import atomic_json_store
 
 
 LEDGER_NAME = "父回款顺序分配台账.json"
 VERSION = 1
+
+
+def _empty_ledger() -> dict:
+    return {"version": VERSION, "parents": {}}
+
+
+def _validate_ledger(data: dict) -> None:
+    if not isinstance(data, dict):
+        raise TypeError("父回款顺序分配台账必须是对象")
+    if int(data.get("version") or 0) != VERSION:
+        raise ValueError(f"不支持的父回款顺序分配台账版本：{data.get('version')!r}")
+    if not isinstance(data.get("parents", {}), dict):
+        raise TypeError("parents 必须是对象")
 
 
 def _norm_date(value) -> Optional[dt.date]:
@@ -36,14 +49,11 @@ def ledger_path(workspace: Path) -> Path:
 
 def load(workspace: Path) -> dict:
     path = ledger_path(workspace)
-    if not path.is_file():
-        return {"version": VERSION, "parents": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {"version": VERSION, "parents": {}}
-    if int(data.get("version") or 0) != VERSION:
-        raise ValueError(f"不支持的父回款顺序分配台账版本：{data.get('version')!r}")
+    data = atomic_json_store.load_json(
+        path,
+        default_factory=_empty_ledger,
+        validate=_validate_ledger,
+    )
     data.setdefault("parents", {})
     return data
 
@@ -88,27 +98,34 @@ def _stable_payload(entry: dict) -> dict:
 
 def commit(workspace: Path, checked: dict) -> Tuple[Path, int]:
     """Merge successful allocations after the workbook write succeeds; reruns are idempotent."""
-    data = load(workspace)
-    parents = data.setdefault("parents", {})
     now = dt.datetime.now().isoformat(timespec="seconds")
-    changed = 0
-    for ar, audit in eligible_entries(checked).items():
-        entry = {
-            **audit,
-            "ar": ar,
-            "hexiao_date": checked.get("hexiao_date") or audit.get("hexiao_date") or "",
-        }
-        old = parents.get(ar)
-        if old is not None and _stable_payload(old) != _stable_payload(entry):
-            raise ValueError(f"父回款 {ar} 已有成功分配记录，但本次分配不同，禁止覆盖")
-        if old is None:
-            entry["applied_at"] = now
-            parents[ar] = entry
-            changed += 1
-        else:
-            old["last_verified_at"] = now
     path = ledger_path(workspace)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    def mutate(data: dict) -> int:
+        parents = data.setdefault("parents", {})
+        changed = 0
+        for ar, audit in eligible_entries(checked).items():
+            entry = {
+                **audit,
+                "ar": ar,
+                "hexiao_date": checked.get("hexiao_date") or audit.get("hexiao_date") or "",
+            }
+            old = parents.get(ar)
+            if old is not None and _stable_payload(old) != _stable_payload(entry):
+                raise ValueError(f"父回款 {ar} 已有成功分配记录，但本次分配不同，禁止覆盖")
+            if old is None:
+                entry["applied_at"] = now
+                parents[ar] = entry
+                changed += 1
+            else:
+                old["last_verified_at"] = now
+        return changed
+
+    changed = atomic_json_store.update_json(
+        path,
+        default_factory=_empty_ledger,
+        validate=_validate_ledger,
+        mutate=mutate,
+    )
     return path, changed
 
 

@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import common  # noqa: E402
-import apply_to_copy  # noqa: E402
 import apply_flow  # noqa: E402
+import apply_to_copy  # noqa: E402
+import atomic_file_publish  # noqa: E402
 import build_flow_plan  # noqa: E402
 import build_task_reports  # noqa: E402
+import common  # noqa: E402
 import verify_sources  # noqa: E402
 import workbook_finalize  # noqa: E402
 
@@ -37,37 +39,29 @@ def _record_done(args, *, ledger_written: bool, flow_written: bool) -> None:
     写完表 → 在跑批台账上把这个核销日标成「已写表·收工」。
     只有落到这一步，`batch_ledger gaps` 才不会再把这天算成没跑过。
     """
-    try:
-        import json
+    import batch_ledger
+    import fallback_allocation_ledger
 
-        import batch_ledger
-        import fallback_allocation_ledger
-
-        plan = json.loads(Path(args.checked).read_text(encoding="utf-8"))
-        d = common.norm_date(plan.get("hexiao_date"))
-        if d is None:
-            print(
-                "WARN: 这份计划里没有核销日期（旧版计划），跑批台账没法登记这一天。",
-                file=sys.stderr,
-            )
-            return
-        allocation_path, allocation_added = fallback_allocation_ledger.commit(
-            Path(args.workspace), plan
-        )
-        batch_ledger.record(
-            Path(args.workspace), d, "applied",
-            written={"盈亏": bool(ledger_written), "流转": bool(flow_written)},
-        )
-        if plan.get("parent_fallback_allocations"):
-            print(
-                f"父回款顺序分配台账：新增 {allocation_added} 笔，已复核保存至 {allocation_path.name}"
-            )
-        print(f"跑批台账：{common.date_cn(d)} 已标记「已写表·收工」")
-    except Exception as e:
+    plan = json.loads(Path(args.checked).read_text(encoding="utf-8"))
+    d = common.norm_date(plan.get("hexiao_date"))
+    if d is None:
         print(
-            f"WARN: 写后台账登记失败（不影响已写入的数据）：{type(e).__name__}",
+            "WARN: 这份计划里没有核销日期（旧版计划），跑批台账没法登记这一天。",
             file=sys.stderr,
         )
+        return
+    allocation_path, allocation_added = fallback_allocation_ledger.commit(
+        Path(args.workspace), plan
+    )
+    batch_ledger.record(
+        Path(args.workspace), d, "applied",
+        written={"盈亏": bool(ledger_written), "流转": bool(flow_written)},
+    )
+    if plan.get("parent_fallback_allocations"):
+        print(
+            f"父回款顺序分配台账：新增 {allocation_added} 笔，已复核保存至 {allocation_path.name}"
+        )
+    print(f"跑批台账：{common.date_cn(d)} 已标记「已写表·收工」")
 
 
 def _resnapshot_sources(workspace) -> None:
@@ -162,6 +156,9 @@ def main(argv=None) -> int:
         return 2
 
     ws = common.resolve_workspace(args.workspace, quiet=True)
+    publish_transaction = ws / ".多年度写入发布事务"
+    if atomic_file_publish.recover(publish_transaction):
+        print("检测到上次中断的多年度发布，已恢复全部年度工作副本。")
     ledger_paths = {
         int(year): Path((entry or {}).get("path") or "").resolve()
         for year, entry in (plan.get("ledger_checks") or {}).items()
@@ -255,6 +252,18 @@ def main(argv=None) -> int:
 
     report_parts = {"变更清单": [], "订单写入差异": []}
     with tempfile.TemporaryDirectory(prefix="ar-yearly-plan-") as temp_dir:
+        write_ledger_paths = dict(ledger_paths)
+        staged_ledger_paths: dict[int, Path] = {}
+        if args.in_place and len(subplans) > 1:
+            staging_dir = Path(temp_dir) / "年度工作副本"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            for year in sorted(subplans):
+                staged = staging_dir / ledger_paths[year].name
+                if staged.exists():
+                    staged = staging_dir / f"{year}_{ledger_paths[year].name}"
+                shutil.copy2(ledger_paths[year], staged)
+                staged_ledger_paths[year] = staged
+                write_ledger_paths[year] = staged
         # 兼容原有空计划流程：虽然没有单元格需要写，仍让盈亏写入器完成
         # 空计划检查，再继续流转和最终来源指纹刷新。
         if not subplans and ledger_paths:
@@ -272,9 +281,10 @@ def main(argv=None) -> int:
                 print(f"ERROR: 盈亏空计划检查失败 EXIT:{rc1}，不写流转。", file=sys.stderr)
                 return rc1
         for year, subplan in subplans.items():
+            subplan = _year_subplan(plan, year, write_ledger_paths[year])
             sub_path = Path(temp_dir) / f"checked_{year}.json"
             sub_path.write_text(json.dumps(subplan, ensure_ascii=False, indent=2), encoding="utf-8")
-            ledger_args = ["--checked", str(sub_path), "--ledger", str(ledger_paths[year])]
+            ledger_args = ["--checked", str(sub_path), "--ledger", str(write_ledger_paths[year])]
             if len(subplans) > 1:
                 change_report = ws / "04_产出" / f"变更清单_{date_tag}_{year}.xlsx"
                 diff_report = ws / "04_产出" / f"订单写入差异_{date_tag}_{year}.xlsx"
@@ -298,6 +308,14 @@ def main(argv=None) -> int:
                 return rc1
             report_parts["变更清单"].append((year, ledger_paths[year], change_report))
             report_parts["订单写入差异"].append((year, ledger_paths[year], diff_report))
+        if staged_ledger_paths:
+            atomic_file_publish.publish(
+                {
+                    ledger_paths[year]: staged
+                    for year, staged in staged_ledger_paths.items()
+                },
+                publish_transaction,
+            )
 
     if len(subplans) > 1:
         _merge_annual_reports(

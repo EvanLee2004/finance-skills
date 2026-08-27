@@ -94,6 +94,95 @@ def test_match_foreign_formula_original_amount_can_include_fee():
     assert hit["matched_by"] == "三键(原币公式含手续费)"
 
 
+def _name_map(path, rows):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "名称对照"
+    ws.append(["到账名称", "系统客户名称"])
+    for row in rows:
+        ws.append(list(row))
+    wb.save(path)
+    wb.close()
+    return path
+
+
+def test_match_paypal_uses_english_to_system_customer_name_map(tmp_path):
+    flow_path = tmp_path / "paypal_flow.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "明细"
+    ws.append(["日期", "公司名称", "金额", "单号", "是否更新应收款", "收款形式"])
+    ws.append([dt.date(2026, 7, 14), "English Payer Ltd", "=1443.8*7", "", "", "PayPal"])
+    wb.save(flow_path)
+    wb.close()
+    map_path = _name_map(tmp_path / "customer_name_map.xlsx", [("English Payer Ltd", "中文系统客户")])
+
+    flow = FL.FlowLedger.from_paths([flow_path], name_map_paths=[map_path])
+    hit = flow.match(
+        dt.date(2026, 7, 14),
+        1443.8,
+        customer="中文系统客户",
+    )
+    assert hit["hits"] == 1
+    assert hit["matched_by"] == "三键(原币公式,中英文对照)"
+    assert len(flow.name_map) == 1
+
+
+def test_name_map_blank_target_is_manual_not_a_guess(tmp_path):
+    flow_path = tmp_path / "flow.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "明细"
+    ws.append(["日期", "公司名称", "金额", "单号", "是否更新应收款", "收款形式"])
+    ws.append([dt.date(2026, 7, 14), "English Payer Ltd", 100.0, "", "", "PayPal"])
+    wb.save(flow_path)
+    wb.close()
+    map_path = _name_map(tmp_path / "customer_name_map.xlsx", [("English Payer Ltd", "")])
+
+    flow = FL.FlowLedger.from_paths([flow_path], name_map_paths=[map_path])
+    hit = flow.match(dt.date(2026, 7, 14), 100.0, customer="中文系统客户")
+    assert hit["hits"] == 1
+    assert hit["matched_by"] == "日期+金额(名字不符)"
+    assert flow.name_map_issues
+
+
+def test_name_map_one_to_many_is_manual_not_a_guess(tmp_path):
+    flow_path = tmp_path / "flow.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "明细"
+    ws.append(["日期", "公司名称", "金额", "单号", "是否更新应收款", "收款形式"])
+    ws.append([dt.date(2026, 7, 14), "English Payer Ltd", 100.0, "", "", "PayPal"])
+    wb.save(flow_path)
+    wb.close()
+    map_path = _name_map(
+        tmp_path / "customer_name_map.xlsx",
+        [("English Payer Ltd", "中文系统客户甲"), ("English Payer Ltd", "中文系统客户乙")],
+    )
+
+    flow = FL.FlowLedger.from_paths([flow_path], name_map_paths=[map_path])
+    hit = flow.match(dt.date(2026, 7, 14), 100.0, customer="中文系统客户甲")
+    assert hit["hits"] == 1
+    assert hit["matched_by"] == "日期+金额(名字不符)"
+
+
+def test_name_map_is_scoped_to_paypal_or_usd_account(tmp_path):
+    flow_path = tmp_path / "flow.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "明细"
+    ws.append(["日期", "公司名称", "金额", "单号", "是否更新应收款", "收款形式"])
+    ws.append([dt.date(2026, 7, 14), "English Payer Ltd", 100.0, "", "", "汇款"])
+    wb.save(flow_path)
+    wb.close()
+    map_path = _name_map(tmp_path / "customer_name_map.xlsx", [("English Payer Ltd", "中文系统客户")])
+
+    flow = FL.FlowLedger.from_paths([flow_path], name_map_paths=[map_path])
+    hit = flow.match(dt.date(2026, 7, 14), 100.0, customer="中文系统客户")
+    assert hit["hits"] == 1
+    assert hit["matched_by"] == "日期+金额(名字不符)"
+
+
 def test_formula_original_amount_is_strictly_limited_to_foreign_forms():
     assert FL.formula_original_amount("=1443.8*7", "PayPal") == (1443.8, 7.0)
     assert FL.formula_original_amount("=1443.8*7", "美元户") == (1443.8, 7.0)

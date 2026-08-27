@@ -480,5 +480,5 @@ def test_validate_recomputes_whole_parent_gate_after_status_and_hash_tamper():
 def test_fetch_contract_exposes_record_identity_and_new_version():
     assert F.MINGXI_COLS[0] == "核销记录NUM"
     assert "订单已核销金额" in F.XIADAN_COLS
-    assert F.EXPORT_SCHEMA_VERSION == "2026-08-13-flow-sales-name-v4"
+    assert F.EXPORT_SCHEMA_VERSION == "2026-08-21-atomic-fetch-v5"
     assert "项目交付日期" in F.XIADAN_COLS
