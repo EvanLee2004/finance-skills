@@ -10,7 +10,7 @@ description: >-
 
 # 金蝶入账（销项发票 / 付款 / 收款）
 
-一个技能、三个入口。金额、借贷、科目只由 `scripts/convert.py` 算。对话只报笔数和路径，禁止报客户名、金额明细。
+一个技能、三个入口。金额、借贷、科目只由 `scripts/convert.py` 算。销项科目来自客户名→智云业务线；收款销售先回款再下单。对话只报笔数和路径，禁止报客户名、金额明细。
 
 后台怎么维护、链接和示意图：先读同夹 `README.md`。
 
@@ -19,9 +19,10 @@ description: >-
 1. 禁止自写 Python 读她的表；只准调本技能 `scripts/convert.py`。
 2. 禁止猜客户/供应商映射，禁止编 KH* / GYS*。平度公安不猜成别的公安。
 3. 禁止点金蝶「开始引入 / 审核 / 过账」。
-4. 真实 xlsx / PDF / 密钥不进 git。密钥只在本机 `~/.config/finance/kingdee.local.json`。
+4. 真实 xlsx / PDF / 密钥不进 git。密钥只在本机 `~/.config/finance/kingdee.local.json` 与 `zhiyun.local.json`。
 5. 三个模块不要混在一次「都做了」里；夹里不止一种表时问她跑哪一句。
 6. 账套用总部，不要湖南分公司。
+7. 禁止看发票「下单号」「合同号」。禁止用智云下单额顶替金蝶本期借方。
 
 ## 1. 找文件夹、认模块
 
@@ -33,11 +34,11 @@ python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <绝对目�
 
 按**表头**认，不靠文件名。
 
-## 2. 第一次本机没有应用号
+## 2. 第一次本机没有应用号 / 智云号
 
 不要问金蝶登录密码。问开放平台「甲骨易财务连接器」的 **应用 ID（Client ID）和 Client Secret**。  
-填完写入 `~/.config/finance/kingdee.local.json`（权限 600）。更新财务skills **不得覆盖**这份。  
-没有密钥、档案查询失败或本机缓存过期：**不生成引入表**。先恢复只读档案查询，再重跑；不能用 `--no-api` 绕过这个闸门。
+填完写入 `~/.config/finance/kingdee.local.json`（权限 600）。智云账号写入 `~/.config/finance/zhiyun.local.json`（600）。更新财务skills **不得覆盖**这两份。  
+没有密钥、金蝶档案失败、智云查找失败或本机缓存过期：**不生成引入表**。不能用 `--no-api` 绕过这个闸门。
 
 ## 3. 跑转换
 
@@ -59,11 +60,14 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene
 
 | 文件 | 改什么 |
 |------|--------|
-| `config/rules.json` | 科目、打包、部门 0405 |
+| `config/rules.json` | 税/银行科目、打包、付款 0405 |
+| `config/业务线科目.json` | 智云业务线 → 1131xx |
+| `config/申请人部门.json` | 销项申请人 → 部门编码 |
 | `config/列名别名.json` | 表头别名 |
 | `config/客户别名.json` | 收款三户映射 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
 | 本机 `kingdee.local.json` | 应用号；不进仓 |
+| 本机 `zhiyun.local.json` | 智云账号；不进仓 |
 | 本机 `~/.cache/finance/kingdee-master.json` | 只读 API 档案短缓存（默认 15 分钟）；自动生成，不手改、不进仓 |
 
 口径说明：`config/业务规则.md`、`config/场景/`。维护步骤和后台链接：`README.md`。
@@ -72,5 +76,6 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene
 
 - 夹里同时像销项又像收款 → 停，问跑哪一句。
 - 付款认不清专普、票合计小于应付 → 待确认，不要猜税率。
+- 收款下单对上两个销售 → 待确认，提醒斯佳单独处理；职员对不上仍入账、职员留空。
 - 收款出现「公安」且不是已映射户 → 待确认。
-- 本机没有应用号、查档失败或缓存过期 → 停止，不交空编码的引入表。
+- 本机没有应用号/智云号、查档失败或缓存过期 → 停止，不交空编码的引入表。

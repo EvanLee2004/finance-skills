@@ -57,7 +57,7 @@ def classify_xlsx(path: Path, aliases: dict) -> str | None:
     pay_a = aliases.get("付款_列别名") or {}
     rec_a = aliases.get("收款_列别名") or {}
     for headers in sheets.values():
-        if field_hit(headers, sales_a, "应收账款编码") and field_hit(headers, sales_a, "主营业务收入编码"):
+        if field_hit(headers, sales_a, "单位名称") and field_hit(headers, sales_a, "价税合计"):
             return "销项发票"
         if field_hit(headers, pay_a, "供应商") and field_hit(headers, pay_a, "应付金额本币"):
             return "付款"
@@ -118,8 +118,8 @@ def inspect_dir(input_dir: Path, scene: str | None = None) -> dict:
         }
     if chosen == "销项发票":
         if not found["销项发票"]:
-            missing.append("发票簿（要有单位名称、应收账款编码、主营业务收入编码）")
-            ask = "还缺改样发票簿。把表放进这个文件夹即可，不用改文件名。"
+            missing.append("发票簿（要有单位名称、价税合计、申请人）")
+            ask = "还缺发票簿。把表放进这个文件夹即可，不用改文件名，也不用先填科目。"
         else:
             files["invoice"] = found["销项发票"][0]
     elif chosen == "付款":
@@ -135,8 +135,8 @@ def inspect_dir(input_dir: Path, scene: str | None = None) -> dict:
             ask = "付款还缺：" + "；".join(missing) + "。台账放外面，一家一个夹，夹里放发票 PDF。"
     elif chosen == "收款":
         if not found["收款"]:
-            missing.append("收款表（日期 / 客户名称 / 借方（增加）/ 销售 / 部门编码 / 应收账款编码）")
-            ask = "还缺收款表。六列放进这个文件夹即可。"
+            missing.append("收款表（日期 / 客户名称 / 借方（增加）/ 部门编码）")
+            ask = "还缺收款表。日期、客户、金额、部门编码放进这个文件夹即可，销售和科目由技能补。"
         else:
             files["receipt"] = found["收款"][0]
     else:

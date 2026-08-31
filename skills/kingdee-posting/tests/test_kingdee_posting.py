@@ -45,6 +45,33 @@ def _master():
     }
 
 
+def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, order_sales=None, period_debit=None):
+    lines = customer_lines if customer_lines is not None else {
+        "甲科技有限公司": ["ICT"],
+        "国广国际在线网络（北京）有限公司": ["ICT"],
+        "中国广播电影电视交易中心": ["ICT"],
+        "商务部培训中心（商务部国际商务官员研修学院）": ["ICT"],
+    }
+    for name in extra_customers or []:
+        lines.setdefault(name, ["ICT"])
+    return {
+        "customer_lines": lines,
+        "receipt_sales": receipt_sales
+        if receipt_sales is not None
+        else [
+            {"customer": "甲科技有限公司", "date": "2026-08-01", "amount": "10.00", "sales": ["于占国"]},
+            {"customer": "国广国际在线网络（北京）有限公司", "date": "2026-08-01", "amount": "20.00", "sales": ["没有这个人"]},
+            {"customer": "中国广播电影电视交易中心", "date": "2026-08-01", "amount": "10.00", "sales": ["于占国"]},
+        ],
+        "order_sales": order_sales if order_sales is not None else {"甲科技有限公司": ["于占国"]},
+        "period_debit": period_debit or [],
+    }
+
+
+def _run(tmp_path, scene, master=None, lookups=None):
+    return convert.run_dir(tmp_path, scene, "2026-08-27", _master() if master is None else master, lookups if lookups is not None else _lookups())
+
+
 def _dummy_pdf(path: Path):
     path.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
 
@@ -137,9 +164,9 @@ def test_inspect_payment_missing_pdf(tmp_path):
     assert any("发票" in m for m in report["missing"])
 
 
-def test_sales_no_org_uses_dept_col(tmp_path):
+def test_sales_no_org_uses_applicant_dept(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
+    result = _run(tmp_path, "销项发票")
     assert result["bookable_count"] == 1
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
@@ -162,27 +189,27 @@ def test_sales_no_invoice_no_column(tmp_path):
     ]
     row = ["2026-08-01", "专票", "甲科技有限公司", 1060, 1000, 60, "于占国", "15", "113103", "510103"]
     _write_sales(tmp_path / "发票.xlsx", [row], headers=headers, with_org=False)
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
+    result = _run(tmp_path, "销项发票")
     assert result["bookable_count"] == 1
 
 
-def test_sales_hold_missing_account(tmp_path):
-    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(ar=None)])
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
+def test_sales_no_business_line_holds(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()])
+    result = _run(tmp_path, "销项发票", lookups=_lookups(customer_lines={}))
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
 
 def test_sales_unknown_customer_holds(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name="不存在客户甲有限公司")])
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
+    result = _run(tmp_path, "销项发票")
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
 
 def test_sales_tax_no_aux_and_balance(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()])
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", _master())
+    result = _run(tmp_path, "销项发票")
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
     lines = list(ws.iter_rows(min_row=4, max_row=6, max_col=25, values_only=True))
@@ -201,8 +228,9 @@ def test_sales_pack_keeps_consecutive(tmp_path):
     rows += [_ok_sales(name="连号乙", inv=f"b{i}") for i in range(4)]
     _write_sales(tmp_path / "发票.xlsx", rows)
     master = _master()
-    master["customer"] += [{"code": str(3000 + i), "name": name} for i, name in enumerate(dict.fromkeys(row[3] for row in rows))]
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", master)
+    names = list(dict.fromkeys(row[3] for row in rows))
+    master["customer"] += [{"code": str(3000 + i), "name": name} for i, name in enumerate(names)]
+    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", master, _lookups(extra_customers=names))
     nums = _voucher_nums(result["kingdee_path"], 12 * 3)
     assert nums.count(1) == 15
     assert nums.count(2) == 21
@@ -211,7 +239,7 @@ def test_sales_pack_keeps_consecutive(tmp_path):
 
 def test_sales_no_master_holds(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", None)
+    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", None, _lookups())
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
@@ -231,7 +259,7 @@ def test_payment_special_and_normal(tmp_path, monkeypatch):
         return {"kind": "普票", "seller": "无档店", "total": Decimal("200.00"), "tax": None}
 
     monkeypatch.setattr(convert, "parse_invoice_pdf", fake_parse)
-    result = convert.run_dir(tmp_path, "付款", "2026-08-27", _master())
+    result = _run(tmp_path, "付款")
     assert result["bookable_count"] == 2
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
@@ -256,7 +284,7 @@ def test_payment_unclear_type_holds(tmp_path, monkeypatch):
     folder.mkdir()
     _dummy_pdf(folder / "a.pdf")
     monkeypatch.setattr(convert, "parse_invoice_pdf", lambda p: {"kind": "", "seller": "x", "total": None, "tax": None})
-    result = convert.run_dir(tmp_path, "付款", "2026-08-27", _master())
+    result = _run(tmp_path, "付款")
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
@@ -271,35 +299,38 @@ def test_payment_ticket_less_than_payable_holds(tmp_path, monkeypatch):
         "parse_invoice_pdf",
         lambda p: {"kind": "普票", "seller": "北京某翻译店", "total": Decimal("100.00"), "tax": None},
     )
-    result = convert.run_dir(tmp_path, "付款", "2026-08-27", _master())
+    result = _run(tmp_path, "付款")
     assert result["hold_count"] == 1
 
 
 def test_receipt_pack_alias_pingdu_and_empty_emp(tmp_path):
     rows = []
     for i in range(10):
-        rows.append(["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"])
+        rows.append(["2026-08-01", "甲科技有限公司", 10, "表内销售应忽略", "15", "113101"])
     rows.append(["2026-08-01", "国广国际在线网络（北京）有限公司陕西分公司", 20, "没有这个人", "15", "113102"])
     rows.append(["2026-08-01", "平度市公安局", 30, "于占国", "15", "113101"])
     _write_receipt(tmp_path / "收款.xlsx", rows)
-    result = convert.run_dir(tmp_path, "收款", "2026-08-27", _master())
-    assert result["hold_count"] == 2
-    assert result["bookable_count"] == 10
+    result = _run(tmp_path, "收款")
+    assert result["hold_count"] == 1
+    assert result["bookable_count"] == 11
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
     nums = _voucher_nums(result["kingdee_path"], 22)
-    assert 1 in nums
-    assert nums.count(1) == 20  # 10 笔 × 2 行
-    # 职员档案没有销售时必须待确认，不得只填名称。
+    assert nums.count(1) == 20
     names = [ws.cell(r, 19).value for r in range(4, 30)]
-    assert "国广国际在线网络（北京）有限公司" not in names
+    assert "国广国际在线网络（北京）有限公司" in names
     assert "平度市公安局" not in names
+    emp_codes = [ws.cell(r, 24).value for r in range(4, 30)]
+    assert "103" in emp_codes
+    guang_rows = [r for r in range(4, 30) if ws.cell(r, 19).value == "国广国际在线网络（北京）有限公司"]
+    assert guang_rows
+    assert all(ws.cell(r, 24).value in (None, "") for r in guang_rows)
     kd.close()
 
 
 def test_receipt_no_master_holds(tmp_path):
     _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
-    result = convert.run_dir(tmp_path, "收款", "2026-08-27", None)
+    result = convert.run_dir(tmp_path, "收款", "2026-08-27", None, _lookups())
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
@@ -309,7 +340,7 @@ def test_receipt_accepts_word_spelling_without_programme(tmp_path):
         tmp_path / "收款.xlsx",
         [["2026-08-01", "中国广播电影电视交易中心有限公司", 10, "于占国", "15", "113101"]],
     )
-    result = convert.run_dir(tmp_path, "收款", "2026-08-27", _master())
+    result = _run(tmp_path, "收款")
     assert result["bookable_count"] == 1
     assert result["hold_count"] == 0
 
@@ -409,3 +440,162 @@ def test_cli_refuses_to_create_unverified_auxiliaries_without_api(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     assert convert.main(["--input-dir", str(tmp_path), "--scene", "销项发票", "--no-api"]) == 2
     assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+
+
+def test_inspect_receipt_without_sales_or_ar(tmp_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "收款"
+    ws.append(["日期", "客户名称", "借方（增加）", "部门编码"])
+    ws.append(["2026-08-01", "甲科技有限公司", 10, "15"])
+    wb.save(tmp_path / "收款.xlsx")
+    wb.close()
+    report = inspect_inputs.inspect_dir(tmp_path, "收款")
+    assert report["ready"] is True
+
+
+def test_inspect_sales_without_account_columns(tmp_path):
+    headers = ["日期", "发票类型", "单位名称", "价税合计", "金额", "税额", "申请人"]
+    row = ["2026-08-01", "专票", "甲科技有限公司", 1060, 1000, 60, "于占国"]
+    _write_sales(tmp_path / "发票.xlsx", [row], headers=headers, with_org=False)
+    report = inspect_inputs.inspect_dir(tmp_path, "销项发票")
+    assert report["ready"] is True
+
+
+def test_sales_ignores_order_no_and_table_accounts(tmp_path):
+    headers = [
+        "日期",
+        "发票类型",
+        "单位名称",
+        "价税合计",
+        "金额",
+        "税额",
+        "申请人",
+        "下单号",
+        "合同号",
+        "应收账款编码",
+        "主营业务收入编码",
+    ]
+    row = ["2026-08-01", "专票", "甲科技有限公司", 1060, 1000, 60, "于占国", "SO-WRONG", "HT-WRONG", "113101", "510101"]
+    _write_sales(tmp_path / "发票.xlsx", [row], headers=headers, with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [ws.cell(r, 7).value for r in range(4, 7)]
+    assert "113103" in accounts
+    assert "510103" in accounts
+    assert "113101" not in accounts
+    kd.close()
+
+
+def test_sales_applicant_not_in_dept_table_holds(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(app="路人甲")], with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+
+
+def test_sales_multi_line_uses_period_debit(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    result = _run(
+        tmp_path,
+        "销项发票",
+        lookups=_lookups(
+            customer_lines={"甲科技有限公司": ["ICT", "游戏综合本地化"]},
+            period_debit=[
+                {"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "90"},
+                {"customer_code": "1001", "account": "113102", "period": "2026-08", "debit": "10"},
+            ],
+        ),
+    )
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [ws.cell(r, 7).value for r in range(4, 7)]
+    assert "113103" in accounts
+    assert "113102" not in accounts
+    kd.close()
+
+
+def test_receipt_uses_lookups_not_table_ar(tmp_path):
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "表内销售", "15", "113101"]])
+    result = _run(tmp_path, "收款")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [ws.cell(r, 7).value for r in range(4, 6)]
+    assert "113103" in accounts
+    assert "113101" not in accounts
+    kd.close()
+
+
+def test_receipt_order_fallback_and_dual_sales(tmp_path):
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "表内销售", "15", "113101"]])
+    fallback = _run(
+        tmp_path,
+        "收款",
+        lookups=_lookups(
+            receipt_sales=[],
+            order_sales={"甲科技有限公司": ["陈霞"]},
+        ),
+    )
+    assert fallback["bookable_count"] == 1
+    kd = load_workbook(fallback["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    assert "011" in [ws.cell(r, 24).value for r in range(4, 6)]
+    kd.close()
+    hold = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-08-27",
+        _master(),
+        _lookups(receipt_sales=[], order_sales={"甲科技有限公司": ["于占国", "陈霞"]}),
+    )
+    assert hold["bookable_count"] == 0
+    assert hold["hold_count"] == 1
+    detail = load_workbook(hold["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "斯佳" in reason
+
+
+def test_cli_refuses_without_zhiyun_lookups(tmp_path, monkeypatch):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    master = tmp_path / "master.json"
+    master.write_text(json.dumps(_master()), encoding="utf-8")
+    monkeypatch.setattr(
+        convert.zhiyun_api,
+        "try_load_lookups",
+        lambda: {"ok": False, "missing_credentials": True, "data": None},
+    )
+    assert convert.main(
+        ["--input-dir", str(tmp_path), "--scene", "销项发票", "--master", str(master)]
+    ) == 2
+    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+
+
+def test_cli_lookups_file_converts(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    master = tmp_path / "master.json"
+    lookups = tmp_path / "lookups.json"
+    master.write_text(json.dumps(_master()), encoding="utf-8")
+    lookups.write_text(json.dumps(_lookups()), encoding="utf-8")
+    assert (
+        convert.main(
+            [
+                "--input-dir",
+                str(tmp_path),
+                "--scene",
+                "销项发票",
+                "--master",
+                str(master),
+                "--lookups",
+                str(lookups),
+                "--date",
+                "2026-08-27",
+            ]
+        )
+        == 0
+    )
+    assert (tmp_path / "凭证引入_结果.xlsx").exists()

@@ -31,6 +31,8 @@ except Exception:
 sys.path.insert(0, str(HERE))
 import inspect_inputs as inspect_mod  # noqa: E402
 import kingdee_api  # noqa: E402
+import lookups as lookup_mod  # noqa: E402
+import zhiyun_api  # noqa: E402
 
 
 def log(msg: str) -> None:
@@ -82,6 +84,19 @@ def strip_ge(name: str) -> str:
     return s.strip()
 
 
+def as_day(value, fallback: str = "") -> str:
+    if value is None or value == "":
+        return str(fallback or "")[:10]
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value).strip().replace("/", "-").replace(".", "-")
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return str(fallback or "")[:10]
+
+
 def load_json(path: Path, default):
     if not path.is_file():
         return default
@@ -99,6 +114,20 @@ def load_aliases() -> dict:
 def load_customer_alias() -> dict:
     raw = load_json(CONFIG / "客户别名.json", {})
     return {k: v for k, v in raw.items() if not str(k).startswith("_") and v}
+
+
+def load_line_accounts() -> dict:
+    raw = load_json(CONFIG / "业务线科目.json", {})
+    return {k: str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
+
+
+def load_applicant_dept() -> dict:
+    raw = load_json(CONFIG / "申请人部门.json", {})
+    return {k: str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
+
+
+def load_box(raw: dict | None):
+    return lookup_mod.box_from_dict(raw, load_line_accounts(), load_applicant_dept())
 
 
 def header_index(headers: list, aliases: dict) -> dict:
@@ -349,13 +378,19 @@ def sales_sheet(wb) -> str | None:
     for name in wb.sheetnames:
         if name in ("发票", "数电票-专票"):
             return name
+    for name in wb.sheetnames:
+        ws = wb[name]
+        headers = [str(c.value).strip() for c in next(ws.iter_rows(min_row=1, max_row=1)) if c.value]
+        if "单位名称" in headers and "价税合计" in headers:
+            return name
     return None
 
 
-def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> list[VoucherLine]:
+def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str) -> list[VoucherLine]:
     cfg = rules.get("sales") or {}
     tax_account = str(cfg.get("tax_account") or "21710105")
     divisor = Decimal(str(rules.get("tax_rate_divisor") or "1.06"))
+    alias_map = load_customer_alias()
     wb_f = load_workbook(path, data_only=False)
     wb_v = load_workbook(path, data_only=True)
     sheet = sales_sheet(wb_f)
@@ -367,7 +402,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
     ws_v = wb_v[sheet]
     headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
     idx = header_index(headers, aliases.get("销项发票_列别名") or {})
-    needed = ["单位名称", "价税合计", "应收账款编码", "主营业务收入编码", "申请人"]
+    needed = ["单位名称", "价税合计", "申请人"]
     missing = [k for k in needed if k not in idx]
     if missing:
         wb_f.close()
@@ -390,9 +425,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
             tax = (total - amt).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
         typ = str(cell_at(row_f, idx, "发票类型") or "").strip()
         applicant = str(cell_at(row_f, idx, "申请人") or "").strip()
-        ar = pick_code(cell_at(row_f, idx, "应收账款编码"), cell_at(row_v, idx, "应收账款编码"))
-        rev = pick_code(cell_at(row_f, idx, "主营业务收入编码"), cell_at(row_v, idx, "主营业务收入编码"))
-        dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码"))
+        inv_day = as_day(cell_at(row_v, idx, "日期") or cell_at(row_f, idx, "日期"), booking)
         prefix = typ
         if total is not None and total < 0 and "红字" not in typ:
             prefix = "红字" + typ
@@ -403,10 +436,6 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
             expl=f"{prefix}：{unit}" if typ else f"{unit}",
             extra={"单位名称": unit, "申请人": applicant},
         )
-        if not ar or not rev:
-            line.status, line.reason = "待确认", "缺科目编码"
-            lines.append(line)
-            continue
         if total is None or amt is None or tax is None:
             line.status, line.reason = "待确认", "缺金额"
             lines.append(line)
@@ -423,8 +452,9 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
             line.status, line.reason = "待确认", "缺申请人"
             lines.append(line)
             continue
+        dept = lookup_mod.applicant_dept_code(applicant, box)
         if not dept:
-            line.status, line.reason = "待确认", "缺部门编码"
+            line.status, line.reason = "待确认", "申请人不在部门表"
             lines.append(line)
             continue
         dhit, derr = master.department(dept)
@@ -439,12 +469,20 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict) -> lis
             lines.append(line)
             continue
         emp_code, emp_name = ehit
-        chit, cerr = master.customer(unit)
+        lookup_name = alias_map.get(unit, unit)
+        chit, cerr = master.customer(lookup_name)
+        if not chit:
+            chit, cerr = master.customer(unit)
         if not chit:
             line.status, line.reason = "待确认", "客户档案一对多" if cerr == "many" else "客户档案没有此抬头"
             lines.append(line)
             continue
         cus_code, cus_name = chit
+        ar, rev, why = lookup_mod.resolve_ar(lookup_name, inv_day, cus_code, box)
+        if not ar or not rev:
+            line.status, line.reason = "待确认", why or "缺科目编码"
+            lines.append(line)
+            continue
         aux = {
             "aux": True,
             "cus_code": cus_code,
@@ -632,7 +670,7 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
     return lines
 
 
-def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> list[VoucherLine]:
+def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str) -> list[VoucherLine]:
     cfg = rules.get("receipt") or {}
     alias_map = load_customer_alias()
     wb_f = load_workbook(path, data_only=False)
@@ -641,7 +679,7 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> l
     ws_v = wb_v[wb_v.sheetnames[0]]
     headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
     idx = header_index(headers, aliases.get("收款_列别名") or {})
-    needed = ["客户名称", "借方（增加）", "销售", "部门编码", "应收账款编码"]
+    needed = ["日期", "客户名称", "借方（增加）", "部门编码"]
     missing = [k for k in needed if k not in idx]
     if missing:
         wb_f.close()
@@ -657,15 +695,14 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> l
         if not cust:
             continue
         amt = pick_amount(cell_at(row_f, idx, "借方（增加）"), cell_at(row_v, idx, "借方（增加）"), None)
-        sales = str(cell_at(row_f, idx, "销售") or "").strip()
+        rec_day = as_day(cell_at(row_v, idx, "日期") or cell_at(row_f, idx, "日期"), booking)
         dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码"))
-        ar = pick_code(cell_at(row_f, idx, "应收账款编码"), cell_at(row_v, idx, "应收账款编码"))
         line = VoucherLine(
             status="可入账",
             source_row=r,
             key=cust,
             expl=f"收：{cust}",
-            extra={"客户名称": cust, "销售": sales},
+            extra={"客户名称": cust},
         )
         if "平度" in cust and "公安" in cust:
             line.status, line.reason = "待确认", "平度公安不猜"
@@ -675,16 +712,14 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> l
             line.status, line.reason = "待确认", "缺金额"
             lines.append(line)
             continue
-        if not ar:
-            line.status, line.reason = "待确认", "缺应收账款编码"
-            lines.append(line)
-            continue
         if not dept or dept.startswith("="):
             line.status, line.reason = "待确认", "缺部门编码"
             lines.append(line)
             continue
         lookup_name = alias_map.get(cust, cust)
         chit, cerr = master.customer(lookup_name)
+        if not chit:
+            chit, cerr = master.customer(cust)
         if not chit:
             line.status, line.reason = "待确认", "客户档案一对多" if cerr == "many" else "客户档案没有此抬头"
             lines.append(line)
@@ -696,12 +731,25 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict) -> l
             lines.append(line)
             continue
         dept, dep_name = dhit
-        ehit, eerr = master.employee(sales)
-        if not ehit:
-            line.status, line.reason = "待确认", "职员档案一对多" if eerr == "many" else "职员档案没有此人"
+        ar, _rev, why = lookup_mod.resolve_ar(lookup_name, rec_day, cus_code, box)
+        if not ar:
+            line.status, line.reason = "待确认", why or "缺科目编码"
             lines.append(line)
             continue
-        emp_code, emp_name = ehit
+        sales, swhy = lookup_mod.resolve_sales(lookup_name, rec_day, amt, box)
+        if not sales:
+            line.status, line.reason = "待确认", swhy or "找不到销售"
+            lines.append(line)
+            continue
+        line.extra["销售"] = sales
+        ehit, eerr = master.employee(sales)
+        emp_code = emp_name = ""
+        if ehit:
+            emp_code, emp_name = ehit
+        elif eerr == "many":
+            line.status, line.reason = "待确认", "职员档案一对多"
+            lines.append(line)
+            continue
         aux = {
             "aux": True,
             "cus_code": cus_code,
@@ -740,7 +788,13 @@ def write_outputs(out_dir: Path, scene: str, lines: list[VoucherLine], rules: di
     }
 
 
-def run_dir(input_dir: Path, scene: str | None, booking: str | None, master_data: dict | None) -> dict:
+def run_dir(
+    input_dir: Path,
+    scene: str | None,
+    booking: str | None,
+    master_data: dict | None,
+    lookups: dict | None = None,
+) -> dict:
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
         raise SystemExit(report.get("ask") or "材料不齐")
@@ -748,18 +802,19 @@ def run_dir(input_dir: Path, scene: str | None, booking: str | None, master_data
     rules = load_rules()
     aliases = load_aliases()
     master = Master(master_data or {})
+    box = load_box(lookups)
     day = booking or date.today().isoformat()
     files = report["files"]
     if scene == "销项发票":
         src = Path(files["invoice"])
-        lines = convert_sales(src, master, rules, aliases)
+        lines = convert_sales(src, master, rules, aliases, box, day)
         return write_outputs(input_dir, scene, lines, rules, day, src.stem)
     if scene == "付款":
         src = Path(files["ledger"])
         lines = convert_payment(input_dir, src, master, rules, aliases)
         return write_outputs(input_dir, scene, lines, rules, day, src.stem)
     src = Path(files["receipt"])
-    lines = convert_receipt(src, master, rules, aliases)
+    lines = convert_receipt(src, master, rules, aliases, box, day)
     return write_outputs(input_dir, scene, lines, rules, day, src.stem)
 
 
@@ -770,6 +825,7 @@ def main(argv=None) -> int:
     parser.add_argument("--scene", choices=["销项发票", "付款", "收款"])
     parser.add_argument("--date")
     parser.add_argument("--master")
+    parser.add_argument("--lookups")
     parser.add_argument("--no-api", action="store_true")
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
@@ -789,8 +845,18 @@ def main(argv=None) -> int:
             reason = "本机没有金蝶应用号" if loaded.get("missing_credentials") else loaded.get("error") or "读取失败"
             log(f"总部档案未核验（{reason}）；未生成引入表。请检查本机应用号和只读权限后重试。")
             return 2
+    lookups = None
+    if args.lookups:
+        lookups = json.loads(Path(args.lookups).read_text(encoding="utf-8"))
+    else:
+        loaded_zy = zhiyun_api.try_load_lookups()
+        if not loaded_zy.get("ok"):
+            reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
+            log(f"智云查找未核验（{reason}）；未生成引入表。请检查本机 zhiyun.local.json 后重试。")
+            return 2
+        lookups = loaded_zy["data"]
     try:
-        result = run_dir(root, args.scene, args.date, master_data)
+        result = run_dir(root, args.scene, args.date, master_data, lookups)
     except SystemExit as e:
         log(str(e))
         return 2
