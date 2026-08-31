@@ -39,6 +39,7 @@ def test_unknown_customer_has_no_line():
     ar, rev, why = lookups.resolve_ar("1001", "2026-08-01", box)
     assert ar == ""
     assert "金蝶往来" in why
+    assert "业务线" not in why
 
 
 def test_zero_balance_falls_back_to_period_debit():
@@ -52,6 +53,16 @@ def test_zero_balance_falls_back_to_period_debit():
     )
     ar, rev, why = lookups.resolve_ar("1001", "2026-08-26", box)
     assert (ar, rev, why) == ("113103", "510103", "")
+    assert "业务线" not in why
+
+
+def test_zero_balance_without_period_debit_holds_kingdee_ar():
+    box = _box({"ar_balance": [{"customer_code": "1001", "account": "113103", "balance": "0"}]})
+    ar, rev, why = lookups.resolve_ar("1001", "2026-08-26", box)
+    assert ar == ""
+    assert rev == ""
+    assert "金蝶往来" in why
+    assert "业务线" not in why
 
 
 def test_multi_line_picks_larger_period_debit():

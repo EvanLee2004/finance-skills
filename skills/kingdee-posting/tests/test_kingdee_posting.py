@@ -1003,6 +1003,38 @@ def test_expired_cache_not_used_when_auth_fails(tmp_path, monkeypatch):
     assert loaded.get("source") != "cache"
 
 
+def test_sales_zero_balance_books_period_debit_account(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    lookups = _lookups(
+        ar_balance=[{"customer_code": "1001", "account": "113103", "balance": "0"}],
+        period_debit=[{"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "80"}],
+    )
+    result = _run(tmp_path, "销项发票", lookups=lookups)
+    assert result["bookable_count"] == 1
+    assert result["hold_count"] == 0
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    codes = []
+    for r in range(4, 7):
+        codes.extend(str(ws.cell(r, c).value or "") for c in range(1, 40))
+    kd.close()
+    assert "113103" in codes
+    assert "510103" in codes
+
+
+def test_sales_zero_balance_without_debit_holds_kingdee_ar(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    lookups = _lookups(ar_balance=[], period_debit=[])
+    result = _run(tmp_path, "销项发票", lookups=lookups)
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "金蝶往来" in reason
+    assert "业务线" not in reason
+
+
 def test_period_debit_fetch_is_called_when_injected_missing(tmp_path):
     called = {}
 
