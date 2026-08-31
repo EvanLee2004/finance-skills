@@ -41,6 +41,19 @@ def test_unknown_customer_has_no_line():
     assert "金蝶往来" in why
 
 
+def test_zero_balance_falls_back_to_period_debit():
+    box = _box(
+        {
+            "ar_balance": [{"customer_code": "1001", "account": "113103", "balance": "0"}],
+            "period_debit": [
+                {"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "80"},
+            ],
+        }
+    )
+    ar, rev, why = lookups.resolve_ar("1001", "2026-08-26", box)
+    assert (ar, rev, why) == ("113103", "510103", "")
+
+
 def test_multi_line_picks_larger_period_debit():
     box = _box(
         {

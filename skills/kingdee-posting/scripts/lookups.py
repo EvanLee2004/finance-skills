@@ -152,6 +152,27 @@ def box_from_dict(raw: dict | None, ar_or_lines, applicant_dept: dict) -> Lookup
     )
 
 
+def _pick_by_period_debit(code: str, invoice_day: str, box: LookupBox, accounts: list[str]) -> tuple[str, str, str]:
+    period = period_month(invoice_day)
+    if not period:
+        return "", "", "金蝶往来本期借方不可用"
+    scored = []
+    for acc in accounts:
+        debit = box.period_debit.get((code, acc, period))
+        if debit is not None and debit != 0:
+            scored.append((debit, acc))
+    if not scored:
+        return "", "", "金蝶往来没有此客户应收"
+    scored.sort(key=lambda x: x[0], reverse=True)
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return "", "", "金蝶往来本期借方不唯一"
+    ar = scored[0][1]
+    rev = income_of(ar)
+    if not rev:
+        return "", "", "收入科目无法从应收推导"
+    return ar, rev, ""
+
+
 def resolve_ar(customer_code: str, invoice_day: str, box: LookupBox) -> tuple[str, str, str]:
     """返回 (应收, 收入, 失败原因)。科目只看金蝶该客户 1131xx 往来。"""
     code = str(customer_code or "").strip()
@@ -170,11 +191,12 @@ def resolve_ar(customer_code: str, invoice_day: str, box: LookupBox) -> tuple[st
             return "", "", "收入科目无法从应收推导"
         return ar, rev, ""
     if not nonzero:
-        return "", "", "金蝶往来没有此客户应收"
+        # 当月借方有、余额被回款冲平：仍用本期借方判断科目。
+        return _pick_by_period_debit(code, invoice_day, box, accounts)
+    scored = []
     period = period_month(invoice_day)
     if not period:
         return "", "", "金蝶往来本期借方不可用"
-    scored = []
     for acc in nonzero:
         debit = box.period_debit.get((code, acc, period))
         if debit is None:
