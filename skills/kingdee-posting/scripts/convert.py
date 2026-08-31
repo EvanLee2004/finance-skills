@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -12,6 +13,34 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+
+
+def repo_venv_python() -> Path | None:
+    root = Path(__file__).resolve().parents[3]
+    for rel in (Path(".venv") / "bin" / "python", Path(".venv") / "Scripts" / "python.exe"):
+        cand = root / rel
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _reexec_repo_venv_if_needed() -> None:
+    """opencode 常调系统 python3；仓内 .venv 才有 requests/playwright。只在当脚本跑时切，import 进 pytest 不切。"""
+    if not sys.argv or Path(sys.argv[0]).name.lower() not in {"convert.py", "convert"}:
+        return
+    venv_py = repo_venv_python()
+    if venv_py is None:
+        return
+    try:
+        # macOS 上 .venv/bin/python 常是指向 Homebrew 的同一条二进制，不能比 executable。
+        if Path(sys.prefix).resolve() == venv_py.parent.parent.resolve():
+            return
+    except OSError:
+        return
+    os.execv(str(venv_py), [str(venv_py), *sys.argv])
+
+
+_reexec_repo_venv_if_needed()
 
 from openpyxl import Workbook, load_workbook
 
@@ -32,6 +61,7 @@ sys.path.insert(0, str(HERE))
 import inspect_inputs as inspect_mod  # noqa: E402
 import kingdee_api  # noqa: E402
 import lookups as lookup_mod  # noqa: E402
+import match_name as names  # noqa: E402
 import zhiyun_api  # noqa: E402
 
 
@@ -116,9 +146,9 @@ def load_customer_alias() -> dict:
     return {k: v for k, v in raw.items() if not str(k).startswith("_") and v}
 
 
-def load_line_accounts() -> dict:
-    raw = load_json(CONFIG / "业务线科目.json", {})
-    return {k: str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
+def load_ar_accounts() -> list[str]:
+    raw = load_rules().get("ar_accounts") or []
+    return [str(x).strip() for x in raw if str(x).strip()]
 
 
 def load_applicant_dept() -> dict:
@@ -126,8 +156,13 @@ def load_applicant_dept() -> dict:
     return {k: str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
 
 
+def load_emp_hang() -> dict:
+    raw = load_json(CONFIG / "职员挂靠.json", {})
+    return {k: str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
+
+
 def load_box(raw: dict | None):
-    return lookup_mod.box_from_dict(raw, load_line_accounts(), load_applicant_dept())
+    return lookup_mod.box_from_dict(raw, load_ar_accounts(), load_applicant_dept())
 
 
 def header_index(headers: list, aliases: dict) -> dict:
@@ -217,11 +252,52 @@ class Master:
                     self.sup.setdefault(norm_name(stripped), []).append((code, name))
         self.enabled = bool(self.emp or self.dept or self.cus or self.sup)
 
+    def all_customers(self) -> list[tuple[str, str]]:
+        out = []
+        for pairs in self.cus.values():
+            for item in pairs:
+                if item not in out:
+                    out.append(item)
+        return out
+
+    def all_suppliers(self) -> list[tuple[str, str]]:
+        out = []
+        for pairs in self.sup.values():
+            for item in pairs:
+                if item not in out:
+                    out.append(item)
+        return out
+
     def customer(self, name: str):
         return unique_lookup(self.cus, name)
 
+    def match_customer(self, name: str, applicant: str = "", alias_map: dict | None = None):
+        records = self.all_customers()
+        if names.maps_to_police_ministry(name, applicant):
+            hit = names.by_code(records, names.POLICE_CODE)
+            return (hit, None) if hit else (None, "none")
+        if names.is_person_heading(name):
+            hit = names.by_code(records, names.PERSON_CODE)
+            return (hit, None) if hit else (None, "none")
+        alias_map = alias_map or {}
+        query = alias_map.get(name, name)
+        got = names.match_records(query, records)
+        if got.status == "ok":
+            return got.hit, None
+        if query != name:
+            got = names.match_records(name, records)
+            if got.status == "ok":
+                return got.hit, None
+        if got.status == "many":
+            return None, "many"
+        return None, "none"
+
     def employee(self, name: str):
         return unique_lookup(self.emp, name)
+
+    def match_employee(self, name: str, hang: dict | None = None):
+        mapped = names.hang_employee(name, hang or {})
+        return unique_lookup(self.emp, mapped)
 
     def department(self, code: str):
         code = code_str(code)
@@ -233,7 +309,17 @@ class Master:
         return (code, name), None
 
     def supplier_fuzzy(self, name: str):
-        keys = [name, strip_ge(name)]
+        got = names.match_records(name, self.all_suppliers())
+        if got.status == "ok":
+            return got.hit, None
+        stripped = strip_ge(name)
+        if stripped != name:
+            got = names.match_records(stripped, self.all_suppliers())
+            if got.status == "ok":
+                return got.hit, None
+        if got.status == "many":
+            return None, "many"
+        keys = [name, stripped]
         seen = []
         for k in keys:
             hits = self.sup.get(norm_name(k)) or []
@@ -386,11 +472,12 @@ def sales_sheet(wb) -> str | None:
     return None
 
 
-def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str) -> list[VoucherLine]:
+def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str, period_fetch=None) -> list[VoucherLine]:
     cfg = rules.get("sales") or {}
     tax_account = str(cfg.get("tax_account") or "21710105")
     divisor = Decimal(str(rules.get("tax_rate_divisor") or "1.06"))
     alias_map = load_customer_alias()
+    hang = load_emp_hang()
     wb_f = load_workbook(path, data_only=False)
     wb_v = load_workbook(path, data_only=True)
     sheet = sales_sheet(wb_f)
@@ -463,24 +550,26 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             lines.append(line)
             continue
         dept, dep_name = dhit
-        ehit, eerr = master.employee(applicant)
+        ehit, eerr = master.match_employee(applicant, hang)
         if not ehit:
             line.status, line.reason = "待确认", "职员档案一对多" if eerr == "many" else "职员档案没有此人"
             lines.append(line)
             continue
         emp_code, emp_name = ehit
-        lookup_name = alias_map.get(unit, unit)
-        chit, cerr = master.customer(lookup_name)
+        chit, cerr = master.match_customer(unit, applicant, alias_map)
         if not chit:
-            chit, cerr = master.customer(unit)
-        if not chit:
-            line.status, line.reason = "待确认", "客户档案一对多" if cerr == "many" else "客户档案没有此抬头"
+            line.status = "待确认"
+            line.reason = "客户档案一对多" if cerr == "many" else "客户档案没有此抬头，请斯佳确认是否新建"
             lines.append(line)
             continue
         cus_code, cus_name = chit
-        ar, rev, why = lookup_mod.resolve_ar(lookup_name, inv_day, cus_code, box)
+        ar, rev, why = lookup_mod.resolve_ar(cus_code, inv_day, box)
+        if (not ar) and callable(period_fetch):
+            period_fetch(box, cus_code, inv_day, list(box.ar_accounts))
+            ar, rev, why = lookup_mod.resolve_ar(cus_code, inv_day, box)
         if not ar or not rev:
-            line.status, line.reason = "待确认", why or "缺科目编码"
+            line.status = "待确认"
+            line.reason = why or "缺科目编码"
             lines.append(line)
             continue
         aux = {
@@ -670,9 +759,10 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
     return lines
 
 
-def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str) -> list[VoucherLine]:
+def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str, period_fetch=None) -> list[VoucherLine]:
     cfg = rules.get("receipt") or {}
     alias_map = load_customer_alias()
+    hang = load_emp_hang()
     wb_f = load_workbook(path, data_only=False)
     wb_v = load_workbook(path, data_only=True)
     ws_f = wb_f[wb_f.sheetnames[0]]
@@ -704,10 +794,6 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box,
             expl=f"收：{cust}",
             extra={"客户名称": cust},
         )
-        if "平度" in cust and "公安" in cust:
-            line.status, line.reason = "待确认", "平度公安不猜"
-            lines.append(line)
-            continue
         if amt is None:
             line.status, line.reason = "待确认", "缺金额"
             lines.append(line)
@@ -716,12 +802,10 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box,
             line.status, line.reason = "待确认", "缺部门编码"
             lines.append(line)
             continue
-        lookup_name = alias_map.get(cust, cust)
-        chit, cerr = master.customer(lookup_name)
+        chit, cerr = master.match_customer(cust, "", alias_map)
         if not chit:
-            chit, cerr = master.customer(cust)
-        if not chit:
-            line.status, line.reason = "待确认", "客户档案一对多" if cerr == "many" else "客户档案没有此抬头"
+            line.status = "待确认"
+            line.reason = "客户档案一对多" if cerr == "many" else "客户档案没有此抬头，请斯佳确认是否新建"
             lines.append(line)
             continue
         cus_code, cus_name = chit
@@ -731,18 +815,21 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box,
             lines.append(line)
             continue
         dept, dep_name = dhit
-        ar, _rev, why = lookup_mod.resolve_ar(lookup_name, rec_day, cus_code, box)
+        ar, _rev, why = lookup_mod.resolve_ar(cus_code, rec_day, box)
+        if (not ar) and callable(period_fetch):
+            period_fetch(box, cus_code, rec_day, list(box.ar_accounts))
+            ar, _rev, why = lookup_mod.resolve_ar(cus_code, rec_day, box)
         if not ar:
             line.status, line.reason = "待确认", why or "缺科目编码"
             lines.append(line)
             continue
-        sales, swhy = lookup_mod.resolve_sales(lookup_name, rec_day, amt, box)
+        sales, swhy = lookup_mod.resolve_sales_any([cus_name, cust, alias_map.get(cust, cust)], rec_day, amt, box)
         if not sales:
             line.status, line.reason = "待确认", swhy or "找不到销售"
             lines.append(line)
             continue
         line.extra["销售"] = sales
-        ehit, eerr = master.employee(sales)
+        ehit, eerr = master.match_employee(sales, hang)
         emp_code = emp_name = ""
         if ehit:
             emp_code, emp_name = ehit
@@ -794,6 +881,7 @@ def run_dir(
     booking: str | None,
     master_data: dict | None,
     lookups: dict | None = None,
+    period_fetch=None,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
@@ -807,14 +895,14 @@ def run_dir(
     files = report["files"]
     if scene == "销项发票":
         src = Path(files["invoice"])
-        lines = convert_sales(src, master, rules, aliases, box, day)
+        lines = convert_sales(src, master, rules, aliases, box, day, period_fetch=period_fetch)
         return write_outputs(input_dir, scene, lines, rules, day, src.stem)
     if scene == "付款":
         src = Path(files["ledger"])
         lines = convert_payment(input_dir, src, master, rules, aliases)
         return write_outputs(input_dir, scene, lines, rules, day, src.stem)
     src = Path(files["receipt"])
-    lines = convert_receipt(src, master, rules, aliases, box, day)
+    lines = convert_receipt(src, master, rules, aliases, box, day, period_fetch=period_fetch)
     return write_outputs(input_dir, scene, lines, rules, day, src.stem)
 
 
@@ -845,18 +933,32 @@ def main(argv=None) -> int:
             reason = "本机没有金蝶应用号" if loaded.get("missing_credentials") else loaded.get("error") or "读取失败"
             log(f"总部档案未核验（{reason}）；未生成引入表。请检查本机应用号和只读权限后重试。")
             return 2
-    lookups = None
+    lookups = {}
     if args.lookups:
         lookups = json.loads(Path(args.lookups).read_text(encoding="utf-8"))
     else:
-        loaded_zy = zhiyun_api.try_load_lookups()
-        if not loaded_zy.get("ok"):
-            reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
-            log(f"智云查找未核验（{reason}）；未生成引入表。请检查本机 zhiyun.local.json 后重试。")
-            return 2
-        lookups = loaded_zy["data"]
+        scene = args.scene
+        if not scene:
+            inspected = inspect_mod.inspect_dir(root, None)
+            scene = inspected.get("scene") if inspected.get("ready") else None
+        if scene == "收款":
+            loaded_zy = zhiyun_api.try_load_lookups()
+            if not loaded_zy.get("ok"):
+                reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
+                log(f"智云查找未核验（{reason}）；未生成引入表。请检查本机 zhiyun.local.json 后重试。")
+                return 2
+            lookups = loaded_zy.get("data") or {}
+    fill_period = None
+    if not args.master:
+
+        def fill_period(box, cus_code, day, accounts):
+            got = kingdee_api.try_fetch_customer_ar(cus_code, accounts, lookup_mod.period_month(day))
+            if got.get("ok"):
+                box.ar_balance.update(got.get("balances") or {})
+                box.period_debit.update(got.get("period_debit") or got.get("data") or {})
+
     try:
-        result = run_dir(root, args.scene, args.date, master_data, lookups)
+        result = run_dir(root, args.scene, args.date, master_data, lookups, period_fetch=fill_period)
     except SystemExit as e:
         log(str(e))
         return 2

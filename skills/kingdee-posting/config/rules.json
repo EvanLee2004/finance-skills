@@ -29,5 +29,6 @@
     "bank_account": "100201",
     "pack_size": 10,
     "pack_keep_consecutive": true
-  }
+  },
+  "ar_accounts": ["113101", "113102", "113103", "113107"]
 }

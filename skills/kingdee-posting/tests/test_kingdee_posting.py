@@ -33,28 +33,52 @@ kingdee_api = _load("kingdee_posting_api", SCRIPTS / "kingdee_api.py")
 
 def _master():
     return {
-        "employee": [{"code": "103", "name": "于占国"}, {"code": "011", "name": "陈霞"}, {"code": "113", "name": "项目总监"}],
-        "department": [{"code": "15", "name": "本地化事业部"}, {"code": "0405", "name": "项目总监及助理"}],
+        "employee": [
+            {"code": "103", "name": "于占国"},
+            {"code": "011", "name": "陈霞"},
+            {"code": "113", "name": "项目总监"},
+            {"code": "205", "name": "郑瑞"},
+        ],
+        "department": [
+            {"code": "15", "name": "本地化事业部"},
+            {"code": "0405", "name": "项目总监及助理"},
+            {"code": "0308", "name": "商务中心"},
+        ],
         "customer": [
             {"code": "1001", "name": "甲科技有限公司"},
             {"code": "2001", "name": "国广国际在线网络（北京）有限公司"},
-            {"code": "2002", "name": "中国广播电影电视交易中心"},
+            {"code": "2002", "name": "中国广播电影电视节目交易中心"},
             {"code": "2003", "name": "商务部培训中心（商务部国际商务官员研修学院）"},
+            {"code": "0582", "name": "个人"},
+            {"code": "0386", "name": "公安部"},
+            {"code": "1940", "name": "北京市公安局海淀分局"},
+            {"code": "9001", "name": "乙科技有限公司乙科技有限公司"},
         ],
         "supplier": [{"code": "8001", "name": "北京某翻译店"}, {"code": "9999", "name": "其他供应商"}],
     }
 
 
-def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, order_sales=None, period_debit=None):
-    lines = customer_lines if customer_lines is not None else {
-        "甲科技有限公司": ["ICT"],
-        "国广国际在线网络（北京）有限公司": ["ICT"],
-        "中国广播电影电视交易中心": ["ICT"],
-        "商务部培训中心（商务部国际商务官员研修学院）": ["ICT"],
-    }
+def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, order_sales=None, period_debit=None, ar_balance=None):
+    lines = customer_lines if customer_lines is not None else {}
     for name in extra_customers or []:
-        lines.setdefault(name, ["ICT"])
+        lines.setdefault(name, [])
+    balances = ar_balance
+    if balances is None:
+        balances = [
+            {"customer_code": "1001", "account": "113103", "balance": "1"},
+            {"customer_code": "2001", "account": "113103", "balance": "1"},
+            {"customer_code": "2002", "account": "113103", "balance": "1"},
+            {"customer_code": "2003", "account": "113103", "balance": "1"},
+            {"customer_code": "0582", "account": "113103", "balance": "1"},
+            {"customer_code": "0386", "account": "113103", "balance": "1"},
+            {"customer_code": "1940", "account": "113103", "balance": "1"},
+            {"customer_code": "9001", "account": "113103", "balance": "1"},
+        ]
+        for i, _name in enumerate(extra_customers or []):
+            balances.append({"customer_code": str(3000 + i), "account": "113103", "balance": "1"})
     return {
+        "ar_accounts": ["113101", "113102", "113103", "113107"],
+        "ar_balance": balances,
         "customer_lines": lines,
         "receipt_sales": receipt_sales
         if receipt_sales is not None
@@ -62,6 +86,11 @@ def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, orde
             {"customer": "甲科技有限公司", "date": "2026-08-01", "amount": "10.00", "sales": ["于占国"]},
             {"customer": "国广国际在线网络（北京）有限公司", "date": "2026-08-01", "amount": "20.00", "sales": ["没有这个人"]},
             {"customer": "中国广播电影电视交易中心", "date": "2026-08-01", "amount": "10.00", "sales": ["于占国"]},
+            {"customer": "中国广播电影电视节目交易中心", "date": "2026-08-01", "amount": "10.00", "sales": ["于占国"]},
+            {"customer": "公安部", "date": "2026-08-01", "amount": "30.00", "sales": ["于占国"]},
+            {"customer": "平度市公安局", "date": "2026-08-01", "amount": "30.00", "sales": ["于占国"]},
+            {"customer": "个人", "date": "2026-08-01", "amount": "10.00", "sales": ["于占国"]},
+            {"customer": "北京市公安局海淀分局", "date": "2026-08-01", "amount": "10.00", "sales": ["陈霞"]},
         ],
         "order_sales": order_sales if order_sales is not None else {"甲科技有限公司": ["于占国"]},
         "period_debit": period_debit or [],
@@ -195,9 +224,14 @@ def test_sales_no_invoice_no_column(tmp_path):
 
 def test_sales_no_business_line_holds(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()])
-    result = _run(tmp_path, "销项发票", lookups=_lookups(customer_lines={}))
+    result = _run(tmp_path, "销项发票", lookups=_lookups(ar_balance=[]))
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "金蝶往来" in reason
+    assert "无业务线" not in reason
 
 
 def test_sales_unknown_customer_holds(tmp_path):
@@ -205,6 +239,10 @@ def test_sales_unknown_customer_holds(tmp_path):
     result = _run(tmp_path, "销项发票")
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "请斯佳确认是否新建" in reason
 
 
 def test_sales_tax_no_aux_and_balance(tmp_path):
@@ -311,14 +349,15 @@ def test_receipt_pack_alias_pingdu_and_empty_emp(tmp_path):
     rows.append(["2026-08-01", "平度市公安局", 30, "于占国", "15", "113101"])
     _write_receipt(tmp_path / "收款.xlsx", rows)
     result = _run(tmp_path, "收款")
-    assert result["hold_count"] == 1
-    assert result["bookable_count"] == 11
+    assert result["hold_count"] == 0
+    assert result["bookable_count"] == 12
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
-    nums = _voucher_nums(result["kingdee_path"], 22)
+    nums = _voucher_nums(result["kingdee_path"], 24)
     assert nums.count(1) == 20
-    names = [ws.cell(r, 19).value for r in range(4, 30)]
+    names = [ws.cell(r, 19).value for r in range(4, 40)]
     assert "国广国际在线网络（北京）有限公司" in names
+    assert "公安部" in names
     assert "平度市公安局" not in names
     emp_codes = [ws.cell(r, 24).value for r in range(4, 30)]
     assert "103" in emp_codes
@@ -431,6 +470,177 @@ def test_sign_plain_path_encoding():
     assert plain.endswith("\n")
 
 
+class _FakeResp:
+    def __init__(self, payload, status=200):
+        self.status_code = status
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_pick_authorize_row_keeps_hq_not_empty_books():
+    rows = [
+        {
+            "status": 1,
+            "accountId": "1783670301378479516",
+            "serviceId": "7914379139221",
+            "appKey": "8uVREFRV",
+            "appSecret": "empty-secret",
+        },
+        {
+            "status": 1,
+            "accountId": "1783803326505631821",
+            "serviceId": "795589109148",
+            "appKey": "KZbQMo3T",
+            "appSecret": "hq-secret",
+        },
+    ]
+    creds = {
+        "account_id": "1783803326505631821",
+        "service_id": "795589109148",
+        "app_key": "KZbQMo3T",
+    }
+    got = kingdee_api.pick_authorize_row(rows, creds)
+    assert got is not None
+    assert got["appKey"] == "KZbQMo3T"
+    assert got["serviceId"] == "795589109148"
+
+
+def test_get_app_token_refreshes_stale_app_secret(tmp_path, monkeypatch):
+    local = tmp_path / "kingdee.local.json"
+    creds = {
+        "client_id": "357164",
+        "client_secret": "x" * 32,
+        "app_key": "KZbQMo3T",
+        "app_secret": "old-secret",
+        "account_id": "1783803326505631821",
+        "service_id": "795589109148",
+        "outer_instance_id": "572594141763080192",
+    }
+    local.write_text(json.dumps(creds), encoding="utf-8")
+    monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(local))
+    paths = []
+
+    def fake_request(method, url, used, path, params=None, extra_headers=None, timeout=30):
+        paths.append((method, path))
+        if path == kingdee_api.AUTH_PATH:
+            if used.get("app_secret") == "new-hq-secret":
+                return _FakeResp({"data": {"app-token": "tok", "domain": "https://tf.jdy.com"}})
+            return _FakeResp({"errcode": 1030002006, "description": "授权密钥校验失败", "data": None})
+        if path == kingdee_api.AUTHORIZE_PATH:
+            return _FakeResp(
+                {
+                    "code": 200,
+                    "data": [
+                        {
+                            "status": 1,
+                            "accountId": "1783670301378479516",
+                            "serviceId": "7914379139221",
+                            "appKey": "8uVREFRV",
+                            "appSecret": "empty-secret",
+                            "accessToken": "do-not-save",
+                        },
+                        {
+                            "status": 1,
+                            "accountId": "1783803326505631821",
+                            "serviceId": "795589109148",
+                            "appKey": "KZbQMo3T",
+                            "appSecret": "new-hq-secret",
+                            "accountName": "总部",
+                            "agreementCompanyName": "总部",
+                            "domain": "https://tf.jdy.com",
+                            "outerInstanceId": "572594141763080192",
+                            "groupName": "ns-t33w",
+                            "accessToken": "do-not-save",
+                            "appToken": "do-not-save",
+                        },
+                    ],
+                }
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(kingdee_api, "_request", fake_request)
+    token, domain = kingdee_api.get_app_token(creds)
+    assert token == "tok"
+    assert domain == "https://tf.jdy.com"
+    saved = json.loads(local.read_text(encoding="utf-8"))
+    assert saved["app_secret"] == "new-hq-secret"
+    assert saved["account_id"] == "1783803326505631821"
+    assert saved["service_id"] == "795589109148"
+    assert "accessToken" not in saved
+    assert "appToken" not in saved
+    assert ( "POST", kingdee_api.AUTHORIZE_PATH) in paths
+    assert paths[-1] == ("GET", kingdee_api.AUTH_PATH)
+
+
+def test_voucher_ar_reads_customer_assist(tmp_path, monkeypatch):
+    from decimal import Decimal
+
+    local = tmp_path / "kingdee.local.json"
+    local.write_text(
+        json.dumps(
+            {
+                "client_id": "357164",
+                "client_secret": "x" * 32,
+                "app_key": "KZbQMo3T",
+                "app_secret": "s" * 40,
+                "account_id": "1783803326505631821",
+                "service_id": "795589109148",
+                "outer_instance_id": "572594141763080192",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(local))
+    monkeypatch.setenv("KINGDEE_AR_CACHE", str(tmp_path / "ar.json"))
+    monkeypatch.setattr(kingdee_api, "get_app_token", lambda creds: ("tok", "https://tf.jdy.com"))
+
+    def fake_request(method, url, used, path, params=None, extra_headers=None, timeout=30):
+        if path == "/jdy/v2/fi/voucher":
+            return _FakeResp({"errcode": 0, "data": {"rows": [{"id": "v1", "period": "202608"}], "count": 1}})
+        if path == "/jdy/v2/fi/voucher_detail":
+            return _FakeResp(
+                {
+                    "errcode": 0,
+                    "data": {
+                        "period": "202608",
+                        "entry_list": [
+                            {
+                                "account_number": "113103",
+                                "debit_amount": "80",
+                                "credit_amount": "0",
+                                "assist": [{"type": "bd_customer", "number": "1001"}],
+                            },
+                            {
+                                "account_number": "113102",
+                                "debit_amount": "10",
+                                "credit_amount": "0",
+                                "assist": [{"type": "bd_customer", "number": "1001"}],
+                            },
+                        ],
+                    },
+                }
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(kingdee_api, "_request", fake_request)
+    got = kingdee_api.try_fetch_customer_ar("1001", ["113101", "113102", "113103"], "2026-08")
+    assert got["ok"] is True
+    assert got["balances"][("1001", "113103")] == Decimal("80.00")
+    assert got["period_debit"][("1001", "113103", "2026-08")] == Decimal("80.00")
+    empty = kingdee_api.try_fetch_customer_ar("9999", ["113103"], "2026-08")
+    assert empty["ok"] is True
+    assert empty["balances"] == {}
+
+
+def test_repo_venv_python_exists():
+    got = convert.repo_venv_python()
+    assert got is not None
+    assert got.is_file()
+    assert Path(sys.prefix).resolve() == got.parent.parent.resolve()
+
+
 def test_cli_inspect_then_convert(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     assert convert.main(["--inspect", "--input-dir", str(tmp_path), "--scene", "销项发票"]) == 0
@@ -502,7 +712,10 @@ def test_sales_multi_line_uses_period_debit(tmp_path):
         tmp_path,
         "销项发票",
         lookups=_lookups(
-            customer_lines={"甲科技有限公司": ["ICT", "游戏综合本地化"]},
+            ar_balance=[
+                {"customer_code": "1001", "account": "113103", "balance": "1"},
+                {"customer_code": "1001", "account": "113102", "balance": "1"},
+            ],
             period_debit=[
                 {"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "90"},
                 {"customer_code": "1001", "account": "113102", "period": "2026-08", "debit": "10"},
@@ -560,8 +773,39 @@ def test_receipt_order_fallback_and_dual_sales(tmp_path):
     assert "斯佳" in reason
 
 
-def test_cli_refuses_without_zhiyun_lookups(tmp_path, monkeypatch):
+def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    master = tmp_path / "master.json"
+    lookups = tmp_path / "lookups.json"
+    master.write_text(json.dumps(_master()), encoding="utf-8")
+    lookups.write_text(json.dumps(_lookups()), encoding="utf-8")
+    monkeypatch.setattr(
+        convert.zhiyun_api,
+        "try_load_lookups",
+        lambda: (_ for _ in ()).throw(AssertionError("销项不应访问智云")),
+    )
+    assert (
+        convert.main(
+            [
+                "--input-dir",
+                str(tmp_path),
+                "--scene",
+                "销项发票",
+                "--master",
+                str(master),
+                "--lookups",
+                str(lookups),
+                "--date",
+                "2026-08-27",
+            ]
+        )
+        == 0
+    )
+    assert (tmp_path / "凭证引入_结果.xlsx").exists()
+
+
+def test_cli_receipt_refuses_without_zhiyun_lookups(tmp_path, monkeypatch):
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
     master = tmp_path / "master.json"
     master.write_text(json.dumps(_master()), encoding="utf-8")
     monkeypatch.setattr(
@@ -570,7 +814,7 @@ def test_cli_refuses_without_zhiyun_lookups(tmp_path, monkeypatch):
         lambda: {"ok": False, "missing_credentials": True, "data": None},
     )
     assert convert.main(
-        ["--input-dir", str(tmp_path), "--scene", "销项发票", "--master", str(master)]
+        ["--input-dir", str(tmp_path), "--scene", "收款", "--master", str(master)]
     ) == 2
     assert not (tmp_path / "凭证引入_结果.xlsx").exists()
 
@@ -599,3 +843,184 @@ def test_cli_lookups_file_converts(tmp_path):
         == 0
     )
     assert (tmp_path / "凭证引入_结果.xlsx").exists()
+
+
+def test_sales_programme_peels_limited_company(tmp_path):
+    _write_sales(
+        tmp_path / "发票.xlsx",
+        [_ok_sales(name="中国广播电影电视节目交易中心有限公司")],
+        with_org=False,
+    )
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    names = [ws.cell(r, 19).value for r in range(4, 7)]
+    assert "中国广播电影电视节目交易中心" in names
+    kd.close()
+
+
+def test_sales_doubled_archive_name(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name="乙科技有限公司")], with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+
+
+def test_sales_person_heading_uses_personal_customer(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name="刘芳")], with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    names = [ws.cell(r, 19).value for r in range(4, 7)]
+    assert "个人" in names
+    kd.close()
+
+
+def test_sales_police_maps_ministry_except_haidian_chenxia(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name="平度市公安局")], with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    names = [ws.cell(r, 19).value for r in range(4, 7)]
+    assert "公安部" in names
+    kd.close()
+    _write_sales(
+        tmp_path / "海淀.xlsx",
+        [_ok_sales(name="北京市公安局海淀分局", app="陈霞")],
+        with_org=False,
+    )
+    # mixed folder would confuse inspect; use dedicated dir via rewriting same 发票.xlsx
+    _write_sales(
+        tmp_path / "发票.xlsx",
+        [_ok_sales(name="北京市公安局海淀分局", app="陈霞")],
+        with_org=False,
+    )
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    names = [ws.cell(r, 19).value for r in range(4, 7)]
+    assert "北京市公安局海淀分局" in names
+    kd.close()
+
+
+def test_sales_hang_tong_zhao_to_zheng(tmp_path):
+    _write_sales(
+        tmp_path / "发票.xlsx",
+        [_ok_sales(app="童睿智"), _ok_sales(app="赵贺斌", inv="2")],
+        with_org=False,
+    )
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 2
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    emps = [str(ws.cell(r, 24).value or "") for r in range(4, 10)]
+    assert emps.count("205") >= 2
+    kd.close()
+
+
+def test_receipt_person_and_police(tmp_path):
+    _write_receipt(
+        tmp_path / "收款.xlsx",
+        [
+            ["2026-08-01", "刘芳", 10, "于占国", "15", "113101"],
+            ["2026-08-01", "平度市公安局", 30, "于占国", "15", "113101"],
+        ],
+    )
+    result = _run(tmp_path, "收款")
+    assert result["bookable_count"] == 2
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    names = [ws.cell(r, 19).value for r in range(4, 10)]
+    assert "个人" in names
+    assert "公安部" in names
+    kd.close()
+
+
+def test_payment_peels_limited_company(tmp_path, monkeypatch):
+    vendor = "北京某翻译店有限公司"
+    _write_pay(tmp_path / "付款.xlsx", [[vendor, 106, vendor]])
+    folder = tmp_path / vendor
+    folder.mkdir()
+    _dummy_pdf(folder / "a.pdf")
+    monkeypatch.setattr(
+        convert,
+        "parse_invoice_pdf",
+        lambda p: {"kind": "专票", "seller": vendor, "total": Decimal("106.00"), "tax": Decimal("6.00")},
+    )
+    result = _run(tmp_path, "付款")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    codes = [ws.cell(r, 20).value for r in range(4, 8)]
+    kd.close()
+    assert "8001" in codes
+
+
+def test_sales_unmapped_employee_holds(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(app="杨利宏")], with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "职员" in reason
+
+
+def test_expired_cache_not_used_when_auth_fails(tmp_path, monkeypatch):
+    cache = tmp_path / "kingdee-master.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "cached_at": time.time() - 3600,
+                "data": {
+                    "customer": [{"code": "1", "name": "缓存客户"}],
+                    "employee": [],
+                    "supplier": [],
+                    "department": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KINGDEE_MASTER_CACHE", str(cache))
+    monkeypatch.setenv("KINGDEE_MASTER_CACHE_TTL_SECONDS", "900")
+    monkeypatch.setattr(
+        kingdee_api,
+        "load_local",
+        lambda: {"client_id": "x", "client_secret": "x", "app_key": "x", "app_secret": "x"},
+    )
+    monkeypatch.setattr(
+        kingdee_api,
+        "get_app_token",
+        lambda creds: (_ for _ in ()).throw(RuntimeError("auth missing data errcode=1030002006")),
+    )
+    loaded = kingdee_api.try_load_master()
+    assert loaded["ok"] is False
+    assert loaded.get("source") != "cache"
+
+
+def test_period_debit_fetch_is_called_when_injected_missing(tmp_path):
+    called = {}
+
+    def fetch(box, cus_code, day, accounts):
+        called["ok"] = True
+        box.ar_balance[(cus_code, "113103")] = Decimal("80")
+        box.ar_balance[(cus_code, "113102")] = Decimal("10")
+        box.period_debit[(cus_code, "113103", "2026-08")] = Decimal("80")
+        box.period_debit[(cus_code, "113102", "2026-08")] = Decimal("10")
+
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    result = convert.run_dir(
+        tmp_path,
+        "销项发票",
+        "2026-08-27",
+        _master(),
+        _lookups(ar_balance=[]),
+        period_fetch=fetch,
+    )
+    assert called.get("ok") is True
+    assert result["bookable_count"] == 1

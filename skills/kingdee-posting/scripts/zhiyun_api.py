@@ -137,6 +137,56 @@ def _fetch_sheet(fo, post, worksheet_id: str, app_id: str) -> list[dict]:
     return fo.rows_to_records(raw, controls)
 
 
+def _login_browser(zy: dict):
+    """优先本机 Chrome，不再 download Chromium。"""
+    from playwright.sync_api import sync_playwright
+
+    base = zy.get("base_url") or DEFAULT_BASE
+    user = zy.get("username")
+    pwd = zy.get("password")
+    if not (base and user and pwd):
+        raise RuntimeError("智云配置缺账号")
+    with sync_playwright() as p:
+        try:
+            br = p.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            br = p.chromium.launch(headless=True)
+        try:
+            ctx = br.new_context(ignore_https_errors=True)
+            pg = ctx.new_page()
+            pg.goto(base, wait_until="networkidle", timeout=30000)
+            pg.fill("#txtMobilePhone", user)
+            pg.fill("input[type=password]", pwd)
+            clicked = False
+            for sel in ("text=登 录", "text=登录", ".loginBtn"):
+                try:
+                    pg.click(sel, timeout=2500)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+            if not clicked:
+                pg.keyboard.press("Enter")
+            pg.wait_for_timeout(6000)
+            token = None
+            for c in ctx.cookies():
+                if c["name"] == "md_pss_id" and c.get("value"):
+                    token = c["value"]
+                    break
+            if not token:
+                raise RuntimeError("登录后未取到 md_pss_id")
+            account_id = None
+            try:
+                account_id = pg.evaluate(
+                    "() => { try { return md.global.Account.accountId || null; } catch(e) { return null; } }"
+                )
+            except Exception:
+                account_id = None
+            return token, account_id
+        finally:
+            br.close()
+
+
 def try_load_lookups() -> dict:
     cfg = load_local()
     if not cfg:
@@ -145,7 +195,10 @@ def try_load_lookups() -> dict:
         fo = _fetch_mod()
         zy = _worksheet_cfg(cfg)
         if not zy["md_pss_id"]:
-            token, account_id = fo.login(zy)
+            try:
+                token, account_id = _login_browser(zy)
+            except Exception:
+                token, account_id = fo.login(zy)
             zy["md_pss_id"] = token
             if account_id:
                 zy["account_id"] = account_id

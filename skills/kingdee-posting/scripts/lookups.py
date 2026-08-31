@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""预处理查找：业务线→科目、回款/下单销售。合成测试注入，不访问网络。"""
+"""预处理查找：金蝶 1131xx 往来定科目、回款/下单销售。合成测试注入，不访问网络。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Iterable
-
 TWOPLACES = Decimal("0.01")
 
 
@@ -55,6 +53,8 @@ def amt_key(value) -> str:
 @dataclass
 class LookupBox:
     customer_lines: dict[str, list[str]] = field(default_factory=dict)
+    ar_accounts: list[str] = field(default_factory=list)
+    ar_balance: dict[tuple[str, str], Decimal] = field(default_factory=dict)
     period_debit: dict[tuple[str, str, str], Decimal] = field(default_factory=dict)
     receipt_sales: dict[tuple[str, str, str], list[str]] = field(default_factory=dict)
     order_sales: dict[str, list[str]] = field(default_factory=dict)
@@ -62,7 +62,18 @@ class LookupBox:
     line_accounts: dict[str, str] = field(default_factory=dict)
 
     def lines_for(self, customer: str) -> list[str]:
-        return list(self.customer_lines.get(norm_name(customer)) or [])
+        n = norm_name(customer)
+        if n in self.customer_lines:
+            return list(self.customer_lines[n])
+        peeled = n
+        for suf in ("股份有限公司", "有限责任公司", "有限公司"):
+            if peeled.endswith(suf) and len(peeled) > len(suf) + 1:
+                peeled = peeled[: -len(suf)]
+                break
+        keys = [k for k in self.customer_lines if k == peeled or k.endswith(peeled) or peeled.endswith(k)]
+        if len(keys) == 1:
+            return list(self.customer_lines[keys[0]])
+        return []
 
     def order_sales_for(self, customer: str) -> list[str]:
         return list(self.order_sales.get(norm_name(customer)) or [])
@@ -72,8 +83,21 @@ class LookupBox:
         return list(self.receipt_sales.get(key) or [])
 
 
-def box_from_dict(raw: dict | None, line_accounts: dict, applicant_dept: dict) -> LookupBox:
+def box_from_dict(raw: dict | None, ar_or_lines, applicant_dept: dict) -> LookupBox:
     raw = raw or {}
+    if isinstance(ar_or_lines, dict):
+        ar_accounts = []
+        for v in ar_or_lines.values():
+            acc = str(v or "").strip()
+            if acc and acc not in ar_accounts:
+                ar_accounts.append(acc)
+    else:
+        ar_accounts = [str(x).strip() for x in (ar_or_lines or []) if str(x).strip()]
+    extra = raw.get("ar_accounts") or []
+    for acc in extra:
+        acc = str(acc).strip()
+        if acc and acc not in ar_accounts:
+            ar_accounts.append(acc)
     lines = {}
     for name, vals in (raw.get("customer_lines") or {}).items():
         cleaned = []
@@ -82,6 +106,13 @@ def box_from_dict(raw: dict | None, line_accounts: dict, applicant_dept: dict) -
             if s and s not in cleaned:
                 cleaned.append(s)
         lines[norm_name(name)] = cleaned
+    balances = {}
+    for item in raw.get("ar_balance") or []:
+        cus = str(item.get("customer_code") or "").strip()
+        acc = str(item.get("account") or "").strip()
+        val = money(item.get("balance"))
+        if cus and acc and val is not None:
+            balances[(cus, acc)] = val
     debit = {}
     for item in raw.get("period_debit") or []:
         cus = str(item.get("customer_code") or "").strip()
@@ -111,61 +142,53 @@ def box_from_dict(raw: dict | None, line_accounts: dict, applicant_dept: dict) -
         orders[norm_name(name)] = sales
     return LookupBox(
         customer_lines=lines,
+        ar_accounts=ar_accounts,
+        ar_balance=balances,
         period_debit=debit,
         receipt_sales=rec,
         order_sales=orders,
         applicant_dept={k: str(v).strip() for k, v in applicant_dept.items() if not str(k).startswith("_") and v},
-        line_accounts={k: str(v).strip() for k, v in line_accounts.items() if not str(k).startswith("_") and v},
+        line_accounts={},
     )
 
 
-def pick_line_account(lines: Iterable[str], mapping: dict[str, str]) -> tuple[str | None, str | None]:
-    accs = []
-    for line in lines:
-        acc = mapping.get(line)
-        if not acc:
-            return None, "业务线无科目对照"
-        if acc not in accs:
-            accs.append(acc)
-    if not accs:
-        return None, "客户无业务线"
-    if len(accs) == 1:
-        return accs[0], None
-    return None, "multi"
-
-
-def resolve_ar(customer: str, invoice_day: str, customer_code: str, box: LookupBox) -> tuple[str, str, str]:
-    """返回 (应收, 收入, 失败原因)。失败时前两空。"""
-    lines = box.lines_for(customer)
-    if not lines:
-        return "", "", "客户无业务线"
-    ar, why = pick_line_account(lines, box.line_accounts)
-    if ar:
+def resolve_ar(customer_code: str, invoice_day: str, box: LookupBox) -> tuple[str, str, str]:
+    """返回 (应收, 收入, 失败原因)。科目只看金蝶该客户 1131xx 往来。"""
+    code = str(customer_code or "").strip()
+    if not code:
+        return "", "", "金蝶往来没有此客户应收"
+    accounts = [str(a).strip() for a in (box.ar_accounts or []) if str(a).strip()]
+    nonzero = []
+    for acc in accounts:
+        bal = box.ar_balance.get((code, acc))
+        if bal is not None and bal != 0:
+            nonzero.append(acc)
+    if len(nonzero) == 1:
+        ar = nonzero[0]
         rev = income_of(ar)
         if not rev:
             return "", "", "收入科目无法从应收推导"
         return ar, rev, ""
-    if why != "multi":
-        return "", "", why or "客户无业务线"
+    if not nonzero:
+        return "", "", "金蝶往来没有此客户应收"
     period = period_month(invoice_day)
-    if not period or not customer_code:
-        return "", "", "多业务线且本期借方不可用"
+    if not period:
+        return "", "", "金蝶往来本期借方不可用"
     scored = []
-    for line in lines:
-        acc = box.line_accounts.get(line)
-        if not acc:
-            return "", "", "业务线无科目对照"
-        debit = box.period_debit.get((customer_code, acc, period))
+    for acc in nonzero:
+        debit = box.period_debit.get((code, acc, period))
         if debit is None:
-            return "", "", "多业务线且本期借方不可用"
+            return "", "", "金蝶往来本期借方不可用"
         scored.append((debit, acc))
     scored.sort(key=lambda x: x[0], reverse=True)
-    if not scored:
-        return "", "", "多业务线且本期借方不可用"
     if len(scored) > 1 and scored[0][0] == scored[1][0]:
-        return "", "", "多业务线本期借方不唯一"
+        return "", "", "金蝶往来本期借方不唯一"
     ar = scored[0][1]
     return ar, income_of(ar), ""
+
+
+def resolve_ar_any(customers, invoice_day: str, customer_code: str, box: LookupBox) -> tuple[str, str, str]:
+    return resolve_ar(customer_code, invoice_day, box)
 
 
 def resolve_sales(customer: str, day: str, amount, box: LookupBox) -> tuple[str, str]:
@@ -181,6 +204,21 @@ def resolve_sales(customer: str, day: str, amount, box: LookupBox) -> tuple[str,
     if len(orders) > 1:
         return "", "下单对上两个销售，请斯佳单独处理"
     return "", "找不到销售"
+
+
+def resolve_sales_any(customers, day: str, amount, box: LookupBox) -> tuple[str, str]:
+    last = "找不到销售"
+    seen = []
+    for name in customers:
+        n = norm_name(name)
+        if not n or n in seen:
+            continue
+        seen.append(n)
+        sales, why = resolve_sales(name, day, amount, box)
+        if sales:
+            return sales, ""
+        last = why or last
+    return "", last
 
 
 def applicant_dept_code(name: str, box: LookupBox) -> str:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""预处理查找：业务线、回款优先、双销售 hold。不访问网络。"""
+"""预处理查找：金蝶往来定科目、回款优先、双销售 hold。不访问网络。"""
 from __future__ import annotations
 
 import sys
@@ -25,61 +25,71 @@ zhiyun_api = _load("kingdee_posting_zhiyun_unit", SCRIPTS / "zhiyun_api.py")
 
 
 def _box(raw):
-    line_accounts = {
-        "ICT": "113103",
-        "游戏综合本地化": "113102",
-        "视频字幕": "113101",
-    }
-    return lookups.box_from_dict(raw, line_accounts, {"于占国": "15"})
+    return lookups.box_from_dict(raw, ["113101", "113102", "113103"], {"于占国": "15"})
 
 
 def test_single_line_to_accounts():
-    box = _box({"customer_lines": {"甲科技有限公司": ["ICT"]}})
-    ar, rev, why = lookups.resolve_ar("甲科技有限公司", "2026-08-01", "1001", box)
+    box = _box({"ar_balance": [{"customer_code": "1001", "account": "113103", "balance": "1"}]})
+    ar, rev, why = lookups.resolve_ar("1001", "2026-08-01", box)
     assert (ar, rev, why) == ("113103", "510103", "")
 
 
 def test_unknown_customer_has_no_line():
-    box = _box({"customer_lines": {}})
-    ar, rev, why = lookups.resolve_ar("甲科技有限公司", "2026-08-01", "1001", box)
+    box = _box({})
+    ar, rev, why = lookups.resolve_ar("1001", "2026-08-01", box)
     assert ar == ""
-    assert why == "客户无业务线"
+    assert "金蝶往来" in why
 
 
 def test_multi_line_picks_larger_period_debit():
     box = _box(
         {
-            "customer_lines": {"甲科技有限公司": ["ICT", "游戏综合本地化"]},
+            "ar_balance": [
+                {"customer_code": "1001", "account": "113103", "balance": "1"},
+                {"customer_code": "1001", "account": "113102", "balance": "1"},
+            ],
             "period_debit": [
                 {"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "80"},
                 {"customer_code": "1001", "account": "113102", "period": "2026-08", "debit": "20"},
             ],
         }
     )
-    ar, rev, why = lookups.resolve_ar("甲科技有限公司", "2026-08-15", "1001", box)
+    ar, rev, why = lookups.resolve_ar("1001", "2026-08-15", box)
     assert (ar, rev, why) == ("113103", "510103", "")
 
 
 def test_multi_line_without_debit_holds():
-    box = _box({"customer_lines": {"甲科技有限公司": ["ICT", "游戏综合本地化"]}})
-    ar, _rev, why = lookups.resolve_ar("甲科技有限公司", "2026-08-01", "1001", box)
+    box = _box(
+        {
+            "ar_balance": [
+                {"customer_code": "1001", "account": "113103", "balance": "1"},
+                {"customer_code": "1001", "account": "113102", "balance": "1"},
+            ]
+        }
+    )
+    ar, _rev, why = lookups.resolve_ar("1001", "2026-08-01", box)
     assert ar == ""
-    assert why == "多业务线且本期借方不可用"
+    assert "本期借方" in why
+    assert "业务线" not in why
 
 
 def test_multi_line_equal_debit_holds():
     box = _box(
         {
-            "customer_lines": {"甲科技有限公司": ["ICT", "游戏综合本地化"]},
+            "ar_balance": [
+                {"customer_code": "1001", "account": "113103", "balance": "1"},
+                {"customer_code": "1001", "account": "113102", "balance": "1"},
+            ],
             "period_debit": [
                 {"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "10"},
                 {"customer_code": "1001", "account": "113102", "period": "2026-08", "debit": "10"},
             ],
         }
     )
-    ar, _rev, why = lookups.resolve_ar("甲科技有限公司", "2026-08-01", "1001", box)
+    ar, _rev, why = lookups.resolve_ar("1001", "2026-08-01", box)
     assert ar == ""
-    assert why == "多业务线本期借方不唯一"
+    assert "本期借方" in why
+    assert "业务线" not in why
 
 
 def test_receipt_sales_beats_order_sales():
