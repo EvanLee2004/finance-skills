@@ -643,22 +643,25 @@ def _yaml_description(skill_md: Path) -> str:
 
 
 def test_two_trigger_phrases_do_not_steal_dept_expense_alloc():
+    pl_md = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     pl_yaml = _yaml_description(SKILL / "SKILL.md")
     other_md = (SKILL.parent / "dept-expense-alloc" / "SKILL.md").read_text(encoding="utf-8")
     other_yaml = _yaml_description(SKILL.parent / "dept-expense-alloc" / "SKILL.md")
     for phrase in ("月度损益表", "科目余额表"):
         assert phrase in pl_yaml
         assert phrase not in other_yaml
+    assert "金蝶" in pl_yaml
+    assert "用友" not in pl_yaml
     assert "pl-dept-report" in other_md
-    assert "dept-expense-alloc" in pl_yaml
+    assert "dept-expense-alloc" in pl_md
     assert "部门费用归集" in other_yaml
-    assert "用友按人拆" in pl_yaml or "用友" in pl_yaml
 
 
 def test_skill_forbids_adhoc_openpyxl_and_default_skips_input_dir():
     text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     assert "python -c" in text
     assert "import openpyxl" in text
+    assert "convert.py" in text
     assert "不要**加 `--input-dir`" in text or "不要加 `--input-dir`" in text
     assert "hq.xlsx" in text
     yaml = _yaml_description(SKILL / "SKILL.md")
