@@ -26,27 +26,33 @@ def _norm_code(value) -> str:
     return text
 
 
-def parse_account_sheet(ws, headers: dict) -> dict[str, dict[str, Decimal | None]]:
+def parse_account_sheet(ws, headers: dict) -> dict[str, dict]:
     code_at = headers.get("account_code")
     debit_at = headers.get("period_debit")
     credit_at = headers.get("period_credit")
+    name_at = headers.get("account_name")
     if not code_at:
         return {}
     start_row = code_at[0] + 1
-    out: dict[str, dict[str, Decimal | None]] = {}
+    out: dict[str, dict] = {}
     for r in range(start_row, (ws.max_row or start_row) + 1):
         code = _norm_code(ws.cell(r, code_at[1]).value)
         if not code or not code[0].isdigit():
             continue
         debit = money(ws.cell(r, debit_at[1]).value) if debit_at else None
         credit = money(ws.cell(r, credit_at[1]).value) if credit_at else None
+        name = ""
+        if name_at:
+            name = str(ws.cell(r, name_at[1]).value or "").replace("\xa0", "").strip()
         if code not in out:
-            out[code] = {"debit": debit, "credit": credit}
+            out[code] = {"debit": debit, "credit": credit, "name": name}
         else:
             from common import add_money
 
             out[code]["debit"] = add_money(out[code]["debit"], debit)
             out[code]["credit"] = add_money(out[code]["credit"], credit)
+            if name and not out[code].get("name"):
+                out[code]["name"] = name
     return out
 
 
@@ -55,6 +61,7 @@ def parse_assist_sheet(ws, headers: dict) -> list[dict]:
     dept_at = headers.get("dept_name")
     debit_at = headers.get("period_debit")
     credit_at = headers.get("period_credit")
+    name_at = headers.get("account_name")
     if not code_at or not dept_at:
         return []
     start_row = max(code_at[0], dept_at[0]) + 1
@@ -64,9 +71,13 @@ def parse_assist_sheet(ws, headers: dict) -> list[dict]:
         dept = str(ws.cell(r, dept_at[1]).value or "").replace("\xa0", "").strip()
         if not code or not dept:
             continue
+        name = ""
+        if name_at:
+            name = str(ws.cell(r, name_at[1]).value or "").replace("\xa0", "").strip()
         rows.append(
             {
                 "code": code,
+                "name": name,
                 "dept": dept,
                 "debit": money(ws.cell(r, debit_at[1]).value) if debit_at else None,
                 "credit": money(ws.cell(r, credit_at[1]).value) if credit_at else None,

@@ -60,14 +60,15 @@ from formula_eval import eval_workbook
 from inspect_inputs import inspect_dir
 from layout import (
     account_row_map,
+    build_prefix_remap,
     dept_columns,
     direct_children,
-    first_dept_col,
     load_books,
     load_dept_map,
     load_layout,
+    load_name_synonyms,
     map_dept_name,
-    parent_code,
+    resolve_account_target,
 )
 from parse_export import parse_inspected
 
@@ -475,6 +476,7 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
     mapping = load_dept_map()
     notes = []
     secrets: list[str] = []
+    synonyms = load_name_synonyms()
     inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
     parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
     entity_amts: dict = {e: {} for e in layout["entities"]}
@@ -501,10 +503,41 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
                 hq = fetch_hq(period, creds)
                 notes.extend(hq.get("notes") or [])
                 entity_amts.setdefault("甲骨易", {})
-                for code, pair in (hq.get("accounts") or {}).items():
-                    if code in {a["code"] for a in layout["accounts"]}:
-                        entity_amts["甲骨易"][code] = pair
-                api_depts.extend(hq.get("depts") or [])
+                hq_pairs = hq.get("accounts") or {}
+                hq_codes = set(hq_pairs)
+                hq_remap = build_prefix_remap(hq_pairs, layout, synonyms)
+                for code, pair in hq_pairs.items():
+                    target, note = resolve_account_target(
+                        code,
+                        (pair or {}).get("name") or "",
+                        hq_codes,
+                        layout,
+                        synonyms,
+                        hq_remap,
+                    )
+                    if note and note not in notes:
+                        notes.append(note)
+                    if not target:
+                        continue
+                    bucket = entity_amts["甲骨易"].setdefault(target, {"debit": None, "credit": None})
+                    bucket["debit"] = add_money(bucket.get("debit"), (pair or {}).get("debit"))
+                    bucket["credit"] = add_money(bucket.get("credit"), (pair or {}).get("credit"))
+                hq_depts = hq.get("depts") or []
+                hq_assist_codes = {str(r.get("code") or "") for r in hq_depts}
+                for row in hq_depts:
+                    target, note = resolve_account_target(
+                        row.get("code") or "",
+                        row.get("name") or "",
+                        hq_assist_codes,
+                        layout,
+                        synonyms,
+                        hq_remap,
+                    )
+                    if note and note not in notes:
+                        notes.append(note)
+                    if not target:
+                        continue
+                    api_depts.append({**row, "code": target})
                 mapped = hq.get("profit") or {}
                 profit_cur["甲骨易"].update({k: v for k, v in mapped.items() if k in amount_labels})
                 if hq.get("accounts"):
@@ -525,27 +558,50 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
         notes.append("skip-api")
         prev_map = {}
 
-    layout_codes = {a["code"] for a in layout["accounts"] if a.get("code")}
+    prefix_remap_by_ent: dict[str, dict[str, str]] = {}
     for ent, codes in (parsed.get("accounts") or {}).items():
         if hq_from_api and ent == "甲骨易":
             continue
         entity_amts.setdefault(ent, {})
+        source_codes = set(codes)
+        remap = build_prefix_remap(codes, layout, synonyms)
+        prefix_remap_by_ent[ent] = remap
         for code, pair in codes.items():
-            target = code if code in layout_codes else parent_code(code, layout_codes)
+            target, note = resolve_account_target(
+                code,
+                (pair or {}).get("name") or "",
+                source_codes,
+                layout,
+                synonyms,
+                remap,
+            )
+            if note and note not in notes:
+                notes.append(note)
             if not target:
-                if str(code).startswith("5"):
-                    notes.append(f"表外科目={code}")
                 continue
             bucket = entity_amts[ent].setdefault(target, {"debit": None, "credit": None})
             bucket["debit"] = add_money(bucket.get("debit"), pair.get("debit"))
             bucket["credit"] = add_money(bucket.get("credit"), pair.get("credit"))
+    assist_codes: dict[str, set[str]] = {}
+    for row in parsed.get("depts") or []:
+        assist_codes.setdefault(row.get("entity") or "", set()).add(row.get("code") or "")
     folded_depts = []
     for row in parsed.get("depts") or []:
-        code = row.get("code") or ""
-        target = code if code in layout_codes else parent_code(code, layout_codes)
+        ent = row.get("entity") or ""
+        remap = prefix_remap_by_ent.get(ent) or build_prefix_remap(
+            (parsed.get("accounts") or {}).get(ent) or {}, layout, synonyms
+        )
+        target, note = resolve_account_target(
+            row.get("code") or "",
+            row.get("name") or "",
+            assist_codes.get(ent) or set(),
+            layout,
+            synonyms,
+            remap,
+        )
+        if note and note not in notes:
+            notes.append(note)
         if not target:
-            if str(code).startswith("5"):
-                notes.append(f"表外科目={code}")
             continue
         folded_depts.append({**row, "code": target})
     by_period = parsed.get("profits_by_period") or {}

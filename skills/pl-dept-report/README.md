@@ -60,6 +60,7 @@ flowchart TD
   API --> MERGE
   MAP["config/部门名映射.json<br/>大客户→KA"] --> MERGE
   LAY["config/版式.json<br/>科目树·列序·冻结"] --> MERGE
+  NAME["同码不同名按名称对版式<br/>父在源则不并叶子"] --> MERGE
   MERGE --> X["Excel：损益表 + 利润表<br/>无确认情况"]
   MERGE --> R["运行报告：有源/缺源<br/>未映射部门个数<br/>核对非0科目编码个数"]
   X --> F["合计/核对/父行/利润勾稽<br/>= Excel 公式"]
@@ -88,6 +89,7 @@ flowchart TD
 | `config/部门名映射.json` | 档案名 → Excel 列 |
 | `config/版式.json` | 科目行、列、冻结（无金额） |
 | `config/引出列名.json` | 引出表头别名 |
+| `config/科目名同义.json` | 引出科目名 → 版式名 |
 
 ## 8. 怎么跑
 

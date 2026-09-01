@@ -99,22 +99,22 @@ def test_same_dept_across_books_is_summed(tmp_path: Path):
     _write_account(
         tmp_path / "wh.xlsx",
         "北京甲骨易文化传媒有限公司",
-        [("540103", "翻译", 10.0, None)],
+        [("540103", "翻译语言服务", 10.0, None)],
     )
     _write_assist(
         tmp_path / "wh_d.xlsx",
         "北京甲骨易文化传媒有限公司",
-        [("540103", "翻译", "大客户", 10.0, None)],
+        [("540103", "翻译语言服务", "大客户", 10.0, None)],
     )
     _write_account(
         tmp_path / "sh.xlsx",
         "甲骨易智译（上海）科技有限公司",
-        [("540103", "翻译", 15.0, None)],
+        [("540103", "翻译语言服务", 15.0, None)],
     )
     _write_assist(
         tmp_path / "sh_d.xlsx",
         "甲骨易智译（上海）科技有限公司",
-        [("540103", "翻译", "大客户", 15.0, None)],
+        [("540103", "翻译语言服务", "大客户", 15.0, None)],
     )
     out = tmp_path / "out.xlsx"
     _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
@@ -341,7 +341,7 @@ def test_stdout_has_no_amount_or_secret(tmp_path: Path):
     _write_account(
         tmp_path / "a.xlsx",
         "甲骨易（北京）语言科技股份有限公司",
-        [("540103", "翻译", 12345.67, None)],
+        [("540103", "翻译语言服务", 12345.67, None)],
     )
     out = tmp_path / "out.xlsx"
     r = _run(
@@ -452,8 +452,8 @@ def test_formulas_not_dead_numbers_balanced_and_unbalanced(tmp_path: Path):
 
     bad = tmp_path / "bad"
     bad.mkdir()
-    _write_account(bad / "a.xlsx", "甲骨易（北京）语言科技股份有限公司", [("540103", "翻译", 80.0, None)])
-    _write_assist(bad / "d.xlsx", "甲骨易（北京）语言科技股份有限公司", [("540103", "翻译", "KA", 50.0, None)])
+    _write_account(bad / "a.xlsx", "甲骨易（北京）语言科技股份有限公司", [("540103", "翻译语言服务", 80.0, None)])
+    _write_assist(bad / "d.xlsx", "甲骨易（北京）语言科技股份有限公司", [("540103", "翻译语言服务", "KA", 50.0, None)])
     out2 = bad / "out.xlsx"
     _run(["--period", "202608", "--input-dir", str(bad), "--out", str(out2), "--no-api"])
     wb2 = openpyxl.load_workbook(out2, data_only=False)
@@ -463,7 +463,7 @@ def test_formulas_not_dead_numbers_balanced_and_unbalanced(tmp_path: Path):
 
 
 def test_change_rate_formula_not_gold_wrong_ref(tmp_path: Path):
-    _write_account(tmp_path / "a.xlsx", "甲骨易（北京）语言科技股份有限公司", [("5101", "收入", None, 10.0)])
+    _write_account(tmp_path / "a.xlsx", "甲骨易（北京）语言科技股份有限公司", [("5101", "主营业务收入", None, 10.0)])
     out = tmp_path / "out.xlsx"
     _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
     ws = openpyxl.load_workbook(out)["利润表"]
@@ -575,3 +575,61 @@ def test_fetch_balance_400_falls_back_to_voucher(monkeypatch):
     assert any("400" in n for n in got["notes"])
     assert any("voucher_count" in n for n in got["notes"])
     assert "profit_rows=1" in got["notes"]
+
+
+def test_parent_and_leaf_same_amount_does_not_double_count(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [
+            ("5101", "主营业务收入", None, 249313.21),
+            ("510103", "主营业务收入_翻译语言服务", None, 249313.21),
+        ],
+    )
+    out = tmp_path / "out.xlsx"
+    ran = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    wb = openpyxl.load_workbook(out, data_only=False)
+    layout = load_layout()
+    r = account_row_map(layout)["5101"]
+    assert wb["损益表"][f"F{r}"].value == 249313.21
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "表外科目=510103" not in report
+    assert "249313.21" not in ran.stdout
+
+
+def test_same_code_different_name_does_not_write_layout_row(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [
+            ("540103", "住房公积金", 350.0, None),
+            ("550104", "工资", 100.0, None),
+            ("550204", "房租", 200.0, None),
+            ("5503", "财务费用", 10.0, None),
+        ],
+    )
+    _write_account(
+        tmp_path / "sh.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("5504", "销售费用", 50.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    assert ws[f"E{row['540103']}"].value in (None, "")
+    assert ws[f"E{row['540112']}"].value == 350
+    assert ws[f"E{row['550104']}"].value in (None, "")
+    assert ws[f"E{row['550101']}"].value == 100
+    assert ws[f"E{row['550204']}"].value in (None, "")
+    assert ws[f"E{row['550212']}"].value == 200
+    assert ws[f"E{row['5503']}"].value in (None, "")
+    assert ws[f"E{row['5504']}"].value == 10
+    assert ws[f"G{row['5504']}"].value in (None, "")
+    assert ws[f"G{row['5501']}"].value == 50
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "同码不同名=540103->540112" in report
+    assert "350" not in r.stdout
+    assert "249313.21" not in r.stdout

@@ -3,7 +3,7 @@ name: pl-dept-report
 description: >-
   每月从金蝶云星辰取出有账套的主体，拼成斯佳「损益表 + 利润表」Excel（月度损益表 / 科目余额表 / 部门科目余额表）。
   当用户说「月度损益表 / 科目余额表 / 出本月损益表 / 损益表利润表 / 部门科目余额表 / 跑斯佳那张表 / 金蝶损益表」时用本技能。
-  总部只读 API 能打就打；另外 4 本星辰账吃引出 xlsx；山东/四川/济南无账套留空。公式自写核对，禁止改数凑平。
+  总部只读 API 能打就打；另外 4 本没有 API 就用本机已登录斯佳号切账套引出；山东/四川/济南无账套留空。公式自写核对，禁止改数凑平。
   用友按人拆部门费用走 dept-expense-alloc，不要和本技能抢。
 ---
 
@@ -45,13 +45,16 @@ python3 "<本skill目录>/scripts/convert.py" --period YYYYMM --input-dir <绝�
 
 系统 python 缺库时脚本会切到仓内 `.venv`。不要对系统 Python `pip install`。缺环境说「配下环境」，转 env-doctor。
 
-本机已有密钥时 convert **不要**加 `--no-api`（测试才加）。总部走只读 API；文化/上海/湖南分/湖南子用本机已登录的斯佳 Chrome 切账套引出（不要新开未登录 Playwright）：
+本机已有密钥时 convert **不要**加 `--no-api`（测试才加）。总部走只读 API；文化/上海/湖南分/湖南子**没有 API 就用本机已登录的斯佳 Chrome 切账套引出**（`xingchen_export.py` 优先复用 chrome-devtools 配置目录，不要新开未登录 Playwright）：
 
-- 科目余额表 `formId=gl_rpt_acctbalance`（科目级次拉到最大 + 展开所有级次）
-- 核算项目余额表 `formId=gl_rpt_assistbalance`（辅助核算类别=部门）
-- 引出是异步的，文件落到「引出结果」`bos_exportlog_list` 或 Downloads
+- 科目余额表 `formId=gl_rpt_acctbalance`（展开过滤 + 展开所有级次 + 查询）
+- 核算项目余额表 `formId=gl_rpt_assistbalance`（辅助核算类别=部门，不选会提示「请选择辅助核算类别」）
+- 利润表走已生成列表 `formId=cs_ifs_reportdata_list`（点「利润表」打开已有期间；没有 8 期就留空，禁止把 7 期当本月，禁止点新增/审核/上报）
+- 引出是异步的，文件落到 Downloads 或「引出结果」`bos_exportlog_list`
 - 电子税局 iframe 要关掉才能切账套；禁止点新增账套 / 购买 / 引入 / 审核 / 过账
 - 星辰真实引出是「本期发生额」下一行「借方/贷方」；按 `公司名称：` 认账套，不要被分录里出现的总部全称带跑
+- 叶子科目：源里**已有父级编码**就不要再把子级加进父级（防双计）；源里没有父级才并入版式父级
+- 同码不同名：按科目名称对到版式行（住房公积金对住房公积金），禁止塞进总部同码不同名的行；对不上只进运行报告
 
 ```bash
 python3 "<本skill目录>/scripts/xingchen_export.py" --period YYYYMM --out-dir <引出目录>
@@ -73,6 +76,7 @@ Playwright 只装在本机取数用，不要写进同事 README。引出成功�
 | `config/部门名映射.json` | 金蝶档案名 → Excel 列（大客户→KA） |
 | `config/版式.json` | 科目树、列、冻结（无金额） |
 | `config/引出列名.json` | 引出表头别名 |
+| `config/科目名同义.json` | 引出科目名 → 版式名（城建税/社会保险等） |
 | 本机 `kingdee.local.json` | 连接器；不进仓 |
 | 本机 `kingdee-pl.local.json` | 本技能账套表；不进仓 |
 
