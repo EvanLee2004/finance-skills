@@ -95,6 +95,81 @@ def _write_profit(path: Path, company: str, items: list[tuple[str, float]]) -> N
     wb.save(path)
 
 
+def test_same_dept_across_books_is_summed(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("540103", "翻译", 10.0, None)],
+    )
+    _write_assist(
+        tmp_path / "wh_d.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("540103", "翻译", "大客户", 10.0, None)],
+    )
+    _write_account(
+        tmp_path / "sh.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("540103", "翻译", 15.0, None)],
+    )
+    _write_assist(
+        tmp_path / "sh_d.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("540103", "翻译", "大客户", 15.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)["540103"]
+    ka = next(letter for name, letter in dept_columns(layout) if name == "KA")
+    assert ws[f"{ka}{row}"].value == 25.0
+    assert ws[f"E{row}"].value == 10
+    assert ws[f"G{row}"].value == 15
+
+
+def test_prior_period_profit_export_goes_to_last_month_not_current(tmp_path: Path):
+    path = tmp_path / "wh_pl.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "利润表"
+    ws["A1"] = "2026年7期利润表（月报）"
+    ws["A2"] = "公司名称：北京甲骨易文化传媒有限公司"
+    ws["A3"] = "项目"
+    ws["B3"] = "本月金额"
+    ws["A4"] = "一、营业收入"
+    ws["B4"] = 40.0
+    wb.save(path)
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 10.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    ws = openpyxl.load_workbook(out)["利润表"]
+    layout = load_layout()
+    labels = [row["label"] for row in layout["profit_rows"]]
+    r = 2 + labels.index("收入")
+    assert ws.cell(r, 3).value in (None, "")
+    assert ws.cell(r, 11).value == 40.0
+
+
+def test_filename_timestamp_is_not_report_period():
+    from common import detect_period_text
+
+    assert detect_period_text("期间：202608-202608") == "202608"
+    assert detect_period_text("2026年7期利润表") == "202607"
+    assert detect_period_text("核算项目余额表-20260901190115.xlsx") is None
+
+
+def test_discover_input_dir_uses_explicit(tmp_path: Path):
+    from common import discover_input_dir
+
+    (tmp_path / "a.xlsx").write_bytes(b"not-xlsx")
+    got = discover_input_dir(str(tmp_path))
+    assert got == tmp_path
+
+
 def test_leaf_code_folds_to_layout_parent(tmp_path: Path):
     _write_account(
         tmp_path / "wh.xlsx",

@@ -35,6 +35,55 @@ def prev_period(period: str) -> str:
     return f"{y}{m - 1:02d}"
 
 
+def detect_period_text(text: str) -> str | None:
+    blob = str(text or "")
+    m = re.search(r"期间[:：]\s*(\d{6})", blob)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"(20\d{2})年\s*0?(\d{1,2})\s*期", blob)
+    if m2:
+        month = int(m2.group(2))
+        if 1 <= month <= 12:
+            return f"{m2.group(1)}{month:02d}"
+    m3 = re.search(r"月度损益表_(\d{6})", blob)
+    if m3:
+        return m3.group(1)
+    return None
+
+
+def discover_input_dir(explicit: str = "") -> Path:
+    if explicit:
+        return Path(explicit).expanduser()
+    root = SKILL
+    homes: list[Path] = []
+    for _ in range(6):
+        cand = root / "技能" / "金蝶" / "损益表利润表" / "工作区" / "引出"
+        if cand.is_dir():
+            homes.append(cand)
+            break
+        root = root.parent
+    desktop = Path.home() / "Desktop"
+    if desktop.is_dir():
+        homes.extend(sorted(desktop.glob("月度损益表_*"), reverse=True))
+        homes.append(desktop)
+    homes.append(Path.cwd())
+
+    def _has_source(folder: Path) -> bool:
+        if not folder.is_dir():
+            return False
+        for path in folder.glob("*.xlsx"):
+            name = path.name
+            if name.startswith("~$") or name.startswith("月度损益表_"):
+                continue
+            return True
+        return False
+
+    for folder in homes:
+        if _has_source(folder):
+            return folder
+    return Path.cwd()
+
+
 def parse_period(raw: str | None) -> str:
     s = str(raw or "").strip().replace("-", "").replace("/", "")
     if len(s) >= 6 and s[:6].isdigit():

@@ -49,6 +49,7 @@ from common import (
     add_money,
     cell_num,
     default_period,
+    discover_input_dir,
     load_json,
     money,
     parse_period,
@@ -547,7 +548,12 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
                 notes.append(f"表外科目={code}")
             continue
         folded_depts.append({**row, "code": target})
-    for ent, raw in (parsed.get("profits") or {}).items():
+    by_period = parsed.get("profits_by_period") or {}
+    current_profits = by_period.get(period) or {}
+    previous_profits = by_period.get(prev_period(period)) or {}
+    if not current_profits and not by_period:
+        current_profits = parsed.get("profits") or {}
+    for ent, raw in current_profits.items():
         if hq_from_api and ent == "甲骨易":
             continue
         mapped = map_profit_dict(raw, layout)
@@ -563,6 +569,9 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
 
     prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
     profit_prev = load_prev_profit(prev_xlsx if prev_xlsx.is_file() else None, layout)
+    for ent, raw in previous_profits.items():
+        mapped = map_profit_dict(raw, layout)
+        profit_prev.setdefault(ent, {}).update({k: v for k, v in mapped.items() if k in amount_labels})
     if prev_map:
         profit_prev.setdefault("甲骨易", {}).update(prev_map)
     if not any(profit_prev.get(e) for e in layout["entities"]):
@@ -585,6 +594,8 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
     for header in xingchen:
         if header in fetched and not entity_amts.get(header) and not profit_cur.get(header):
             notes.append(f"已取但无损益科目={header}")
+        if header in has_source and header != "甲骨易" and not profit_cur.get(header):
+            notes.append(f"利润表无本月源={header}")
 
     wb = build_workbook(period, entity_amts, dept_amts, profit_cur, profit_prev, layout)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -626,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-api", action="store_true")
     args = parser.parse_args(argv)
     period = parse_period(args.period)
-    input_dir = Path(args.input_dir).expanduser() if args.input_dir else Path.cwd()
+    input_dir = discover_input_dir(args.input_dir)
     if args.out:
         out = Path(args.out).expanduser()
     else:

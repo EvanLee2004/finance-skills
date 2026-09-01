@@ -96,6 +96,7 @@ def parse_inspected(items: list[dict]) -> dict:
     accounts: dict[str, dict[str, dict[str, Decimal | None]]] = {}
     depts: list[dict] = []
     profits: dict[str, dict[str, Decimal | None]] = {}
+    profits_by_period: dict[str, dict[str, dict[str, Decimal | None]]] = {}
     extra_codes: set[str] = set()
     for item in items:
         path = item["path"]
@@ -126,7 +127,17 @@ def parse_inspected(items: list[dict]) -> dict:
                     row["entity"] = entity
                     depts.append(row)
             elif kind == "profit" and entity:
-                profits[entity] = parse_profit_sheet(ws, headers, aliases)
+                parsed = parse_profit_sheet(ws, headers, aliases)
+                profits[entity] = parsed
+                period = item.get("period")
+                if period:
+                    profits_by_period.setdefault(period, {})[entity] = parsed
         finally:
             wb.close()
-    return {"accounts": accounts, "depts": depts, "profits": profits, "extra_codes": sorted(extra_codes)}
+    return {
+        "accounts": accounts,
+        "depts": depts,
+        "profits": profits,
+        "profits_by_period": profits_by_period,
+        "extra_codes": sorted(extra_codes),
+    }

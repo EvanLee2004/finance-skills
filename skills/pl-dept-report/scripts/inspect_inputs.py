@@ -14,6 +14,7 @@ if str(HERE) not in sys.path:
 
 from openpyxl import load_workbook
 
+from common import detect_period_text, discover_input_dir
 from layout import load_books, load_export_aliases
 
 
@@ -166,6 +167,7 @@ def inspect_dir(input_dir: Path) -> list[dict]:
                         "sheet": title,
                         "kind": kind,
                         "entity": entity,
+                        "period": detect_period_text(blob + "\n" + path.name),
                         "headers": {k: {"row": v[0], "col": v[1]} for k, v in headers.items()},
                     }
                 )
@@ -176,9 +178,9 @@ def inspect_dir(input_dir: Path) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", required=True)
+    parser.add_argument("--input-dir", default="")
     args = parser.parse_args(argv)
-    rows = inspect_dir(Path(args.input_dir))
+    rows = inspect_dir(discover_input_dir(args.input_dir))
     print(json.dumps({"files": len(rows), "kinds": [r["kind"] for r in rows], "entities": [r.get("entity") for r in rows]}, ensure_ascii=False))
     return 0
 
