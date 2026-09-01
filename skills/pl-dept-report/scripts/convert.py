@@ -411,16 +411,13 @@ def write_profit_sheet(wb, layout: dict, period: str, current: dict, previous: d
 
 
 def map_profit_dict(raw: dict, layout: dict) -> dict:
+    from fetch_reports import _match_profit_label
+
     aliases = layout.get("profit_item_aliases") or {}
     out = {}
-    inv = {}
-    for label, names in aliases.items():
-        inv[label] = label
-        for n in names:
-            inv[str(n).strip()] = label
     for key, val in (raw or {}).items():
-        label = inv.get(str(key).strip())
-        if label:
+        label = _match_profit_label(str(key), aliases)
+        if label and label not in out:
             out[label] = val if isinstance(val, Decimal) else money(val)
     return out
 
@@ -479,18 +476,10 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
     inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
     parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
     entity_amts: dict = {e: {} for e in layout["entities"]}
-    for ent, codes in (parsed.get("accounts") or {}).items():
-        entity_amts.setdefault(ent, {})
-        for code, pair in codes.items():
-            if code not in {a["code"] for a in layout["accounts"]}:
-                notes.append(f"表外科目={code}")
-                continue
-            entity_amts[ent][code] = pair
-
+    amount_labels = {row["label"] for row in layout["profit_rows"] if row.get("kind") == "amount" and row.get("label")}
+    hq_from_api = False
     api_depts = []
     profit_cur = {e: {} for e in layout["entities"]}
-    for ent, raw in (parsed.get("profits") or {}).items():
-        profit_cur[ent] = map_profit_dict(raw, layout)
 
     if not no_api:
         try:
@@ -515,8 +504,9 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
                         entity_amts["甲骨易"][code] = pair
                 api_depts.extend(hq.get("depts") or [])
                 mapped = hq.get("profit") or {}
-                if mapped:
-                    profit_cur["甲骨易"].update(mapped)
+                profit_cur["甲骨易"].update({k: v for k, v in mapped.items() if k in amount_labels})
+                if hq.get("accounts"):
+                    hq_from_api = True
                 try:
                     prev = prev_period(period)
                     hq_prev = fetch_hq(prev, creds, ledger=False)
@@ -533,7 +523,26 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
         notes.append("skip-api")
         prev_map = {}
 
-    dept_rows = list(parsed.get("depts") or []) + api_depts
+    for ent, codes in (parsed.get("accounts") or {}).items():
+        if hq_from_api and ent == "甲骨易":
+            continue
+        entity_amts.setdefault(ent, {})
+        for code, pair in codes.items():
+            if code not in {a["code"] for a in layout["accounts"]}:
+                notes.append(f"表外科目={code}")
+                continue
+            entity_amts[ent][code] = pair
+    for ent, raw in (parsed.get("profits") or {}).items():
+        if hq_from_api and ent == "甲骨易":
+            continue
+        mapped = map_profit_dict(raw, layout)
+        profit_cur[ent].update({k: v for k, v in mapped.items() if k in amount_labels})
+    export_depts = [
+        row
+        for row in (parsed.get("depts") or [])
+        if not (hq_from_api and row.get("entity") == "甲骨易")
+    ]
+    dept_rows = export_depts + api_depts
     report_tmp: dict = {}
     dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp)
 

@@ -26,6 +26,7 @@ from layout import account_row_map, dept_columns, direct_children, load_layout  
 def _run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
     run_env = os.environ.copy()
     run_env["PL_DEPT_SKIP_API"] = "1"
+    run_env["PL_DEPT_USE_CACHE"] = "0"
     run_env["KINGDEE_LOCAL_JSON"] = str(HERE / "_missing_kingdee.json")
     run_env["KINGDEE_PL_LOCAL_JSON"] = str(HERE / "_missing_pl.json")
     if env:
@@ -316,6 +317,24 @@ def test_does_not_import_posting_picker():
     assert "多账套同时授权时只认本机已绑的总部账套" in posting
 
 
+def test_profit_label_fuzzy_match():
+    from fetch_reports import _match_profit_label, map_profit_rows
+    from layout import load_layout
+
+    layout = load_layout()
+    aliases = layout.get("profit_item_aliases") or {}
+    assert _match_profit_label("一、营业收入", aliases) == "收入"
+    assert _match_profit_label("投资收益（损失以“-”号填列）", aliases) == "+投资收益"
+    assert _match_profit_label("减：营业成本", aliases) == "成本"
+    rows = [
+        {"item_name": "一、营业收入", "current_amount": 10},
+        {"item_name": "公允价值变动收益（损失以“-”号填列）", "current_amount": 1},
+    ]
+    mapped = map_profit_rows(rows, layout)
+    assert mapped["收入"] is not None
+    assert mapped["+公允价值变动收益"] is not None
+
+
 def test_default_period_august_when_september():
     from common import default_period
     from datetime import date
@@ -362,7 +381,7 @@ def test_fetch_balance_400_falls_back_to_voucher(monkeypatch):
         def json(self):
             return self._payload
 
-    def fake_request(method, path, creds, params=None, extra=None, timeout=30):
+    def fake_request(method, path, creds, params=None, extra=None, timeout=30, retries=4):
         if path.endswith("profit_report"):
             return FakeResp(200, {"data": [{"item_name": "营业收入", "current_amount": 1}]})
         if path.endswith("account_balance_report"):
@@ -376,6 +395,7 @@ def test_fetch_balance_400_falls_back_to_voucher(monkeypatch):
     monkeypatch.setattr(kingdee_client, "request", fake_request)
     monkeypatch.setattr(fetch_reports, "request", fake_request)
     monkeypatch.setattr(fetch_reports, "get_app_token", lambda creds: ("tok", "https://example"))
+    monkeypatch.setenv("PL_DEPT_USE_CACHE", "0")
     got = fetch_reports.fetch_hq("202608", {"client_id": "x"})
     assert any("400" in n for n in got["notes"])
     assert any("voucher_count" in n for n in got["notes"])

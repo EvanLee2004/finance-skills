@@ -37,7 +37,13 @@ python3 "<本skill目录>/scripts/convert.py" --period YYYYMM --input-dir <绝�
 
 系统 python 缺库时脚本会切到仓内 `.venv`。不要对系统 Python `pip install`。缺环境说「配下环境」，转 env-doctor。
 
-本机已有密钥时 convert **不要**加 `--no-api`（测试才加）。没有密钥仍能只靠引出出表，缺源列空着。
+本机已有密钥时 convert **不要**加 `--no-api`（测试才加）。总部走只读 API；文化/上海/湖南分/湖南子用本机浏览器引出：
+
+```bash
+python3 "<本skill目录>/scripts/xingchen_export.py" --period YYYYMM --out-dir <引出目录>
+```
+
+Playwright 只装在本机取数用，不要写进同事 README、不要 `playwright install` 当必装。引出成功后再跑 convert。没有引出的星辰账列空着。
 
 ## 2. 收尾（照抄）
 
