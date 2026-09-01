@@ -66,6 +66,7 @@ from layout import (
     load_dept_map,
     load_layout,
     map_dept_name,
+    parent_code,
 )
 from parse_export import parse_inspected
 
@@ -523,15 +524,29 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
         notes.append("skip-api")
         prev_map = {}
 
+    layout_codes = {a["code"] for a in layout["accounts"] if a.get("code")}
     for ent, codes in (parsed.get("accounts") or {}).items():
         if hq_from_api and ent == "甲骨易":
             continue
         entity_amts.setdefault(ent, {})
         for code, pair in codes.items():
-            if code not in {a["code"] for a in layout["accounts"]}:
-                notes.append(f"表外科目={code}")
+            target = code if code in layout_codes else parent_code(code, layout_codes)
+            if not target:
+                if str(code).startswith("5"):
+                    notes.append(f"表外科目={code}")
                 continue
-            entity_amts[ent][code] = pair
+            bucket = entity_amts[ent].setdefault(target, {"debit": None, "credit": None})
+            bucket["debit"] = add_money(bucket.get("debit"), pair.get("debit"))
+            bucket["credit"] = add_money(bucket.get("credit"), pair.get("credit"))
+    folded_depts = []
+    for row in parsed.get("depts") or []:
+        code = row.get("code") or ""
+        target = code if code in layout_codes else parent_code(code, layout_codes)
+        if not target:
+            if str(code).startswith("5"):
+                notes.append(f"表外科目={code}")
+            continue
+        folded_depts.append({**row, "code": target})
     for ent, raw in (parsed.get("profits") or {}).items():
         if hq_from_api and ent == "甲骨易":
             continue
@@ -539,7 +554,7 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
         profit_cur[ent].update({k: v for k, v in mapped.items() if k in amount_labels})
     export_depts = [
         row
-        for row in (parsed.get("depts") or [])
+        for row in folded_depts
         if not (hq_from_api and row.get("entity") == "甲骨易")
     ]
     dept_rows = export_depts + api_depts
@@ -554,14 +569,22 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
         notes.append("无上月列")
 
     xingchen = [a["excel_header"] for a in books.get("xingchen_accounts") or []]
+    fetched = {item.get("entity") for item in inspected if item.get("entity")}
     has_source = []
     missing = []
     for header in layout["entities"]:
-        has = bool(entity_amts.get(header)) or bool(profit_cur.get(header))
+        has = (
+            bool(entity_amts.get(header))
+            or bool(profit_cur.get(header))
+            or header in fetched
+        )
         if has:
             has_source.append(header)
         else:
             missing.append(header)
+    for header in xingchen:
+        if header in fetched and not entity_amts.get(header) and not profit_cur.get(header):
+            notes.append(f"已取但无损益科目={header}")
 
     wb = build_workbook(period, entity_amts, dept_amts, profit_cur, profit_prev, layout)
     out.parent.mkdir(parents=True, exist_ok=True)

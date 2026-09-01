@@ -48,11 +48,27 @@ def header_map(ws, aliases: dict, max_row: int = 12) -> dict[str, tuple[int, int
         for alias in aliases.get(key) or []:
             wanted.setdefault(alias, key)
     found: dict[str, tuple[int, int]] = {}
-    for r in range(1, min(ws.max_row or 1, max_row) + 1):
-        for c in range(1, min(ws.max_column or 1, 40) + 1):
+    last_row = min(ws.max_row or 1, max_row)
+    last_col = min(ws.max_column or 1, 40)
+    for r in range(1, last_row + 1):
+        for c in range(1, last_col + 1):
             t = _cell_text(ws.cell(r, c).value)
             if t in wanted and wanted[t] not in found:
                 found[wanted[t]] = (r, c)
+    if "period_debit" not in found or "period_credit" not in found:
+        for r in range(1, last_row + 1):
+            for c in range(1, last_col + 1):
+                t = _cell_text(ws.cell(r, c).value)
+                if t not in {"本期发生额", "本期发生"}:
+                    continue
+                if r >= last_row:
+                    continue
+                left = _cell_text(ws.cell(r + 1, c).value)
+                right = _cell_text(ws.cell(r + 1, c + 1).value) if c < last_col else ""
+                if left == "借方" and "period_debit" not in found:
+                    found["period_debit"] = (r + 1, c)
+                if right == "贷方" and "period_credit" not in found:
+                    found["period_credit"] = (r + 1, c + 1)
     return found
 
 
@@ -84,20 +100,27 @@ def classify_sheet(ws, aliases: dict) -> str | None:
     return None
 
 
-def match_entity(blob: str, filename: str, books: dict) -> str | None:
+def _entity_candidates(text: str, books: dict) -> list[tuple[int, str]]:
     candidates: list[tuple[int, str]] = []
     for acc in books.get("xingchen_accounts") or []:
         header = acc.get("excel_header") or ""
         legal = acc.get("legal_name") or ""
-        if legal and legal in blob:
+        if legal and legal in text:
             candidates.append((len(legal), header))
-        elif header and header in blob:
-            # 湖南分公司 contains more than 湖南; require non-overlap later
+        elif header and header in text:
             candidates.append((len(header), header))
     for item in books.get("no_xingchen_leave_blank") or []:
         header = item.get("excel_header") or ""
-        if header and header in blob:
+        if header and header in text:
             candidates.append((len(header), header))
+    return candidates
+
+
+def match_entity(blob: str, filename: str, books: dict) -> str | None:
+    company_line = next((line for line in blob.splitlines() if "公司名称" in line), "")
+    candidates = _entity_candidates(company_line, books) if company_line else []
+    if not candidates:
+        candidates = _entity_candidates(blob, books)
     if candidates:
         candidates.sort(reverse=True)
         return candidates[0][1]

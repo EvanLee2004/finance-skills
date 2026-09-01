@@ -37,13 +37,19 @@ python3 "<本skill目录>/scripts/convert.py" --period YYYYMM --input-dir <绝�
 
 系统 python 缺库时脚本会切到仓内 `.venv`。不要对系统 Python `pip install`。缺环境说「配下环境」，转 env-doctor。
 
-本机已有密钥时 convert **不要**加 `--no-api`（测试才加）。总部走只读 API；文化/上海/湖南分/湖南子用本机浏览器引出：
+本机已有密钥时 convert **不要**加 `--no-api`（测试才加）。总部走只读 API；文化/上海/湖南分/湖南子用本机已登录的斯佳 Chrome 切账套引出（不要新开未登录 Playwright）：
+
+- 科目余额表 `formId=gl_rpt_acctbalance`（科目级次拉到最大 + 展开所有级次）
+- 核算项目余额表 `formId=gl_rpt_assistbalance`（辅助核算类别=部门）
+- 引出是异步的，文件落到「引出结果」`bos_exportlog_list` 或 Downloads
+- 电子税局 iframe 要关掉才能切账套；禁止点新增账套 / 购买 / 引入 / 审核 / 过账
+- 星辰真实引出是「本期发生额」下一行「借方/贷方」；按 `公司名称：` 认账套，不要被分录里出现的总部全称带跑
 
 ```bash
 python3 "<本skill目录>/scripts/xingchen_export.py" --period YYYYMM --out-dir <引出目录>
 ```
 
-Playwright 只装在本机取数用，不要写进同事 README、不要 `playwright install` 当必装。引出成功后再跑 convert。没有引出的星辰账列空着。
+Playwright 只装在本机取数用，不要写进同事 README。引出成功后再跑 convert。山东/四川/济南无星辰账，列空着。
 
 ## 2. 收尾（照抄）
 

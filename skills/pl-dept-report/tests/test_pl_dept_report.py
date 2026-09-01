@@ -95,6 +95,62 @@ def _write_profit(path: Path, company: str, items: list[tuple[str, float]]) -> N
     wb.save(path)
 
 
+def test_leaf_code_folds_to_layout_parent(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("510103", "主营业务收入_翻译语言服务", None, 30.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    wb = openpyxl.load_workbook(out, data_only=False)
+    layout = load_layout()
+    r = account_row_map(layout)["5101"]
+    assert wb["损益表"][f"F{r}"].value == 30.0
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "表外科目=510103" not in report
+
+
+def test_xingchen_two_row_period_header(tmp_path: Path):
+    path = tmp_path / "xingchen_assist.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "核算项目余额表"
+    ws["A1"] = "核算项目余额表"
+    ws["A2"] = "公司名称：北京甲骨易文化传媒有限公司"
+    ws["A4"] = "期间"
+    ws["B4"] = "部门编码"
+    ws["C4"] = "部门名称"
+    ws["D4"] = "科目编码"
+    ws["E4"] = "科目名称"
+    ws["H4"] = "本期发生额"
+    ws["H5"] = "借方"
+    ws["I5"] = "贷方"
+    ws["A6"] = "202608"
+    ws["C6"] = "本公司"
+    ws["D6"] = "510103"
+    ws["E6"] = "翻译语言服务"
+    ws["H6"] = 12.5
+    ws["I6"] = 30.0
+    wb.save(path)
+    from inspect_inputs import inspect_dir, header_map
+    from layout import load_export_aliases
+    from parse_export import parse_inspected
+
+    aliases = load_export_aliases()
+    headers = header_map(openpyxl.load_workbook(path).active, aliases)
+    assert headers["period_debit"] == (5, 8)
+    assert headers["period_credit"] == (5, 9)
+    found = inspect_dir(tmp_path)
+    assert found and found[0]["kind"] == "assist"
+    assert found[0]["entity"] == "文化"
+    parsed = parse_inspected(found)
+    rows = [r for r in parsed["depts"] if r["code"] == "510103"]
+    assert rows
+    assert rows[0]["debit"] == Decimal("12.5")
+    assert rows[0]["credit"] == Decimal("30.0")
+
+
 def test_layout_json_has_structure_no_gold_amounts():
     layout = json.loads((CONFIG / "版式.json").read_text(encoding="utf-8"))
     assert layout["freeze"] == "C3"
@@ -221,6 +277,50 @@ def test_stdout_has_no_amount_or_secret(tmp_path: Path):
     assert secret not in r.stdout
     assert "期间=202608" in r.stdout
     assert "产物=" in r.stdout
+
+
+def test_company_name_line_beats_related_party_in_rows(tmp_path: Path):
+    path = tmp_path / "hunan_zgs.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "科目余额表"
+    ws["A1"] = "科目余额表"
+    ws["A2"] = "公司名称：甲骨易（湖南）科技有限公司"
+    ws["A3"] = "科目编码"
+    ws["B3"] = "科目名称"
+    ws["C3"] = "本期发生借方"
+    ws["D3"] = "本期发生贷方"
+    ws["A4"] = "3001"
+    ws["B4"] = "甲骨易（北京）语言科技股份有限公司"
+    ws["C4"] = 1.0
+    wb.save(path)
+    from inspect_inputs import inspect_dir
+
+    found = inspect_dir(tmp_path)
+    assert found
+    assert found[0]["entity"] == "湖南子公司"
+
+
+def test_fetched_book_without_pl_codes_counts_as_source(tmp_path: Path):
+    path = tmp_path / "hunan.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "科目余额表"
+    ws["A1"] = "科目余额表"
+    ws["A2"] = "公司名称：甲骨易（北京）语言科技股份有限公司湖南分公司"
+    ws["A3"] = "科目编码"
+    ws["B3"] = "科目名称"
+    ws["C3"] = "本期发生借方"
+    ws["D3"] = "本期发生贷方"
+    ws["A4"] = "1002"
+    ws["B4"] = "银行存款"
+    ws["C4"] = 1.0
+    wb.save(path)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert "有源账套=" in r.stdout
+    assert "湖南分公司" in r.stdout.split("有源账套=")[1].split("\n")[0]
+    assert "已取但无损益科目=湖南分公司" in (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
 
 
 def test_no_key_with_export_still_builds(tmp_path: Path):

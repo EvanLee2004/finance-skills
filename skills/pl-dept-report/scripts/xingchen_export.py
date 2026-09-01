@@ -28,6 +28,8 @@ SIJIA_MD = Path(
 WORKBENCH = "https://service.jdy.com/workbench/web/index.html"
 XINGCHEN_HOME = "https://tf.jdy.com/ierp/index.html?formId=home_page"
 ASSIST_FORM = "https://tf.jdy.com/ierp/index.html?formId=gl_rpt_assistbalance"
+ACCT_FORM = "https://tf.jdy.com/ierp/index.html?formId=gl_rpt_acctbalance"
+EXPORT_LOG = "https://tf.jdy.com/ierp/index.html?formId=bos_exportlog_list"
 
 BOOKS = {
     "wenhua": "北京甲骨易文化传媒有限公司",
@@ -142,19 +144,24 @@ async def export_book(page, key: str, legal: str, period: str, out_dir: Path) ->
         note["reason"] = "switch_failed"
         return note
     reports = [
-        ("account", "账务处理", "科目余额表", out_dir / f"{key}_科目余额表.xlsx"),
-        ("assist", "账务处理", "核算项目余额表", out_dir / f"{key}_核算项目余额表.xlsx"),
-        ("profit", "财务报表", "利润表", out_dir / f"{key}_利润表.xlsx"),
+        ("account", ACCT_FORM, out_dir / f"{key}_科目余额表.xlsx"),
+        ("assist", ASSIST_FORM, out_dir / f"{key}_核算项目余额表.xlsx"),
     ]
-    for kind, top, item, path in reports:
+    for kind, url, path in reports:
         try:
-            await page.goto(XINGCHEN_HOME, wait_until="domcontentloaded")
-            await page.wait_for_timeout(800)
+            await _dismiss_overlays(page)
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+            await _dismiss_overlays(page)
             if kind == "assist":
-                await page.goto(ASSIST_FORM, wait_until="domcontentloaded")
-                await page.wait_for_timeout(1500)
-            else:
-                await _open_menu(page, top, item)
+                box = page.locator(".kd-table-cell-basedata-container").first
+                if await box.count():
+                    await box.click()
+                    await page.keyboard.type("部门")
+                    await page.wait_for_timeout(800)
+                    if await page.get_by_text("0003", exact=True).count():
+                        await page.get_by_text("部门", exact=True).last.click()
+                        await page.keyboard.press("Enter")
             if await _export_current(page, path):
                 note["files"].append(path.name)
         except Exception as e:
