@@ -1,0 +1,69 @@
+{
+  "excel_entity_order": [
+    "甲骨易",
+    "文化",
+    "上海",
+    "山东分公司",
+    "湖南分公司",
+    "湖南子公司",
+    "四川分公司",
+    "济南子公司"
+  ],
+  "xingchen_accounts": [
+    {
+      "key": "jiagu",
+      "excel_header": "甲骨易",
+      "legal_name": "甲骨易（北京）语言科技股份有限公司",
+      "has_xingchen": true,
+      "api_ready_default": true
+    },
+    {
+      "key": "wenhua",
+      "excel_header": "文化",
+      "legal_name": "北京甲骨易文化传媒有限公司",
+      "has_xingchen": true,
+      "api_ready_default": false
+    },
+    {
+      "key": "shanghai",
+      "excel_header": "上海",
+      "legal_name": "甲骨易智译（上海）科技有限公司",
+      "has_xingchen": true,
+      "api_ready_default": false
+    },
+    {
+      "key": "hunan_fgs",
+      "excel_header": "湖南分公司",
+      "legal_name": "甲骨易（北京）语言科技股份有限公司湖南分公司",
+      "has_xingchen": true,
+      "api_ready_default": false
+    },
+    {
+      "key": "hunan_zgs",
+      "excel_header": "湖南子公司",
+      "legal_name": "甲骨易（湖南）科技有限公司",
+      "has_xingchen": true,
+      "api_ready_default": false
+    }
+  ],
+  "no_xingchen_leave_blank": [
+    {
+      "excel_header": "山东分公司",
+      "reason": "星辰账套下拉里没有"
+    },
+    {
+      "excel_header": "四川分公司",
+      "reason": "星辰账套下拉里没有"
+    },
+    {
+      "excel_header": "济南子公司",
+      "reason": "星辰账套下拉里没有"
+    }
+  ],
+  "auth": {
+    "shared_client": true,
+    "local_file": "~/.config/finance/kingdee-pl.local.json",
+    "inherit_client_from": "~/.config/finance/kingdee.local.json",
+    "do_not_unbind_hq": true
+  }
+}

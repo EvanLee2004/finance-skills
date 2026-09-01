@@ -1,0 +1,1340 @@
+{
+  "_comment": "从版式金标只读结构抽出，无金额。父行部门公式按科目编码树现算，不抄金标漏项 SUM。",
+  "freeze": "C3",
+  "number_format": "_ * #,##0.00_ ;_ * \\-#,##0.00_ ;_ * \"-\"??_ ;_ @_ ",
+  "header_font": {
+    "name": "等线",
+    "size": 11,
+    "bold": true
+  },
+  "parent_font": {
+    "name": "宋体",
+    "size": 10,
+    "bold": true
+  },
+  "leaf_font": {
+    "name": "等线",
+    "size": 11,
+    "bold": false
+  },
+  "entities": [
+    "甲骨易",
+    "文化",
+    "上海",
+    "山东分公司",
+    "湖南分公司",
+    "湖南子公司",
+    "四川分公司",
+    "济南子公司"
+  ],
+  "no_xingchen": [
+    "山东分公司",
+    "四川分公司",
+    "济南子公司"
+  ],
+  "entity_pairs": [
+    {
+      "header": "甲骨易",
+      "debit": "C",
+      "credit": "D"
+    },
+    {
+      "header": "文化",
+      "debit": "E",
+      "credit": "F"
+    },
+    {
+      "header": "上海",
+      "debit": "G",
+      "credit": "H"
+    },
+    {
+      "header": "山东分公司",
+      "debit": "I",
+      "credit": "J"
+    },
+    {
+      "header": "湖南分公司",
+      "debit": "K",
+      "credit": "L"
+    },
+    {
+      "header": "湖南子公司",
+      "debit": "M",
+      "credit": "N"
+    },
+    {
+      "header": "四川分公司",
+      "debit": "O",
+      "credit": "P"
+    },
+    {
+      "header": "济南子公司",
+      "debit": "Q",
+      "credit": "R"
+    }
+  ],
+  "total_debit_col": "S",
+  "total_credit_col": "T",
+  "dept_start_col": "U",
+  "dept_end_col": "AT",
+  "dept_sum_col": "AU",
+  "check_col": "AV",
+  "departments": [
+    "营销总监及助理",
+    "KA",
+    "视听",
+    "本地化",
+    "游戏",
+    "项目总监及助理",
+    "项目一组",
+    "外地",
+    "本地化",
+    "渠道开发中心",
+    "技术中心",
+    "翻译中心",
+    "视频制作部",
+    "运营保障中心",
+    "资源中心",
+    "数据系统中心",
+    "人力资源部",
+    "市场部",
+    "财务中心",
+    "总经办",
+    "济南分公司",
+    "四川分公司",
+    "广东分公司",
+    "湖南分公司",
+    "湖南子公司",
+    "济南子公司"
+  ],
+  "row1_groups": [
+    {
+      "label": "甲骨易",
+      "start": "C",
+      "end": "D"
+    },
+    {
+      "label": "文化",
+      "start": "E",
+      "end": "F"
+    },
+    {
+      "label": "上海",
+      "start": "G",
+      "end": "H"
+    },
+    {
+      "label": "山东分公司",
+      "start": "I",
+      "end": "J"
+    },
+    {
+      "label": "湖南分公司",
+      "start": "K",
+      "end": "L"
+    },
+    {
+      "label": "湖南子公司",
+      "start": "M",
+      "end": "N"
+    },
+    {
+      "label": "四川分公司",
+      "start": "O",
+      "end": "P"
+    },
+    {
+      "label": "济南子公司",
+      "start": "Q",
+      "end": "R"
+    },
+    {
+      "label": "合计",
+      "start": "S",
+      "end": "T"
+    },
+    {
+      "label": "营销中心",
+      "start": "U",
+      "end": "Y"
+    },
+    {
+      "label": "项目中心",
+      "start": "Z",
+      "end": "AC"
+    }
+  ],
+  "income_prefixes": [
+    "51",
+    "52",
+    "53"
+  ],
+  "accounts": [
+    {
+      "code": "5101",
+      "name": "主营业务收入",
+      "bold": true
+    },
+    {
+      "code": "5102",
+      "name": "其他业务收入",
+      "bold": true
+    },
+    {
+      "code": "5201",
+      "name": "投资收益",
+      "bold": true
+    },
+    {
+      "code": "520101",
+      "name": "理财产品",
+      "bold": false
+    },
+    {
+      "code": "520199",
+      "name": "其他",
+      "bold": false
+    },
+    {
+      "code": "5221",
+      "name": "其他收益",
+      "bold": true
+    },
+    {
+      "code": "522102",
+      "name": "加计抵减",
+      "bold": false
+    },
+    {
+      "code": "522103",
+      "name": "政府补助",
+      "bold": false
+    },
+    {
+      "code": "5203",
+      "name": "公允价值变动损益",
+      "bold": true
+    },
+    {
+      "code": "5301",
+      "name": "营业外收入",
+      "bold": true
+    },
+    {
+      "code": "5401",
+      "name": "主营业务成本",
+      "bold": true
+    },
+    {
+      "code": "540103",
+      "name": "翻译语言服务",
+      "bold": false
+    },
+    {
+      "code": "540109",
+      "name": "工资",
+      "bold": false
+    },
+    {
+      "code": "540110",
+      "name": "其他奖金",
+      "bold": false
+    },
+    {
+      "code": "540111",
+      "name": "社保",
+      "bold": true
+    },
+    {
+      "code": "54011101",
+      "name": "养老保险",
+      "bold": false
+    },
+    {
+      "code": "54011102",
+      "name": "医疗保险",
+      "bold": false
+    },
+    {
+      "code": "54011103",
+      "name": "失业保险",
+      "bold": false
+    },
+    {
+      "code": "54011104",
+      "name": "工伤保险",
+      "bold": false
+    },
+    {
+      "code": "54011105",
+      "name": "生育保险",
+      "bold": false
+    },
+    {
+      "code": "54011106",
+      "name": "大额互助",
+      "bold": false
+    },
+    {
+      "code": "54011107",
+      "name": "补充医疗保险",
+      "bold": false
+    },
+    {
+      "code": "54011108",
+      "name": "残保金",
+      "bold": false
+    },
+    {
+      "code": "540112",
+      "name": "住房公积金",
+      "bold": false
+    },
+    {
+      "code": "540113",
+      "name": "职工福利费",
+      "bold": false
+    },
+    {
+      "code": "540116",
+      "name": "差旅费",
+      "bold": false
+    },
+    {
+      "code": "540117",
+      "name": "业务招待费",
+      "bold": false
+    },
+    {
+      "code": "540118",
+      "name": "办公费",
+      "bold": false
+    },
+    {
+      "code": "540119",
+      "name": "交通费",
+      "bold": false
+    },
+    {
+      "code": "540120",
+      "name": "设计费",
+      "bold": false
+    },
+    {
+      "code": "540122",
+      "name": "咨询费",
+      "bold": false
+    },
+    {
+      "code": "540123",
+      "name": "服务费",
+      "bold": false
+    },
+    {
+      "code": "540124",
+      "name": "房租费",
+      "bold": false
+    },
+    {
+      "code": "540125",
+      "name": "物业费",
+      "bold": false
+    },
+    {
+      "code": "540126",
+      "name": "电费",
+      "bold": false
+    },
+    {
+      "code": "540127",
+      "name": "水费",
+      "bold": false
+    },
+    {
+      "code": "540130",
+      "name": "培训费",
+      "bold": false
+    },
+    {
+      "code": "540131",
+      "name": "租赁费",
+      "bold": false
+    },
+    {
+      "code": "540132",
+      "name": "快递费",
+      "bold": false
+    },
+    {
+      "code": "540133",
+      "name": "装修费",
+      "bold": false
+    },
+    {
+      "code": "540198",
+      "name": "活动团建费",
+      "bold": false
+    },
+    {
+      "code": "540197",
+      "name": "加班餐费",
+      "bold": false
+    },
+    {
+      "code": "540199",
+      "name": "其他",
+      "bold": false
+    },
+    {
+      "code": "5402",
+      "name": "税金及附加",
+      "bold": true
+    },
+    {
+      "code": "540201",
+      "name": "城市维护建设税",
+      "bold": false
+    },
+    {
+      "code": "540202",
+      "name": "教育费附加",
+      "bold": false
+    },
+    {
+      "code": "540203",
+      "name": "地方教育费",
+      "bold": false
+    },
+    {
+      "code": "540204",
+      "name": "印花税",
+      "bold": true
+    },
+    {
+      "code": "540205",
+      "name": "企业文化建设费",
+      "bold": true
+    },
+    {
+      "code": "5501",
+      "name": "销售费用",
+      "bold": true
+    },
+    {
+      "code": "550101",
+      "name": "工资",
+      "bold": false
+    },
+    {
+      "code": "550103",
+      "name": "社保",
+      "bold": true
+    },
+    {
+      "code": "55010301",
+      "name": "养老保险",
+      "bold": false
+    },
+    {
+      "code": "55010302",
+      "name": "医疗保险",
+      "bold": false
+    },
+    {
+      "code": "55010303",
+      "name": "失业保险",
+      "bold": false
+    },
+    {
+      "code": "55010304",
+      "name": "工伤保险",
+      "bold": false
+    },
+    {
+      "code": "55010305",
+      "name": "生育保险",
+      "bold": false
+    },
+    {
+      "code": "55010306",
+      "name": "大额互助",
+      "bold": false
+    },
+    {
+      "code": "550104",
+      "name": "住房公积金",
+      "bold": false
+    },
+    {
+      "code": "550105",
+      "name": "职工福利费",
+      "bold": false
+    },
+    {
+      "code": "550108",
+      "name": "培训费",
+      "bold": true
+    },
+    {
+      "code": "55010801",
+      "name": "内部培训",
+      "bold": false
+    },
+    {
+      "code": "550122",
+      "name": "通讯费",
+      "bold": true
+    },
+    {
+      "code": "55012201",
+      "name": "手机费",
+      "bold": false
+    },
+    {
+      "code": "550127",
+      "name": "会议费",
+      "bold": true
+    },
+    {
+      "code": "55012701",
+      "name": "内部会议",
+      "bold": false
+    },
+    {
+      "code": "55012702",
+      "name": "外部会议",
+      "bold": false
+    },
+    {
+      "code": "550111",
+      "name": "差旅费",
+      "bold": false
+    },
+    {
+      "code": "550112",
+      "name": "办公费",
+      "bold": false
+    },
+    {
+      "code": "550113",
+      "name": "快递费",
+      "bold": false
+    },
+    {
+      "code": "550119",
+      "name": "业务招待费",
+      "bold": false
+    },
+    {
+      "code": "550120",
+      "name": "其他客情费",
+      "bold": false
+    },
+    {
+      "code": "550121",
+      "name": "市内交通费",
+      "bold": false
+    },
+    {
+      "code": "550123",
+      "name": "公证费",
+      "bold": false
+    },
+    {
+      "code": "550124",
+      "name": "展位费",
+      "bold": false
+    },
+    {
+      "code": "550125",
+      "name": "广告宣传费",
+      "bold": false
+    },
+    {
+      "code": "550126",
+      "name": "汽车费用",
+      "bold": true
+    },
+    {
+      "code": "55012601",
+      "name": "汽油费",
+      "bold": false
+    },
+    {
+      "code": "550128",
+      "name": "品牌市场活动费",
+      "bold": false
+    },
+    {
+      "code": "550129",
+      "name": "市场渠道费",
+      "bold": false
+    },
+    {
+      "code": "550130",
+      "name": "设计费",
+      "bold": false
+    },
+    {
+      "code": "550131",
+      "name": "服务费",
+      "bold": false
+    },
+    {
+      "code": "550134",
+      "name": "加班餐费",
+      "bold": false
+    },
+    {
+      "code": "550198",
+      "name": "活动团建费",
+      "bold": false
+    },
+    {
+      "code": "5502",
+      "name": "管理费用",
+      "bold": true
+    },
+    {
+      "code": "550201",
+      "name": "工资",
+      "bold": false
+    },
+    {
+      "code": "550202",
+      "name": "社会保险",
+      "bold": true
+    },
+    {
+      "code": "55020201",
+      "name": "养老保险",
+      "bold": false
+    },
+    {
+      "code": "55020202",
+      "name": "失业保险",
+      "bold": false
+    },
+    {
+      "code": "55020203",
+      "name": "工伤保险",
+      "bold": false
+    },
+    {
+      "code": "55020204",
+      "name": "生育保险",
+      "bold": false
+    },
+    {
+      "code": "55020205",
+      "name": "基本医疗保险",
+      "bold": false
+    },
+    {
+      "code": "55020207",
+      "name": "补充医疗保险",
+      "bold": false
+    },
+    {
+      "code": "550203",
+      "name": "住房公积金",
+      "bold": false
+    },
+    {
+      "code": "550204",
+      "name": "职工福利费",
+      "bold": false
+    },
+    {
+      "code": "550207",
+      "name": "辞退福利",
+      "bold": false
+    },
+    {
+      "code": "550208",
+      "name": "培训费",
+      "bold": true
+    },
+    {
+      "code": "55020801",
+      "name": "内部培训",
+      "bold": false
+    },
+    {
+      "code": "55020802",
+      "name": "外部培训",
+      "bold": false
+    },
+    {
+      "code": "550209",
+      "name": "差旅费",
+      "bold": false
+    },
+    {
+      "code": "550210",
+      "name": "办公费",
+      "bold": false
+    },
+    {
+      "code": "550211",
+      "name": "快递费",
+      "bold": false
+    },
+    {
+      "code": "550212",
+      "name": "房租",
+      "bold": false
+    },
+    {
+      "code": "550213",
+      "name": "物业费",
+      "bold": false
+    },
+    {
+      "code": "550214",
+      "name": "电费",
+      "bold": false
+    },
+    {
+      "code": "550215",
+      "name": "水费",
+      "bold": false
+    },
+    {
+      "code": "550217",
+      "name": "业务招待费",
+      "bold": false
+    },
+    {
+      "code": "550218",
+      "name": "其他客情费",
+      "bold": false
+    },
+    {
+      "code": "550219",
+      "name": "市内交通费",
+      "bold": false
+    },
+    {
+      "code": "550220",
+      "name": "通讯费",
+      "bold": true
+    },
+    {
+      "code": "55022001",
+      "name": "手机费",
+      "bold": false
+    },
+    {
+      "code": "55022002",
+      "name": "固话费",
+      "bold": false
+    },
+    {
+      "code": "550221",
+      "name": "装修费",
+      "bold": false
+    },
+    {
+      "code": "550222",
+      "name": "维修费",
+      "bold": false
+    },
+    {
+      "code": "550224",
+      "name": "公证费",
+      "bold": false
+    },
+    {
+      "code": "550226",
+      "name": "品牌宣传费",
+      "bold": false
+    },
+    {
+      "code": "550227",
+      "name": "广告费",
+      "bold": false
+    },
+    {
+      "code": "550228",
+      "name": "汽车费用",
+      "bold": true
+    },
+    {
+      "code": "55022801",
+      "name": "停车过路费",
+      "bold": false
+    },
+    {
+      "code": "55022802",
+      "name": "汽油费",
+      "bold": false
+    },
+    {
+      "code": "55022803",
+      "name": "其他",
+      "bold": false
+    },
+    {
+      "code": "550229",
+      "name": "会议费",
+      "bold": true
+    },
+    {
+      "code": "55022901",
+      "name": "内部会议",
+      "bold": false
+    },
+    {
+      "code": "55022902",
+      "name": "外部会议",
+      "bold": false
+    },
+    {
+      "code": "550230",
+      "name": "品牌市场活动费",
+      "bold": false
+    },
+    {
+      "code": "550231",
+      "name": "市场渠道费",
+      "bold": false
+    },
+    {
+      "code": "550232",
+      "name": "知识产权、专利、商标申请",
+      "bold": false
+    },
+    {
+      "code": "550233",
+      "name": "行业资质",
+      "bold": false
+    },
+    {
+      "code": "550236",
+      "name": "招聘费",
+      "bold": false
+    },
+    {
+      "code": "550240",
+      "name": "设计费",
+      "bold": false
+    },
+    {
+      "code": "550241",
+      "name": "咨询费",
+      "bold": false
+    },
+    {
+      "code": "550242",
+      "name": "服务费",
+      "bold": false
+    },
+    {
+      "code": "550243",
+      "name": "保洁费",
+      "bold": false
+    },
+    {
+      "code": "550244",
+      "name": "标书费",
+      "bold": false
+    },
+    {
+      "code": "550245",
+      "name": "中标服务费",
+      "bold": false
+    },
+    {
+      "code": "550246",
+      "name": "投标物料",
+      "bold": false
+    },
+    {
+      "code": "550247",
+      "name": "券商费用",
+      "bold": false
+    },
+    {
+      "code": "550248",
+      "name": "审计律师费",
+      "bold": false
+    },
+    {
+      "code": "550249",
+      "name": "其他租赁",
+      "bold": true
+    },
+    {
+      "code": "55024901",
+      "name": "电脑租赁",
+      "bold": false
+    },
+    {
+      "code": "55024902",
+      "name": "绿植租赁",
+      "bold": false
+    },
+    {
+      "code": "55024999",
+      "name": "其他",
+      "bold": false
+    },
+    {
+      "code": "550252",
+      "name": "折旧费",
+      "bold": false
+    },
+    {
+      "code": "550253",
+      "name": "无形资产摊销",
+      "bold": false
+    },
+    {
+      "code": "550254",
+      "name": "活动团建费",
+      "bold": false
+    },
+    {
+      "code": "550255",
+      "name": "加班餐费",
+      "bold": false
+    },
+    {
+      "code": "550256",
+      "name": "会员费",
+      "bold": false
+    },
+    {
+      "code": "5503",
+      "name": "研发费用",
+      "bold": true
+    },
+    {
+      "code": "550301",
+      "name": "工资",
+      "bold": false
+    },
+    {
+      "code": "550302",
+      "name": "其他奖金",
+      "bold": false
+    },
+    {
+      "code": "550303",
+      "name": "社保",
+      "bold": true
+    },
+    {
+      "code": "55030301",
+      "name": "养老保险",
+      "bold": false
+    },
+    {
+      "code": "55030302",
+      "name": "医疗保险",
+      "bold": false
+    },
+    {
+      "code": "55030303",
+      "name": "失业保险",
+      "bold": false
+    },
+    {
+      "code": "55030304",
+      "name": "工伤保险",
+      "bold": false
+    },
+    {
+      "code": "55030305",
+      "name": "生育保险",
+      "bold": false
+    },
+    {
+      "code": "550304",
+      "name": "住房公积金",
+      "bold": false
+    },
+    {
+      "code": "550308",
+      "name": "差旅费",
+      "bold": false
+    },
+    {
+      "code": "550310",
+      "name": "办公费",
+      "bold": false
+    },
+    {
+      "code": "550312",
+      "name": "房租",
+      "bold": false
+    },
+    {
+      "code": "550317",
+      "name": "交通费",
+      "bold": false
+    },
+    {
+      "code": "550319",
+      "name": "折旧费",
+      "bold": false
+    },
+    {
+      "code": "550321",
+      "name": "软件服务费",
+      "bold": false
+    },
+    {
+      "code": "550322",
+      "name": "技术服务费",
+      "bold": false
+    },
+    {
+      "code": "550323",
+      "name": "网络服务费",
+      "bold": false
+    },
+    {
+      "code": "550324",
+      "name": "流量服务费",
+      "bold": false
+    },
+    {
+      "code": "550325",
+      "name": "专利、商标等费用",
+      "bold": false
+    },
+    {
+      "code": "550398",
+      "name": "加班餐费",
+      "bold": false
+    },
+    {
+      "code": "550399",
+      "name": "其他",
+      "bold": false
+    },
+    {
+      "code": "5504",
+      "name": "财务费用",
+      "bold": true
+    },
+    {
+      "code": "550402",
+      "name": "利息收入",
+      "bold": false
+    },
+    {
+      "code": "550403",
+      "name": "利息支出",
+      "bold": false
+    },
+    {
+      "code": "550404",
+      "name": "手续费",
+      "bold": false
+    },
+    {
+      "code": "550499",
+      "name": "其他",
+      "bold": false
+    },
+    {
+      "code": "5521",
+      "name": "资产处置收益",
+      "bold": true
+    },
+    {
+      "code": "5601",
+      "name": "营业外支出",
+      "bold": true
+    },
+    {
+      "code": "5701",
+      "name": "所得税",
+      "bold": true
+    },
+    {
+      "code": "570101",
+      "name": "当期所得税费用",
+      "bold": false
+    }
+  ],
+  "column_widths": {
+    "A": 9.55,
+    "B": 28.22,
+    "C": 17.78,
+    "E": 15.11,
+    "F": 15.33,
+    "G": 15.11,
+    "H": 15.33,
+    "I": 15.11,
+    "K": 15.33,
+    "L": 15.11,
+    "M": 15.33,
+    "N": 15.11,
+    "S": 17.78,
+    "V": 14.11,
+    "W": 17.78,
+    "AA": 15.33,
+    "AB": 14.11,
+    "AD": 15.33,
+    "AE": 14.11,
+    "AH": 15.33,
+    "AI": 14.11,
+    "AJ": 15.33,
+    "AK": 14.11,
+    "AL": 10.44,
+    "AM": 15.33,
+    "AN": 16.55,
+    "AO": 15.33,
+    "AQ": 14.11,
+    "AR": 15.33,
+    "AT": 13.33,
+    "AU": 17.78,
+    "AV": 17.78
+  },
+  "profit_column_widths": {
+    "B": 17.22,
+    "C": 13.78,
+    "F": 20.33,
+    "I": 19.78,
+    "J": 17.22,
+    "K": 13.78,
+    "N": 20.33,
+    "Q": 19.78,
+    "R": 13.33,
+    "S": 15.44,
+    "T": 13.33
+  },
+  "profit_rows": [
+    {
+      "label": "收入",
+      "kind": "amount",
+      "pl_au_code": "5101"
+    },
+    {
+      "label": "成本",
+      "kind": "amount",
+      "pl_au_code": "5401"
+    },
+    {
+      "label": "税金及附加",
+      "kind": "amount",
+      "pl_au_code": "5402"
+    },
+    {
+      "label": "销售费用",
+      "kind": "amount",
+      "pl_au_code": "5501"
+    },
+    {
+      "label": "管理费用",
+      "kind": "amount",
+      "pl_au_code": "5502"
+    },
+    {
+      "label": "研发费用",
+      "kind": "amount",
+      "pl_au_code": "5503"
+    },
+    {
+      "label": "财务费用",
+      "kind": "amount",
+      "pl_au_code": "5504"
+    },
+    {
+      "label": "+其他收益",
+      "kind": "amount",
+      "pl_au_code": "5221"
+    },
+    {
+      "label": "+投资收益",
+      "kind": "amount",
+      "pl_au_code": "5201"
+    },
+    {
+      "label": "+公允价值变动收益",
+      "kind": "amount",
+      "pl_au_code": "5203"
+    },
+    {
+      "label": "+资产减值损失",
+      "kind": "amount"
+    },
+    {
+      "label": "+资产处置收益",
+      "kind": "amount",
+      "pl_au_code": "5521"
+    },
+    {
+      "label": "营业利润",
+      "kind": "operating"
+    },
+    {
+      "label": "+营业外收入",
+      "kind": "amount",
+      "pl_au_code": "5301"
+    },
+    {
+      "label": "-营业外支出",
+      "kind": "amount",
+      "pl_au_code": "5601"
+    },
+    {
+      "label": "利润总额",
+      "kind": "total_profit"
+    },
+    {
+      "label": "以前年度亏损",
+      "kind": "amount"
+    },
+    {
+      "label": "实际利润额",
+      "kind": "actual_profit"
+    },
+    {
+      "label": "当年计提所得税",
+      "kind": "amount",
+      "pl_au_code": "5701"
+    },
+    {
+      "label": "净利润",
+      "kind": "net_profit"
+    },
+    {
+      "label": "应交所得税",
+      "kind": "amount"
+    },
+    {
+      "label": "减免所得税",
+      "kind": "amount"
+    },
+    {
+      "label": "实交所得税",
+      "kind": "tax_paid"
+    },
+    {
+      "label": "成本率",
+      "kind": "cost_ratio"
+    },
+    {
+      "label": "毛利率",
+      "kind": "gross_margin"
+    },
+    {
+      "label": "",
+      "kind": "blank"
+    },
+    {
+      "label": "营业收入变动率",
+      "kind": "change",
+      "change_of": "收入"
+    },
+    {
+      "label": "营业成本变动率",
+      "kind": "change",
+      "change_of": "成本"
+    },
+    {
+      "label": "销售费用变动率",
+      "kind": "change",
+      "change_of": "销售费用"
+    },
+    {
+      "label": "管理费用变动率",
+      "kind": "change",
+      "change_of": "管理费用"
+    },
+    {
+      "label": "研发费用变动率",
+      "kind": "change",
+      "change_of": "研发费用"
+    },
+    {
+      "label": "毛利率变动率",
+      "kind": "change",
+      "change_of": "毛利率"
+    },
+    {
+      "label": "营业利润变动率",
+      "kind": "change",
+      "change_of": "营业利润"
+    }
+  ],
+  "profit_item_aliases": {
+    "收入": [
+      "营业收入",
+      "一、营业收入",
+      "主营业务收入",
+      "一、主营业务收入"
+    ],
+    "成本": [
+      "营业成本",
+      "减：营业成本",
+      "主营业务成本",
+      "减：主营业务成本"
+    ],
+    "税金及附加": [
+      "税金及附加"
+    ],
+    "销售费用": [
+      "销售费用"
+    ],
+    "管理费用": [
+      "管理费用"
+    ],
+    "研发费用": [
+      "研发费用"
+    ],
+    "财务费用": [
+      "财务费用"
+    ],
+    "+其他收益": [
+      "其他收益",
+      "加：其他收益"
+    ],
+    "+投资收益": [
+      "投资收益",
+      "加：投资收益"
+    ],
+    "+公允价值变动收益": [
+      "公允价值变动收益",
+      "公允价值变动损益"
+    ],
+    "+资产减值损失": [
+      "资产减值损失",
+      "信用减值损失"
+    ],
+    "+资产处置收益": [
+      "资产处置收益"
+    ],
+    "营业利润": [
+      "营业利润",
+      "二、营业利润"
+    ],
+    "+营业外收入": [
+      "营业外收入",
+      "加：营业外收入"
+    ],
+    "-营业外支出": [
+      "营业外支出",
+      "减：营业外支出"
+    ],
+    "利润总额": [
+      "利润总额",
+      "三、利润总额"
+    ],
+    "当年计提所得税": [
+      "所得税费用",
+      "减：所得税费用",
+      "所得税"
+    ],
+    "净利润": [
+      "净利润",
+      "四、净利润"
+    ]
+  }
+}
