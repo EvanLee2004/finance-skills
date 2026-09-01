@@ -633,3 +633,33 @@ def test_same_code_different_name_does_not_write_layout_row(tmp_path: Path):
     assert "同码不同名=540103->540112" in report
     assert "350" not in r.stdout
     assert "249313.21" not in r.stdout
+
+
+def _yaml_description(skill_md: Path) -> str:
+    text = skill_md.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    assert len(parts) >= 3, skill_md
+    return parts[1]
+
+
+def test_two_trigger_phrases_do_not_steal_dept_expense_alloc():
+    pl_yaml = _yaml_description(SKILL / "SKILL.md")
+    other_md = (SKILL.parent / "dept-expense-alloc" / "SKILL.md").read_text(encoding="utf-8")
+    other_yaml = _yaml_description(SKILL.parent / "dept-expense-alloc" / "SKILL.md")
+    for phrase in ("月度损益表", "科目余额表"):
+        assert phrase in pl_yaml
+        assert phrase not in other_yaml
+    assert "pl-dept-report" in other_md
+    assert "dept-expense-alloc" in pl_yaml
+    assert "部门费用归集" in other_yaml
+    assert "用友按人拆" in pl_yaml or "用友" in pl_yaml
+
+
+def test_skill_forbids_adhoc_openpyxl_and_default_skips_input_dir():
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert "python -c" in text
+    assert "import openpyxl" in text
+    assert "不要**加 `--input-dir`" in text or "不要加 `--input-dir`" in text
+    assert "hq.xlsx" in text
+    yaml = _yaml_description(SKILL / "SKILL.md")
+    assert "月度损益表" in yaml and "科目余额表" in yaml
