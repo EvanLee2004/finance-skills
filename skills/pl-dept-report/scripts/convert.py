@@ -59,6 +59,11 @@ from common import (
 )
 from formula_eval import eval_workbook
 from inspect_inputs import inspect_dir, inspect_file
+from offline_profit import (
+    apply_offline_profit,
+    load_offline_rules,
+    parse_agency_file,
+)
 from layout import (
     account_row_map,
     apply_ben_gongsi,
@@ -484,36 +489,62 @@ def write_report(path: Path, payload: dict) -> None:
         lines.append("未映射部门=" + "、".join(payload["unmapped_names"]))
     if payload.get("notes"):
         lines.append("说明=" + "；".join(payload["notes"]))
+    ask = payload.get("ask") or ""
+    if ask:
+        lines.append("ask=" + ask)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def apply_monthly_overlay(entity_amts, profit_cur, profit_prev, parsed, books, period, notes):
-    monthly_acc = parsed.get("monthly_accounts") or {}
-    monthly_profit = parsed.get("monthly_profits") or {}
-    always = books.get("offline_from_monthly_excel") or []
-    if_empty = books.get("overlay_monthly_if_empty") or []
-    for header in always:
-        src = monthly_acc.get(header) or {}
-        if src:
-            entity_amts[header] = src
-            notes.append(f"月更Excel覆盖={header}")
-    for header in if_empty:
-        if entity_amts.get(header):
+def collect_offline_records(inspected: list[dict], extra_files: list[str], period: str, notes: list[str]) -> list[dict]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for item in inspected:
+        if item.get("kind") != "agency_profit":
             continue
-        src = monthly_acc.get(header) or {}
-        if src:
-            entity_amts[header] = src
-            notes.append(f"月更Excel补空={header}")
-    cur_p = monthly_profit.get(period) or {}
-    prev_p = monthly_profit.get(prev_period(period)) or {}
-    for header in list(always) + list(if_empty):
-        if cur_p.get(header) and (header in always or not profit_cur.get(header)):
-            profit_cur.setdefault(header, {}).update(cur_p[header])
-        if prev_p.get(header) and (header in always or not profit_prev.get(header)):
-            profit_prev.setdefault(header, {}).update(prev_p[header])
+        p = Path(item["path"])
+        if p.is_file():
+            paths.append(p)
+    for raw in extra_files:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            paths.extend(sorted(p.rglob("*.xls")))
+            paths.extend(sorted(p.rglob("*.xlsx")))
+        elif p.is_file():
+            paths.append(p)
+    records = []
+    by_ent: dict[str, dict] = {}
+    for path in paths:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        if "损益类部门科目余额表" in path.name or path.name.startswith("月度损益表_"):
+            notes.append("忽略损益表成品=" + path.name)
+            continue
+        try:
+            rec = parse_agency_file(path)
+        except Exception as e:
+            notes.append(f"线下利润表读失败={path.name}:{type(e).__name__}")
+            continue
+        ent = rec.get("entity")
+        if not ent or not rec.get("values"):
+            continue
+        per = rec.get("period") or period
+        if per != period:
+            notes.append(f"线下利润表期间不符={ent}:{per}")
+            continue
+        by_ent[ent] = rec
+    return list(by_ent.values())
 
 
-def run(period: str, input_dir: Path, out: Path, no_api: bool, offline_xlsx: str = "") -> int:
+def run(
+    period: str,
+    input_dir: Path,
+    out: Path,
+    no_api: bool,
+    offline_xlsx: str | list[str] | None = "",
+    skip_offline: bool = False,
+) -> int:
     layout = load_layout()
     books = load_books()
     mapping = load_dept_map()
@@ -521,11 +552,18 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool, offline_xlsx: str
     secrets: list[str] = []
     synonyms = load_name_synonyms()
     inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
-    if offline_xlsx:
-        extra = Path(offline_xlsx).expanduser()
-        if extra.is_file():
-            inspected.extend(inspect_file(extra))
-    parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}, "monthly_accounts": {}, "monthly_profits": {}}
+    extra_files: list[str] = []
+    if isinstance(offline_xlsx, (list, tuple)):
+        extra_files = [str(x) for x in offline_xlsx if x]
+    elif offline_xlsx:
+        extra_files = [str(offline_xlsx)]
+    for raw in extra_files:
+        p = Path(raw).expanduser()
+        if p.is_file():
+            inspected.extend(inspect_file(p))
+        elif p.is_dir():
+            inspected.extend(inspect_dir(p))
+    parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
     entity_amts: dict = {e: {} for e in layout["entities"]}
     amount_labels = {row["label"] for row in layout["profit_rows"] if row.get("kind") == "amount" and row.get("label")}
     hq_from_api = False
@@ -677,7 +715,17 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool, offline_xlsx: str
         profit_prev.setdefault(ent, {}).update({k: v for k, v in mapped.items() if k in amount_labels})
     if prev_map:
         profit_prev.setdefault("甲骨易", {}).update(prev_map)
-    apply_monthly_overlay(entity_amts, profit_cur, profit_prev, parsed, books, period, notes)
+    offline_records = []
+    if not skip_offline:
+        offline_records = collect_offline_records(inspected, extra_files, period, notes)
+        apply_offline_profit(entity_amts, dept_amts, profit_cur, offline_records, period, notes)
+        needed = (load_offline_rules().get("entities") or [])
+        have = {r.get("entity") for r in offline_records}
+        missing_off = [e for e in needed if e not in have]
+        if missing_off:
+            notes.append("缺线下利润表=" + ",".join(missing_off))
+    else:
+        notes.append("线下利润表=跳过")
     if not any(profit_prev.get(e) for e in layout["entities"]):
         notes.append("无上月列")
 
@@ -717,7 +765,12 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool, offline_xlsx: str
         "out": str(out.resolve()),
         "status": status,
         "notes": notes,
+        "ask": "",
     }
+    miss_note = next((n for n in notes if n.startswith("缺线下利润表=")), "")
+    if miss_note and not skip_offline:
+        names = miss_note.split("=", 1)[1]
+        payload["ask"] = f"缺{names}的代账利润表（小企业利润表，有本月金额）。损益表成品不能当源。请把表放到文件夹或告诉我路径；若先不处理这几家，说一声我留空。"
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)
     text = (
@@ -729,6 +782,8 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool, offline_xlsx: str
         f"产物={out.resolve()}\n"
         f"status={status}\n"
     )
+    if payload.get("ask"):
+        text += f"ask={payload['ask']}\n"
     print(stdout_safe(text, secrets), end="", flush=True)
     return 0 if status == "ok" else 2
 
@@ -739,7 +794,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input-dir", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--no-api", action="store_true")
-    parser.add_argument("--offline-xlsx", default="")
+    parser.add_argument("--offline-xlsx", action="append", default=[])
+    parser.add_argument("--skip-offline", action="store_true")
     args = parser.parse_args(argv)
     period = parse_period(args.period)
     input_dir = discover_input_dir(args.input_dir)
@@ -753,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
         out,
         bool(args.no_api) or os.environ.get("PL_DEPT_SKIP_API") == "1",
         offline_xlsx=args.offline_xlsx,
+        skip_offline=bool(args.skip_offline),
     )
 
 

@@ -742,34 +742,42 @@ def test_shanghai_and_wenhua_bengongsi_special_mapping(tmp_path: Path):
     assert "上海:本公司" in report or "本公司" in report
 
 
-def test_monthly_excel_fills_shandong(tmp_path: Path):
+def _write_agency_profit(path: Path, company: str, period_text: str, month_mgmt: float) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "利润表"
+    ws["A1"] = "利润表"
+    ws["A2"] = f"编制单位：{company}"
+    ws["B2"] = period_text
+    ws["D2"] = "会小企02表"
+    ws["A3"] = "项目"
+    ws["B3"] = "行次"
+    ws["C3"] = "本年累计金额"
+    ws["D3"] = "本月金额"
+    ws["A4"] = "一、营业收入"
+    ws["A5"] = "减：营业成本"
+    ws["A6"] = "管理费用"
+    ws["D6"] = month_mgmt
+    ws["A7"] = "其中：开办费"
+    ws["A8"] = "二、营业利润（亏损以“-”号填列）"
+    ws["D8"] = -month_mgmt
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    wb.close()
+
+
+def test_result_workbook_is_not_a_source(tmp_path: Path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "损益表"
     ws["C1"] = "甲骨易"
-    ws["E1"] = "文化"
-    ws["G1"] = "上海"
     ws["I1"] = "山东分公司"
-    ws["K1"] = "湖南分公司"
-    ws["M1"] = "湖南子公司"
-    ws["O1"] = "四川分公司"
-    ws["Q1"] = "济南子公司"
     ws["A2"] = "科目编码"
     ws["B2"] = "科目名称"
     ws["I2"] = "本期发生借方"
-    ws["J2"] = "本期发生贷方"
-    ws["O2"] = "本期发生借方"
     ws["A3"] = "540109"
     ws["B3"] = "工资"
     ws["I3"] = 88.0
-    ws["O3"] = 22.0
-    profit = wb.create_sheet("利润表")
-    profit["A1"] = "项目"
-    profit["E1"] = "山东26年 8月"
-    profit["H1"] = "四川26年 8月"
-    profit["A2"] = "成本"
-    profit["E2"] = 88.0
-    profit["H2"] = 22.0
     wb.save(tmp_path / "2026年8月损益类部门科目余额表.xlsx")
     wb.close()
     _write_account(tmp_path / "hq.xlsx", "甲骨易（北京）语言科技股份有限公司", [("5101", "主营业务收入", None, 1.0)])
@@ -779,10 +787,87 @@ def test_monthly_excel_fills_shandong(tmp_path: Path):
     ws = openpyxl.load_workbook(out)["损益表"]
     layout = load_layout()
     row = account_row_map(layout)
-    assert ws[f"I{row['540109']}"].value == 88
-    assert ws[f"O{row['540109']}"].value == 22
+    assert ws[f"I{row['540109']}"].value in (None, "")
     report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
-    assert "山东分公司" in report.split("有源账套=")[1].split("\n")[0]
+    assert "忽略损益表成品" in report or "缺线下利润表" in report or "山东分公司" in (report.split("缺源账套=")[1].split("\n")[0] if "缺源账套=" in report else "")
+
+
+def test_agency_profit_fills_shandong_sichuan_jinan(tmp_path: Path):
+    _write_agency_profit(
+        tmp_path / "sd.xls".replace(".xls", ".xlsx"),
+        "甲骨易（北京）语言科技股份有限公司山东分公司",
+        "2026年8期",
+        88.0,
+    )
+    _write_agency_profit(
+        tmp_path / "sc.xlsx",
+        "甲骨易（北京）语言科技股份有限公司四川分公司",
+        "期间：2026年08月",
+        22.0,
+    )
+    _write_agency_profit(
+        tmp_path / "jn.xlsx",
+        "甲骨易(济南)科技有限公司",
+        "2026-08",
+        55.0,
+    )
+    _write_account(tmp_path / "hq.xlsx", "甲骨易（北京）语言科技股份有限公司", [("5101", "主营业务收入", None, 1.0)])
+    out = tmp_path / "out.xlsx"
+    r = _run(
+        [
+            "--period",
+            "202608",
+            "--input-dir",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--no-api",
+        ]
+    )
+    assert out.is_file(), r.stdout + r.stderr
+    assert "ask=" not in r.stdout
+    wb = openpyxl.load_workbook(out)
+    ws = wb["损益表"]
+    pf = wb["利润表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    assert ws[f"I{row['5401']}"].value == 88
+    assert ws[f"I{row['540111']}"].value == 88
+    assert ws[f"O{row['5502']}"].value == 22
+    assert ws[f"O{row['550201']}"].value == 22
+    assert ws[f"Q{row['5401']}"].value == 55
+    assert ws[f"Q{row['540109']}"].value == 55
+    jinan_dept = dept_col_letter(layout, "济南分公司", 1)
+    sichuan_dept = dept_col_letter(layout, "四川分公司", 1)
+    jinan_zgs = dept_col_letter(layout, "济南子公司", 1)
+    assert ws[f"{jinan_dept}{row['54011101']}"].value == 88
+    assert ws[f"{sichuan_dept}{row['550201']}"].value == 22
+    assert ws[f"{jinan_zgs}{row['540109']}"].value == 55
+    assert pf["E6"].value == 88
+    assert pf["H6"].value == 22
+    assert pf["I6"].value == 55
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "线下利润表=山东分公司" in report
+    assert "线下利润表=四川分公司" in report
+    assert "线下利润表=济南子公司" in report
+
+
+def test_missing_agency_profit_asks_and_leaves_empty(tmp_path: Path):
+    _write_account(tmp_path / "hq.xlsx", "甲骨易（北京）语言科技股份有限公司", [("5101", "主营业务收入", None, 1.0)])
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "ask=" in r.stdout
+    assert "代账利润表" in r.stdout
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    assert ws[f"I{row['5401']}"].value in (None, "")
+    skip = _run(
+        ["--period", "202608", "--input-dir", str(tmp_path), "--out", str(tmp_path / "skip.xlsx"), "--no-api", "--skip-offline"]
+    )
+    assert skip.returncode in (0, 2)
+    assert "线下利润表=跳过" in (tmp_path / "skip_运行报告.txt").read_text(encoding="utf-8") or "跳过" in skip.stdout
 
 
 def test_default_desktop_dir_helper(tmp_path: Path):

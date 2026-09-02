@@ -1,0 +1,61 @@
+{
+  "_comment": "山东/四川/济南没有星辰账。源是代账小企业利润表（本月金额），不是斯佳做好的损益表。损益表是产物。利润表没有科目明细，按 2026-08 金标反推整笔落到主科目，禁止编造社保拆分。",
+  "entities": ["山东分公司", "四川分公司", "济南子公司"],
+  "legal_name_to_entity": {
+    "山东分公司": "山东分公司",
+    "四川分公司": "四川分公司",
+    "甲骨易(济南)科技有限公司": "济南子公司",
+    "甲骨易（济南）科技有限公司": "济南子公司",
+    "济南科技": "济南子公司"
+  },
+  "sheet_hints": ["会小企", "小企业准则", "编制单位", "核算单位", "纳税人识别号", "本月金额"],
+  "skip_label_contains": ["其中", "消费税", "开办费", "商品维修", "商品维护", "广告费", "业务招待费", "研究费用", "利息费用", "政府补助", "坏账损失", "行次"],
+  "profit_lines": [
+    {"contains": ["营业收入"], "profit_label": "收入"},
+    {"contains": ["营业成本"], "profit_label": "成本"},
+    {"contains": ["税金及附加"], "profit_label": "税金及附加"},
+    {"contains": ["销售费用"], "profit_label": "销售费用"},
+    {"contains": ["管理费用"], "profit_label": "管理费用"},
+    {"contains": ["研究费用", "研发费用"], "profit_label": "研发费用"},
+    {"contains": ["财务费用"], "profit_label": "财务费用"},
+    {"contains": ["投资收益"], "profit_label": "+投资收益"},
+    {"contains": ["营业外收入"], "profit_label": "+营业外收入"},
+    {"contains": ["营业外支出"], "profit_label": "-营业外支出"},
+    {"contains": ["所得税"], "profit_label": "当年计提所得税"}
+  ],
+  "pl_split": {
+    "山东分公司": {
+      "管理费用": {
+        "parent": "5401",
+        "leaf": "540111",
+        "excel_dept": "济南分公司",
+        "side": "debit"
+      }
+    },
+    "四川分公司": {
+      "管理费用": {
+        "parent": "5502",
+        "leaf": "550201",
+        "excel_dept": "四川分公司",
+        "side": "debit"
+      }
+    },
+    "济南子公司": {
+      "管理费用": {
+        "parent": "5401",
+        "leaf": "540109",
+        "excel_dept": "济南子公司",
+        "side": "debit"
+      }
+    }
+  },
+  "default_split": {
+    "收入": {"parent": "5101", "leaf": "5101", "side": "credit"},
+    "成本": {"parent": "5401", "leaf": "5401", "side": "debit"},
+    "税金及附加": {"parent": "5402", "leaf": "5402", "side": "debit"},
+    "销售费用": {"parent": "5501", "leaf": "5501", "side": "debit"},
+    "管理费用": {"parent": "5502", "leaf": "5502", "side": "debit"},
+    "研发费用": {"parent": "5503", "leaf": "5503", "side": "debit"},
+    "财务费用": {"parent": "5504", "leaf": "5504", "side": "debit"}
+  }
+}

@@ -195,26 +195,7 @@ def parse_inspected(items: list[dict]) -> dict:
                 headers = header_map(ws, aliases)
             entity = item.get("entity")
             kind = item["kind"]
-            if kind == "monthly_overlay":
-                parsed = parse_monthly_pl_sheet(ws, layout)
-                for header, codes in parsed.items():
-                    bucket = monthly_accounts.setdefault(header, {})
-                    for code, pair in codes.items():
-                        if code not in bucket:
-                            bucket[code] = pair
-                        else:
-                            bucket[code] = {
-                                "debit": add_money(bucket[code].get("debit"), pair.get("debit")),
-                                "credit": add_money(bucket[code].get("credit"), pair.get("credit")),
-                                "name": pair.get("name") or bucket[code].get("name"),
-                            }
-                continue
-            if kind == "monthly_profit":
-                parsed = parse_monthly_profit_sheet(ws, layout, books, item.get("period") or "")
-                for per, ents in parsed.items():
-                    monthly_profits.setdefault(per, {})
-                    for header, vals in ents.items():
-                        monthly_profits[per].setdefault(header, {}).update(vals)
+            if kind in {"monthly_overlay", "monthly_profit", "agency_profit"}:
                 continue
             if kind == "account":
                 parsed = parse_account_sheet(ws, headers)

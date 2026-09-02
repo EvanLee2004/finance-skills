@@ -58,6 +58,16 @@ def detect_period_text(text: str) -> str | None:
     m3 = re.search(r"月度损益表_(\d{6})", blob)
     if m3:
         return m3.group(1)
+    m4 = re.search(r"(20\d{2})年\s*0?(\d{1,2})\s*月", blob)
+    if m4:
+        month = int(m4.group(2))
+        if 1 <= month <= 12:
+            return f"{m4.group(1)}{month:02d}"
+    m5 = re.search(r"(20\d{2})[-/](0?\d{1,2})(?!\d)", blob)
+    if m5:
+        month = int(m5.group(2))
+        if 1 <= month <= 12:
+            return f"{m5.group(1)}{month:02d}"
     return None
 
 

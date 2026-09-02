@@ -46,20 +46,19 @@
       "api_ready_default": false
     }
   ],
-  "offline_from_monthly_excel": ["山东分公司", "四川分公司", "济南子公司"],
-  "overlay_monthly_if_empty": ["湖南分公司", "湖南子公司"],
+  "offline_profit_entities": ["山东分公司", "四川分公司", "济南子公司"],
   "no_xingchen_leave_blank": [
     {
       "excel_header": "山东分公司",
-      "reason": "星辰账套下拉里没有，吃她每月更新的损益表 Excel"
+      "reason": "星辰没有账套；源是代账利润表，不是损益表成品"
     },
     {
       "excel_header": "四川分公司",
-      "reason": "星辰账套下拉里没有，吃她每月更新的损益表 Excel"
+      "reason": "星辰没有账套；源是代账利润表，不是损益表成品"
     },
     {
       "excel_header": "济南子公司",
-      "reason": "星辰账套下拉里没有，吃她每月更新的损益表 Excel"
+      "reason": "星辰没有账套；源是代账利润表，不是损益表成品"
     }
   ],
   "profit_header_aliases": {

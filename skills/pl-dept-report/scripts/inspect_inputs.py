@@ -16,6 +16,7 @@ from openpyxl import load_workbook
 
 from common import detect_period_text, discover_input_dir
 from layout import load_books, load_export_aliases
+from offline_profit import looks_like_agency_profit, match_offline_entity
 
 
 def _cell_text(value) -> str:
@@ -87,10 +88,12 @@ def classify_sheet(ws, aliases: dict) -> str | None:
     if _has_any(blob, aliases.get("skip_sheet_hints") or []) and "客户名称" in blob and "确认情况" in blob:
         return None
     title_s = title or ""
-    if title_s == "损益表" and ("山东分公司" in blob or "济南子公司" in blob or "四川分公司" in blob):
-        return "monthly_overlay"
+    if title_s == "损益表":
+        return None
+    if looks_like_agency_profit(blob, title_s):
+        return "agency_profit"
     if title_s == "利润表" and "山东" in blob and "湖南分公司" in blob and "本月金额" not in blob:
-        return "monthly_profit"
+        return None
     if "profit_month" in headers and ("profit_item" in headers or _has_any(blob, aliases.get("profit_sheet_hints") or [])):
         return "profit"
     if "account_code" in headers and "dept_name" in headers:
@@ -146,10 +149,20 @@ def inspect_file(path: Path) -> list[dict]:
     aliases = load_export_aliases()
     books = load_books()
     found = []
-    if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm"} or path.name.startswith("~$"):
+    if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"} or path.name.startswith("~$"):
         return found
+    if "损益类部门科目余额表" in path.name:
+        return found
+    src = path
+    if path.suffix.lower() == ".xls":
+        from offline_profit import ensure_xlsx
+
+        try:
+            src = ensure_xlsx(path)
+        except Exception:
+            return found
     try:
-        wb = load_workbook(path, data_only=False, read_only=True)
+        wb = load_workbook(src, data_only=False, read_only=True)
     except Exception:
         return found
     try:
@@ -160,6 +173,8 @@ def inspect_file(path: Path) -> list[dict]:
                 continue
             blob = sheet_blob(ws)
             entity = match_entity(blob + "\n" + path.name, path.name, books)
+            if kind == "agency_profit":
+                entity = match_offline_entity(blob + "\n" + path.name, path.name) or entity
             headers = header_map(ws, aliases)
             found.append(
                 {
@@ -181,7 +196,7 @@ def inspect_dir(input_dir: Path) -> list[dict]:
     if not input_dir.is_dir():
         return found
     for path in sorted(input_dir.rglob("*")):
-        if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
             continue
         found.extend(inspect_file(path))
     return found

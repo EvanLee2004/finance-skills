@@ -58,7 +58,7 @@ flowchart TD
   KEY["本机 kingdee.local.json"] --> API["总部只读 API"]
   INS --> MERGE["convert.py 拼表"]
   API --> MERGE
-  OFF["月更损益表 Excel<br/>山东/四川/济南左列"] --> MERGE
+  OFF["代账利润表 xls<br/>山东/四川/济南"] --> MERGE
   MAP["部门名映射 + 本公司规则<br/>上海费用→靠前本地化<br/>文化差旅招待→视听"] --> MERGE
   LAY["版式.json 科目树"] --> MERGE
   MERGE --> X["桌面 月度损益表_今天/<br/>损益表 + 利润表"]
@@ -70,7 +70,7 @@ flowchart TD
 
 | 输入 | 处理 | 输出 |
 |---|---|---|
-| 期间 YYYYMM（默认上月）；可选引出文件夹；月更损益表；本机密钥 | 总部 API 或引出；4 本星辰账引出；三家线下吃月更 Excel | 默认桌面 `月度损益表_YYYYMMDD/月度损益表_YYYYMM.xlsx` |
+| 期间 YYYYMM（默认上月）；可选引出文件夹；山东/四川/济南代账利润表；本机密钥 | 总部 API 或引出；4 本星辰账引出；三家线下吃利润表本月金额 | 默认桌面 `月度损益表_YYYYMMDD/月度损益表_YYYYMM.xlsx` |
 
 左列 8 家顺序：甲骨易、文化、上海、山东分公司、湖南分公司、湖南子公司、四川分公司、济南子公司。
 
