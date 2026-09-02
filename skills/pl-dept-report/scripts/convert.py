@@ -58,7 +58,7 @@ from common import (
     stdout_safe,
 )
 from formula_eval import eval_workbook
-from inspect_inputs import inspect_dir, inspect_file
+from inspect_inputs import inspect_dir, inspect_file, inspect_downloads_dept_assist
 from offline_profit import (
     apply_offline_profit,
     load_offline_rules,
@@ -127,6 +127,17 @@ def load_prev_profit(path: Path | None, layout: dict) -> dict[str, dict]:
             if val is not None:
                 out[ent][label] = val
     return out
+
+
+def pick_dept_rows(folded_depts: list[dict], api_depts: list[dict], hq_from_api: bool) -> tuple[list[dict], str | None]:
+    """右列以核算项目余额表为准。总部 API 凭证辅助缺收入/工资，有引出就不要用凭证凑。"""
+    file_hq = [row for row in folded_depts if row.get("entity") == "甲骨易"]
+    others = [row for row in folded_depts if row.get("entity") != "甲骨易"]
+    if file_hq:
+        return others + file_hq, "总部右列改用核算项目余额表引出"
+    if hq_from_api:
+        return others + list(api_depts or []), None
+    return others + file_hq + list(api_depts or []), None
 
 
 def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict, special_rules: dict | None = None):
@@ -554,6 +565,13 @@ def run(
     secrets: list[str] = []
     synonyms = load_name_synonyms()
     inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
+    have_hq_assist = any(item.get("kind") == "assist" and item.get("entity") == "甲骨易" for item in inspected)
+    if not have_hq_assist:
+        extra = inspect_downloads_dept_assist()
+        hq_extra = [item for item in extra if item.get("entity") == "甲骨易"]
+        if hq_extra:
+            inspected.extend(hq_extra)
+            notes.append("Downloads核算项目余额表=甲骨易")
     extra_files: list[str] = []
     if isinstance(offline_xlsx, (list, tuple)):
         extra_files = [str(x) for x in offline_xlsx if x]
@@ -701,32 +719,32 @@ def run(
             continue
         mapped = map_profit_dict(raw, layout)
         profit_cur[ent].update({k: v for k, v in mapped.items() if k in amount_labels})
-    export_depts = [
-        row
-        for row in folded_depts
-        if not (hq_from_api and row.get("entity") == "甲骨易")
-    ]
-    dept_rows = export_depts + api_depts
+    dept_rows, dept_note = pick_dept_rows(folded_depts, api_depts, hq_from_api)
+    if dept_note:
+        notes.append(dept_note)
     special_rules = load_ben_gongsi_rules()
     filled = accounts_as_bengongsi(entity_amts, dept_rows, special_rules, layout)
     if filled:
         by_ent = sorted({str(r.get("entity") or "") for r in filled if r.get("entity")})
         notes.append("本公司费用改从科目余额填右列=" + ",".join(by_ent))
         dept_rows = dept_rows + filled
-    if hq_from_api:
-        pay_needles = ("工资", "社保", "社会保险", "住房公积金", "养老保险")
-        names = layout_code_names(layout)
-        hq_left = entity_amts.get("甲骨易") or {}
-        hq_dept_codes = {str(r.get("code") or "") for r in api_depts}
-        for code, name in names.items():
-            if not any(n in name for n in pay_needles):
-                continue
-            pair = hq_left.get(code) or {}
-            if not pair.get("debit") and not pair.get("credit"):
-                continue
-            if code not in hq_dept_codes:
-                notes.append("总部工资社保无部门辅助，右列未拆这些科目")
-                break
+    pay_needles = ("工资", "社保", "社会保险", "住房公积金", "养老保险")
+    names = layout_code_names(layout)
+    hq_left = entity_amts.get("甲骨易") or {}
+    hq_dept_codes = {
+        str(r.get("code") or "")
+        for r in dept_rows
+        if r.get("entity") in (None, "甲骨易")
+    }
+    for code, name in names.items():
+        if not any(n in name for n in pay_needles):
+            continue
+        pair = hq_left.get(code) or {}
+        if not pair.get("debit") and not pair.get("credit"):
+            continue
+        if code not in hq_dept_codes:
+            notes.append("总部工资社保无部门辅助，右列未拆这些科目")
+            break
     report_tmp: dict = {}
     dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp, special_rules)
 
@@ -789,10 +807,19 @@ def run(
         "notes": notes,
         "ask": "",
     }
+    asks: list[str] = []
     miss_note = next((n for n in notes if n.startswith("缺线下利润表=")), "")
     if miss_note and not skip_offline:
         names = miss_note.split("=", 1)[1]
-        payload["ask"] = f"缺{names}的代账利润表（小企业利润表，有本月金额）。损益表成品不能当源。请把表放到文件夹或告诉我路径；若先不处理这几家，说一声我留空。"
+        asks.append(
+            f"缺{names}的代账利润表（小企业利润表，有本月金额）。损益表成品不能当源。请把表放到文件夹或告诉我路径；若先不处理这几家，说一声我留空。"
+        )
+    if any("总部工资社保无部门辅助" in n for n in notes):
+        asks.append("总部核算项目余额表和凭证都没有把工资/社保挂到部门。这些格子请给拆分表或手填，不要拿做好的损益表倒填。")
+    hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
+    if hunan_empty:
+        asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
+    payload["ask"] = " ".join(asks)
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)
     text = (

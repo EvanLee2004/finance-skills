@@ -97,8 +97,12 @@ def classify_sheet(ws, aliases: dict) -> str | None:
     if "profit_month" in headers and ("profit_item" in headers or _has_any(blob, aliases.get("profit_sheet_hints") or [])):
         return "profit"
     if "account_code" in headers and "dept_name" in headers:
+        if "客户编码" in blob and "部门名称" not in blob and "部门编码" not in blob:
+            return None
         return "assist"
     if _has_any(blob, aliases.get("assist_sheet_hints") or []) and "account_code" in headers:
+        if "客户编码" in blob and "部门名称" not in blob and "部门编码" not in blob:
+            return None
         return "assist"
     if "account_code" in headers and ("period_debit" in headers or "period_credit" in headers):
         if _has_any(blob, aliases.get("account_sheet_hints") or []) or "科目" in blob:
@@ -200,6 +204,25 @@ def inspect_dir(input_dir: Path) -> list[dict]:
             continue
         found.extend(inspect_file(path))
     return found
+
+
+def inspect_downloads_dept_assist() -> list[dict]:
+    """同事常把核算项目余额表扔在 Downloads。只收部门核算，不要客户核算。"""
+    folder = Path.home() / "Downloads"
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in sorted(folder.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if path.name.startswith("~$"):
+            continue
+        if "核算项目余额表" not in path.name:
+            continue
+        if "损益类部门科目余额表" in path.name:
+            continue
+        found.extend(inspect_file(path))
+        if found:
+            break
+    return [item for item in found if item.get("kind") == "assist" and item.get("entity")]
 
 
 def main(argv: list[str] | None = None) -> int:

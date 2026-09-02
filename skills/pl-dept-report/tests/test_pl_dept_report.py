@@ -18,11 +18,15 @@ CONFIG = SKILL / "config"
 CONVERT = SCRIPTS / "convert.py"
 POSTING_API = SKILL.parent / "kingdee-posting" / "scripts" / "kingdee_api.py"
 
-for _name in ("inspect_inputs", "parse_export", "layout", "common", "formula_eval"):
+for _name in ("inspect_inputs", "parse_export", "layout", "common", "formula_eval", "convert"):
     sys.modules.pop(_name, None)
 sys.path.insert(0, str(SCRIPTS))
 from formula_eval import eval_workbook  # noqa: E402
 from layout import account_row_map, dept_col_letter, dept_columns, direct_children, load_layout  # noqa: E402
+from convert import pick_dept_rows  # noqa: E402
+
+for _name in ("inspect_inputs", "parse_export", "convert", "common"):
+    sys.modules.pop(_name, None)
 
 
 def _run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -430,6 +434,72 @@ def test_wenhua_shanghai_accounts_fill_right_when_assist_has_no_expense(tmp_path
     assert ws[f"{local}{row['5101']}"].value in (None, "")
     assert "21" not in r.stdout
     assert "19" not in r.stdout
+
+
+def test_pick_dept_rows_prefers_hq_assist_file_over_vouchers():
+    folded = [
+        {"entity": "文化", "code": "550111", "dept": "本公司"},
+        {"entity": "甲骨易", "code": "510103", "dept": "营销总监及助理"},
+    ]
+    api = [{"entity": "甲骨易", "code": "550321", "dept": "产品部"}]
+    rows, note = pick_dept_rows(folded, api, hq_from_api=True)
+    assert note
+    assert any(r.get("code") == "510103" for r in rows)
+    assert not any(r.get("code") == "550321" for r in rows)
+    rows2, note2 = pick_dept_rows([folded[0]], api, hq_from_api=True)
+    assert note2 is None
+    assert any(r.get("code") == "550321" for r in rows2)
+
+
+def test_hq_assist_income_leaf_folds_to_5101(tmp_path: Path):
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5101", "主营业务收入", None, 20.0)],
+    )
+    _write_assist(
+        tmp_path / "hq_d.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("510103", "主营业务收入_多语本地化服务", "营销总监及助理", None, 20.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    letter = dept_col_letter(layout, "营销总监及助理", 1)
+    assert letter
+    assert ws[f"{letter}{row}"].value == 20
+
+
+def test_customer_assist_sheet_is_not_department(tmp_path: Path):
+    from inspect_inputs import inspect_file
+
+    path = tmp_path / "客户核算.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "核算项目余额表"
+    ws["A1"] = "核算项目余额表"
+    ws["A2"] = "公司名称：甲骨易（北京）语言科技股份有限公司"
+    ws["A3"] = "期间：202608-202608"
+    ws["A4"] = "客户编码"
+    ws["B4"] = "客户名称"
+    ws["C4"] = "科目编码"
+    ws["D4"] = "科目名称"
+    ws["E4"] = "本期发生额"
+    ws["A5"] = "客户编码"
+    ws["B5"] = "客户名称"
+    ws["C5"] = "科目编码"
+    ws["D5"] = "科目名称"
+    ws["E5"] = "借方"
+    ws["A6"] = "0101"
+    ws["B6"] = "某客户"
+    ws["C6"] = "113101"
+    ws["D6"] = "应收账款"
+    ws["E6"] = 9
+    wb.save(path)
+    found = inspect_file(path)
+    assert found == []
 
 
 def test_stdout_has_no_amount_or_secret(tmp_path: Path):
