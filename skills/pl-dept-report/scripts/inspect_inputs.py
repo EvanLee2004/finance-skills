@@ -86,6 +86,11 @@ def classify_sheet(ws, aliases: dict) -> str | None:
     headers = header_map(ws, aliases)
     if _has_any(blob, aliases.get("skip_sheet_hints") or []) and "客户名称" in blob and "确认情况" in blob:
         return None
+    title_s = title or ""
+    if title_s == "损益表" and ("山东分公司" in blob or "济南子公司" in blob or "四川分公司" in blob):
+        return "monthly_overlay"
+    if title_s == "利润表" and "山东" in blob and "湖南分公司" in blob and "本月金额" not in blob:
+        return "monthly_profit"
     if "profit_month" in headers and ("profit_item" in headers or _has_any(blob, aliases.get("profit_sheet_hints") or [])):
         return "profit"
     if "account_code" in headers and "dept_name" in headers:
@@ -137,42 +142,48 @@ def match_entity(blob: str, filename: str, books: dict) -> str | None:
     return None
 
 
-def inspect_dir(input_dir: Path) -> list[dict]:
+def inspect_file(path: Path) -> list[dict]:
     aliases = load_export_aliases()
     books = load_books()
+    found = []
+    if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm"} or path.name.startswith("~$"):
+        return found
+    try:
+        wb = load_workbook(path, data_only=False, read_only=True)
+    except Exception:
+        return found
+    try:
+        for title in wb.sheetnames:
+            ws = wb[title]
+            kind = classify_sheet(ws, aliases)
+            if not kind:
+                continue
+            blob = sheet_blob(ws)
+            entity = match_entity(blob + "\n" + path.name, path.name, books)
+            headers = header_map(ws, aliases)
+            found.append(
+                {
+                    "path": str(path.resolve()),
+                    "sheet": title,
+                    "kind": kind,
+                    "entity": entity,
+                    "period": detect_period_text(blob + "\n" + path.name),
+                    "headers": {k: {"row": v[0], "col": v[1]} for k, v in headers.items()},
+                }
+            )
+    finally:
+        wb.close()
+    return found
+
+
+def inspect_dir(input_dir: Path) -> list[dict]:
     found = []
     if not input_dir.is_dir():
         return found
     for path in sorted(input_dir.rglob("*")):
         if path.suffix.lower() not in {".xlsx", ".xlsm"}:
             continue
-        if path.name.startswith("~$"):
-            continue
-        try:
-            wb = load_workbook(path, data_only=False, read_only=True)
-        except Exception:
-            continue
-        try:
-            for title in wb.sheetnames:
-                ws = wb[title]
-                kind = classify_sheet(ws, aliases)
-                if not kind:
-                    continue
-                blob = sheet_blob(ws)
-                entity = match_entity(blob + "\n" + path.name, path.name, books)
-                headers = header_map(ws, aliases)
-                found.append(
-                    {
-                        "path": str(path.resolve()),
-                        "sheet": title,
-                        "kind": kind,
-                        "entity": entity,
-                        "period": detect_period_text(blob + "\n" + path.name),
-                        "headers": {k: {"row": v[0], "col": v[1]} for k, v in headers.items()},
-                    }
-                )
-        finally:
-            wb.close()
+        found.extend(inspect_file(path))
     return found
 
 

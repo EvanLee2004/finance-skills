@@ -22,6 +22,16 @@ def load_json(name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def default_desktop_dir(prefix: str, today: date | None = None, home: Path | None = None) -> Path:
+    day = (today or date.today()).strftime("%Y%m%d")
+    root = Path(home) if home else Path.home()
+    desktop = root / "Desktop"
+    base = desktop if desktop.is_dir() else Path.cwd()
+    path = base / f"{prefix}_{day}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def default_period(today: date | None = None) -> str:
     d = today or date.today()
     prev = d.replace(day=1) - timedelta(days=1)

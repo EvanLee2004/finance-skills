@@ -857,6 +857,28 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box,
     return lines
 
 
+def default_desktop_dir(prefix: str = "金蝶入账", today: date | None = None, home: Path | None = None) -> Path:
+    day = (today or date.today()).strftime("%Y%m%d")
+    root = Path(home) if home else Path.home()
+    desktop = root / "Desktop"
+    base = desktop if desktop.is_dir() else Path.cwd()
+    path = base / f"{prefix}_{day}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def shift_voucher_numbers(lines: list[VoucherLine], start_no: int | None) -> None:
+    if not start_no or int(start_no) == 1:
+        return
+    start = int(start_no)
+    if start < 1:
+        raise SystemExit("凭证号起始必须是正整数")
+    delta = start - 1
+    for line in lines:
+        if line.status == "可入账" and line.voucher_no is not None:
+            line.voucher_no = int(line.voucher_no) + delta
+
+
 def write_outputs(out_dir: Path, scene: str, lines: list[VoucherLine], rules: dict, booking: str, stem: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     detail = out_dir / f"{stem}_明细结果.xlsx"
@@ -872,6 +894,7 @@ def write_outputs(out_dir: Path, scene: str, lines: list[VoucherLine], rules: di
         "hold_count": hold,
         "kingdee_path": str(kingdee),
         "detail_path": str(detail),
+        "out_dir": str(out_dir),
     }
 
 
@@ -882,6 +905,8 @@ def run_dir(
     master_data: dict | None,
     lookups: dict | None = None,
     period_fetch=None,
+    start_voucher_no: int = 1,
+    out_dir: Path | None = None,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
@@ -896,14 +921,15 @@ def run_dir(
     if scene == "销项发票":
         src = Path(files["invoice"])
         lines = convert_sales(src, master, rules, aliases, box, day, period_fetch=period_fetch)
-        return write_outputs(input_dir, scene, lines, rules, day, src.stem)
-    if scene == "付款":
+    elif scene == "付款":
         src = Path(files["ledger"])
         lines = convert_payment(input_dir, src, master, rules, aliases)
-        return write_outputs(input_dir, scene, lines, rules, day, src.stem)
-    src = Path(files["receipt"])
-    lines = convert_receipt(src, master, rules, aliases, box, day, period_fetch=period_fetch)
-    return write_outputs(input_dir, scene, lines, rules, day, src.stem)
+    else:
+        src = Path(files["receipt"])
+        lines = convert_receipt(src, master, rules, aliases, box, day, period_fetch=period_fetch)
+    shift_voucher_numbers(lines, start_voucher_no)
+    dest = Path(out_dir) if out_dir else default_desktop_dir("金蝶入账")
+    return write_outputs(dest, scene, lines, rules, day, src.stem)
 
 
 def main(argv=None) -> int:
@@ -915,6 +941,8 @@ def main(argv=None) -> int:
     parser.add_argument("--master")
     parser.add_argument("--lookups")
     parser.add_argument("--no-api", action="store_true")
+    parser.add_argument("--start-voucher-no", type=int, default=1)
+    parser.add_argument("--out-dir", "--out", dest="out_dir")
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
     if args.inspect:
@@ -958,7 +986,16 @@ def main(argv=None) -> int:
                 box.period_debit.update(got.get("period_debit") or got.get("data") or {})
 
     try:
-        result = run_dir(root, args.scene, args.date, master_data, lookups, period_fetch=fill_period)
+        result = run_dir(
+            root,
+            args.scene,
+            args.date,
+            master_data,
+            lookups,
+            period_fetch=fill_period,
+            start_voucher_no=args.start_voucher_no,
+            out_dir=Path(args.out_dir).expanduser() if args.out_dir else None,
+        )
     except SystemExit as e:
         log(str(e))
         return 2

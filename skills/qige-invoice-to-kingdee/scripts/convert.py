@@ -459,6 +459,7 @@ def write_kingdee(path: Path, bookable: list[Line], rules: dict, booking: str, t
         rules["pack_size"],
         keep_consecutive=rules.get("pack_keep_consecutive", True),
     )
+    shift_voucher_numbers(bookable, rules.get("start_voucher_no") or 1)
     row_i = 4
     for line in bookable:
         batch = line.voucher_no
@@ -550,12 +551,35 @@ def write_detail(path: Path, lines: list[Line]) -> Path:
     return path
 
 
+def default_desktop_dir(prefix: str = "金蝶入账", today: date | None = None, home: Path | None = None) -> Path:
+    day = (today or date.today()).strftime("%Y%m%d")
+    root = Path(home) if home else Path.home()
+    desktop = root / "Desktop"
+    base = desktop if desktop.is_dir() else Path.cwd()
+    path = base / f"{prefix}_{day}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def shift_voucher_numbers(lines: list, start_no: int | None) -> None:
+    if not start_no or int(start_no) == 1:
+        return
+    start = int(start_no)
+    if start < 1:
+        raise SystemExit("凭证号起始必须是正整数")
+    delta = start - 1
+    for line in lines:
+        if getattr(line, "voucher_no", None) is not None:
+            line.voucher_no = int(line.voucher_no) + delta
+
+
 def convert(
     invoice_path: Path,
     out_dir: Path,
     booking_date: str | None = None,
     template_path: Path | None = None,
     master_path: Path | None = None,
+    start_voucher_no: int = 1,
 ) -> ConvertResult:
     invoice_path = Path(invoice_path)
     out_dir = Path(out_dir)
@@ -589,12 +613,15 @@ def convert(
         rules["pack_size"],
         keep_consecutive=rules.get("pack_keep_consecutive", True),
     )
+    shift_voucher_numbers(bookable, start_voucher_no)
     out_dir.mkdir(parents=True, exist_ok=True)
     detail_path = out_dir / f"{invoice_path.stem}_明细结果.xlsx"
     kingdee_path = out_dir / KINGDEE_RESULT_NAME
     if kingdee_path.resolve() == template.resolve():
         kingdee_path = out_dir / "凭证引入_填写结果.xlsx"
     write_detail(detail_path, lines)
+    rules = dict(rules)
+    rules["start_voucher_no"] = start_voucher_no
     write_kingdee(kingdee_path, bookable, rules, booking, template)
     return ConvertResult(
         source_count=len(lines),
@@ -658,6 +685,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out-dir", "--out", dest="out_dir")
     parser.add_argument("--template")
     parser.add_argument("--date")
+    parser.add_argument("--start-voucher-no", type=int, default=1)
     args = parser.parse_args(argv)
     if args.inspect:
         target = Path(args.input_dir or SKILL_DIR / "工作区" / "input")
@@ -680,13 +708,14 @@ def main(argv=None) -> int:
     if not template.is_file():
         log("技能缺金蝶引入空模 config/凭证引入空模.xlsx。")
         return 2
-    out_dir = Path(args.out_dir) if args.out_dir else (input_dir or invoice.parent)
+    out_dir = Path(args.out_dir).expanduser() if args.out_dir else default_desktop_dir("金蝶入账")
     result = convert(
         invoice_path=invoice,
         out_dir=out_dir,
         booking_date=args.date,
         template_path=template,
         master_path=master,
+        start_voucher_no=args.start_voucher_no,
     )
     log(
         f"源有效行 {result.source_count}：可入账 {result.bookable_count}，待确认 {result.hold_count}。"

@@ -21,7 +21,7 @@ description: >-
 3. 禁止点金蝶「开始引入 / 审核 / 过账」。
 4. 真实 xlsx / PDF / 密钥不进 git。密钥只在本机 `~/.config/finance/kingdee.local.json` 与 `zhiyun.local.json`。
 5. 三个模块不要混在一次「都做了」里；夹里不止一种表时问她跑哪一句。
-6. 账套用总部，不要湖南分公司。
+6. 账套用总部，不要湖南分公司。湖南分序时账抄作业走 `kingdee-gl-import`。
 7. 禁止看发票「下单号」「合同号」。禁止用智云业务线或下单额定科目。科目只信金蝶 1131xx 往来。
 
 ## 1. 找文件夹、认模块
@@ -44,9 +44,12 @@ python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <绝对目�
 ```bash
 python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene <模块>
 ```
-系统 `python3` 没有 requests 也没关系：脚本会切到仓内 `.venv`。没有 `.venv` 才转 env-doctor。**不要**对 macOS 系统 Python `pip install`。
 
-默认同目录写出：
+她说「凭证号从 11 开始 / 从记-11 开始」时加上 `--start-voucher-no 11`。没说就从 1。
+
+没给输出目录时默认写到桌面 `金蝶入账_YYYYMMDD/`。系统 `python3` 没有 requests 也没关系：脚本会切到仓内 `.venv`。没有 `.venv` 才转 env-doctor。**不要**对 macOS 系统 Python `pip install`。
+
+默认写出：
 
 - `凭证引入_结果.xlsx`
 - `{源文件名}_明细结果.xlsx`

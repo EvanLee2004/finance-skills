@@ -59,7 +59,8 @@ def test_pack_json_lists_gitee_and_hexiao_on_main():
     assert "update-finance-skills" in pack["whitelist"]
     assert "ar-hexiao-daily" in pack["whitelist"]
     assert "pl-dept-report" in pack["whitelist"]
-    assert len(pack["whitelist"]) == 19
+    assert "kingdee-gl-import" in pack["whitelist"]
+    assert len(pack["whitelist"]) == 20
 
 
 def test_updates_existing_hexiao_including_config(tmp_path: Path):

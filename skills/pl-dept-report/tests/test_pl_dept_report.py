@@ -18,9 +18,11 @@ CONFIG = SKILL / "config"
 CONVERT = SCRIPTS / "convert.py"
 POSTING_API = SKILL.parent / "kingdee-posting" / "scripts" / "kingdee_api.py"
 
+for _name in ("inspect_inputs", "parse_export", "layout", "common", "formula_eval"):
+    sys.modules.pop(_name, None)
 sys.path.insert(0, str(SCRIPTS))
 from formula_eval import eval_workbook  # noqa: E402
-from layout import account_row_map, dept_columns, direct_children, load_layout  # noqa: E402
+from layout import account_row_map, dept_col_letter, dept_columns, direct_children, load_layout  # noqa: E402
 
 
 def _run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -208,6 +210,11 @@ def test_xingchen_two_row_period_header(tmp_path: Path):
     ws["H6"] = 12.5
     ws["I6"] = 30.0
     wb.save(path)
+    sys.modules.pop("inspect_inputs", None)
+    sys.modules.pop("parse_export", None)
+    if str(SCRIPTS) in sys.path:
+        sys.path.remove(str(SCRIPTS))
+    sys.path.insert(0, str(SCRIPTS))
     from inspect_inputs import inspect_dir, header_map
     from layout import load_export_aliases
     from parse_export import parse_inspected
@@ -369,6 +376,10 @@ def test_company_name_line_beats_related_party_in_rows(tmp_path: Path):
     ws["B4"] = "甲骨易（北京）语言科技股份有限公司"
     ws["C4"] = 1.0
     wb.save(path)
+    sys.modules.pop("inspect_inputs", None)
+    if str(SCRIPTS) in sys.path:
+        sys.path.remove(str(SCRIPTS))
+    sys.path.insert(0, str(SCRIPTS))
     from inspect_inputs import inspect_dir
 
     found = inspect_dir(tmp_path)
@@ -666,3 +677,119 @@ def test_skill_forbids_adhoc_openpyxl_and_default_skips_input_dir():
     assert "hq.xlsx" in text
     yaml = _yaml_description(SKILL / "SKILL.md")
     assert "月度损益表" in yaml and "科目余额表" in yaml
+
+
+def test_shanghai_and_wenhua_bengongsi_special_mapping(tmp_path: Path):
+    _write_account(
+        tmp_path / "sh_acc.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("550101", "工资", 40.0, None), ("5101", "主营业务收入", None, 80.0), ("550212", "房租", 9.0, None)],
+    )
+    _write_assist(
+        tmp_path / "sh_dept.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [
+            ("550101", "工资", "本公司", 40.0, None),
+            ("5101", "主营业务收入", "本公司", None, 80.0),
+            ("550212", "房租", "本公司", 9.0, None),
+        ],
+    )
+    _write_account(
+        tmp_path / "wh_acc.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [
+            ("550111", "差旅费", 12.0, None),
+            ("550201", "工资", 30.0, None),
+            ("540109", "工资", 15.0, None),
+        ],
+    )
+    _write_assist(
+        tmp_path / "wh_dept.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [
+            ("550111", "差旅费", "本公司", 12.0, None),
+            ("550201", "工资", "本公司", 30.0, None),
+            ("540109", "工资", "本公司", 15.0, None),
+        ],
+    )
+    _write_assist(
+        tmp_path / "hq_dept.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("550101", "工资", "大客户", 7.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    local = dept_col_letter(layout, "本地化", 1)
+    second_local = dept_col_letter(layout, "本地化", 2)
+    shi = dept_col_letter(layout, "视听", 1)
+    yun = dept_col_letter(layout, "运营保障中心", 1)
+    fan = dept_col_letter(layout, "翻译中心", 1)
+    ka = dept_col_letter(layout, "KA", 1)
+    assert local and shi and yun and fan and ka and second_local
+    assert ws[f"{local}{row['550101']}"].value == 40
+    assert ws[f"{second_local}{row['550101']}"].value in (None, "")
+    assert ws[f"{shi}{row['550111']}"].value == 12
+    assert ws[f"{yun}{row['550201']}"].value == 30
+    assert ws[f"{fan}{row['540109']}"].value == 15
+    assert ws[f"{ka}{row['550101']}"].value == 7
+    assert ws[f"{local}{row['5101']}"].value in (None, "")
+    assert ws[f"{local}{row['550212']}"].value in (None, "")
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "上海:本公司" in report or "本公司" in report
+
+
+def test_monthly_excel_fills_shandong(tmp_path: Path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "损益表"
+    ws["C1"] = "甲骨易"
+    ws["E1"] = "文化"
+    ws["G1"] = "上海"
+    ws["I1"] = "山东分公司"
+    ws["K1"] = "湖南分公司"
+    ws["M1"] = "湖南子公司"
+    ws["O1"] = "四川分公司"
+    ws["Q1"] = "济南子公司"
+    ws["A2"] = "科目编码"
+    ws["B2"] = "科目名称"
+    ws["I2"] = "本期发生借方"
+    ws["J2"] = "本期发生贷方"
+    ws["O2"] = "本期发生借方"
+    ws["A3"] = "540109"
+    ws["B3"] = "工资"
+    ws["I3"] = 88.0
+    ws["O3"] = 22.0
+    profit = wb.create_sheet("利润表")
+    profit["A1"] = "项目"
+    profit["E1"] = "山东26年 8月"
+    profit["H1"] = "四川26年 8月"
+    profit["A2"] = "成本"
+    profit["E2"] = 88.0
+    profit["H2"] = 22.0
+    wb.save(tmp_path / "2026年8月损益类部门科目余额表.xlsx")
+    wb.close()
+    _write_account(tmp_path / "hq.xlsx", "甲骨易（北京）语言科技股份有限公司", [("5101", "主营业务收入", None, 1.0)])
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    assert ws[f"I{row['540109']}"].value == 88
+    assert ws[f"O{row['540109']}"].value == 22
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "山东分公司" in report.split("有源账套=")[1].split("\n")[0]
+
+
+def test_default_desktop_dir_helper(tmp_path: Path):
+    from datetime import date
+    from common import default_desktop_dir
+
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    got = default_desktop_dir("月度损益表", today=date(2026, 9, 2), home=tmp_path)
+    assert got == desktop / "月度损益表_20260902"

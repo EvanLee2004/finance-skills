@@ -13,5 +13,6 @@
   "profit_sheet_hints": ["利润表"],
   "profit_item": ["项目", "报表项目", "行次名称", "项目名称"],
   "profit_month": ["本月金额", "本期金额", "本月数", "本月"],
-  "skip_sheet_hints": ["确认情况"]
+  "skip_sheet_hints": ["确认情况"],
+  "monthly_overlay_hints": ["损益类部门科目余额表", "山东分公司", "济南子公司"]
 }

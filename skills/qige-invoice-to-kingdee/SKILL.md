@@ -44,7 +44,7 @@ python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <放文件�
 python3 "<本skill目录>/scripts/convert.py" --input-dir <放发票簿的绝对目录>
 ```
 
-可加 `--date YYYY-MM-DD`（默认当天）。产出写回**同一文件夹**，原件不动：
+可加 `--date YYYY-MM-DD`（默认当天）。她说凭证号从 N 开始就加 `--start-voucher-no N`。没给 `--out-dir` 时默认写到桌面 `金蝶入账_YYYYMMDD/`，原件不动：
 
 - `凭证引入_结果.xlsx` ← 按技能空模填好的金蝶引入表（只写可入账）
 - `{发票簿文件名}_明细结果.xlsx` ← 每张都在，待确认写原因

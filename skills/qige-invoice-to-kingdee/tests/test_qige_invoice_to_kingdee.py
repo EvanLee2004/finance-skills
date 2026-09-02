@@ -86,7 +86,7 @@ def _copy_template(path: Path):
     shutil.copy2(convert.TEMPLATE_PATH, path)
 
 
-def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14", with_master=True):
+def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14", with_master=True, start_voucher_no=1):
     inv = tmp_path / "发票.xlsx"
     out = tmp_path / "out"
     out.mkdir()
@@ -100,6 +100,7 @@ def _run(tmp_path: Path, rows, org=None, master=None, booking="2026-08-14", with
         out_dir=out,
         booking_date=booking,
         master_path=master_path,
+        start_voucher_no=start_voucher_no,
     )
 
 
@@ -240,6 +241,15 @@ def test_pack_five_per_voucher(tmp_path):
     assert nums.count(3) == 6
 
 
+def test_start_voucher_no_shifts_batches(tmp_path):
+    rows = [_ok_row(name=f"客户{i}有限公司", inv=str(i)) for i in range(6)]
+    result = _run(tmp_path, rows, start_voucher_no=11)
+    nums = _voucher_nums(result.kingdee_path, 6)
+    assert 1 not in nums
+    assert nums.count(11) == 15
+    assert nums.count(12) == 3
+
+
 def test_pack_keeps_consecutive_company_across_five(tmp_path):
     rows = (
         [_ok_row(name=f"散户{i}", inv=str(i)) for i in range(5)]
@@ -359,7 +369,7 @@ def test_cli_writes_result_in_same_folder(tmp_path):
     leftover = tmp_path / "数据模板.xlsx"
     _write_invoice(inv, [_ok_row()])
     _copy_template(leftover)
-    rc = convert.main(["--input-dir", str(tmp_path), "--date", "2026-08-14"])
+    rc = convert.main(["--input-dir", str(tmp_path), "--date", "2026-08-14", "--out-dir", str(tmp_path)])
     assert rc == 0
     assert (tmp_path / "凭证引入_结果.xlsx").is_file()
     assert leftover.is_file()

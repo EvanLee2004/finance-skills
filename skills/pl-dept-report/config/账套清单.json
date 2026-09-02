@@ -46,20 +46,27 @@
       "api_ready_default": false
     }
   ],
+  "offline_from_monthly_excel": ["山东分公司", "四川分公司", "济南子公司"],
+  "overlay_monthly_if_empty": ["湖南分公司", "湖南子公司"],
   "no_xingchen_leave_blank": [
     {
       "excel_header": "山东分公司",
-      "reason": "星辰账套下拉里没有"
+      "reason": "星辰账套下拉里没有，吃她每月更新的损益表 Excel"
     },
     {
       "excel_header": "四川分公司",
-      "reason": "星辰账套下拉里没有"
+      "reason": "星辰账套下拉里没有，吃她每月更新的损益表 Excel"
     },
     {
       "excel_header": "济南子公司",
-      "reason": "星辰账套下拉里没有"
+      "reason": "星辰账套下拉里没有，吃她每月更新的损益表 Excel"
     }
   ],
+  "profit_header_aliases": {
+    "山东": "山东分公司",
+    "四川": "四川分公司",
+    "济南": "济南子公司"
+  },
   "auth": {
     "shared_client": true,
     "local_file": "~/.config/finance/kingdee-pl.local.json",

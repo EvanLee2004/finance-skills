@@ -24,7 +24,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 
 每个 skill 都是「**自然语言驱动 + agent 照流程用 Python 干活**」：财务同事说人话，找文件 / 跑 / 复核全归 agent，不用改文件名、摆文件夹。
 
-**当前源码共 19 个技能进更新白名单**（另有 `project-detail-to-ledger` 已在仓内、尚未进白名单）。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
+**当前源码共 20 个技能进更新白名单**（另有 `project-detail-to-ledger` 已在仓内、尚未进白名单）。**本仓是唯一源码与版本真相源**（monorepo，不是一 skill 一仓）。
 
 > ### ⭐ 启动时说什么（同事开口、agent 认技能）
 >
@@ -39,6 +39,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 > | 跑昨天的核销 / 日清 | 应收核销日清 |
 > | 九点下单 | 下单汇总 |
 > | 销项发票入金蝶 / 付款入金蝶 / 收款入金蝶 | 金蝶引入表（三模块） |
+> | 序时账入金蝶 / 湖南分入账 | 序时账 → 官方引入表 |
 > | 月度损益表 / 科目余额表 | 金蝶星辰拼损益表+利润表 |
 
 > ### ⭐ 更新去哪？就这一个仓库 · 2026-07-25 起 git 即分发
@@ -64,7 +65,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 - **行为 / 环境**：理清需求、装依赖——不碰业务口径，但所有业务技能都用得上
 - **通用基座**：处理四类文档（Excel/PDF/Word/PPT）的底层能力，给业务技能"打下手"、也兜住够不上独立技能的零散文档活
 
-### 业务技能（财务专有，config 驱动、可复现）· 12 个
+### 业务技能（财务专有，config 驱动、可复现）· 13 个
 
 | skill | 解决什么 | 状态 |
 |-------|----------|------|
@@ -78,8 +79,9 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [ar-hexiao-daily](skills/ar-hexiao-daily/) | **应收核销日清**：出纳按核销日取智云数 → SOD 级判定 → 一份《核销日清》→ **她确认** → 写前复核 → 统一写盈亏明细 + 流转安全子集；含跑批台账查漏天（**永不写智云**） | ✅ 测试 186 · **opencode 端到端实测通过**（715 格与她手填逐格一致）· 待工位真 T-1 验收 |
 | [order-daily-summary](skills/order-daily-summary/) | **九点下单统计**：登录智云抓下单表 → 组织架构归多语（不含运保）/数据/游戏/其他 →「下单数据(万元)」xlsx | ✅ 单测 24 · **内网真机复测通过（2026-07-24）** |
 | [kingdee-posting](skills/kingdee-posting/) | **金蝶入账**：销项发票 / 付款 / 收款 → 凭证引入表；科目/销售由智云预处理补；人审后再自己去金蝶点引入 | 合成测试绿 |
+| [kingdee-gl-import](skills/kingdee-gl-import/) | **序时账入金蝶**：凭证导入模板 / 凭证列表 → 官方引入表；凭证号可指定起始；附件列空；人去金蝶引入 | 合成测试绿 |
 | [qige-invoice-to-kingdee](skills/qige-invoice-to-kingdee/) | **琪哥发票入金蝶**（兼容入口）：触发仍进销项；口径以 `kingdee-posting` 为准 | 🟡 测试保留 |
-| [pl-dept-report](skills/pl-dept-report/) | **月度损益表 / 科目余额表**：金蝶星辰有账套的主体拼成损益表+利润表；没账套的列留空；公式自写核对 | ✅ 合成测试绿 · 已入包 |
+| [pl-dept-report](skills/pl-dept-report/) | **月度损益表 / 科目余额表**：金蝶星辰有账套的主体拼成损益表+利润表；山东/四川/济南吃月更 Excel；公式自写核对 | ✅ 合成测试绿 · 已入包 |
 
 > 链路示意：`receivables-merge` → `split-by-sales`（旁路 `compliance-spot-check`）；出纳核销独立走 `ar-hexiao-daily`；亮晶下单日报走 `order-daily-summary`。  
 > **规划中（未建 skill）**：销售反馈汇总 等。  
@@ -210,7 +212,7 @@ git log -1 --oneline
 - 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、kingdee-gl-import、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
 （另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
 
 【装到哪】

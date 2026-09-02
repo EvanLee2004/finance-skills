@@ -48,6 +48,7 @@ from common import (
     CHECK_TOL,
     add_money,
     cell_num,
+    default_desktop_dir,
     default_period,
     discover_input_dir,
     load_json,
@@ -57,12 +58,15 @@ from common import (
     stdout_safe,
 )
 from formula_eval import eval_workbook
-from inspect_inputs import inspect_dir
+from inspect_inputs import inspect_dir, inspect_file
 from layout import (
     account_row_map,
+    apply_ben_gongsi,
     build_prefix_remap,
+    dept_col_letter,
     dept_columns,
     direct_children,
+    load_ben_gongsi_rules,
     load_books,
     load_dept_map,
     load_layout,
@@ -118,29 +122,42 @@ def load_prev_profit(path: Path | None, layout: dict) -> dict[str, dict]:
     return out
 
 
-def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict):
+def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict, special_rules: dict | None = None):
     kids = direct_children(layout)
     amounts: dict[str, dict[str, Decimal]] = {}
     unmapped: list[str] = []
     seen_unmapped: set[str] = set()
+    special_rules = special_rules or {}
     for row in rows:
         code = str(row.get("code") or "").strip()
         if not code:
             continue
-        excel_dept = map_dept_name(str(row.get("dept") or ""), mapping, layout)
+        archive = str(row.get("dept") or "").strip()
         amt = nature_amount(code, row.get("debit"), row.get("credit"), layout)
-        if excel_dept is None:
-            name = str(row.get("dept") or "").strip()
-            if name and name not in seen_unmapped and amt:
-                seen_unmapped.add(name)
-                unmapped.append(name)
+        handled, letter = apply_ben_gongsi(
+            str(row.get("entity") or ""),
+            archive,
+            code,
+            str(row.get("name") or ""),
+            special_rules,
+            layout,
+        )
+        if not handled:
+            excel_dept = map_dept_name(archive, mapping, layout)
+            letter = dept_col_letter(layout, excel_dept, 1) if excel_dept else None
+        if not letter:
+            name = archive
+            tag = f"{row.get('entity') or ''}:{name}" if name == "本公司" else name
+            if tag and tag not in seen_unmapped and amt:
+                seen_unmapped.add(tag)
+                unmapped.append(tag)
             continue
         if kids.get(code):
             continue
         if amt is None:
             continue
         bucket = amounts.setdefault(code, {})
-        bucket[excel_dept] = (bucket.get(excel_dept) or Decimal("0")) + amt
+        bucket[letter] = (bucket.get(letter) or Decimal("0")) + amt
     report["unmapped_depts"] = unmapped
     return amounts
 
@@ -230,7 +247,7 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
                     parts.append(f"{letter}{cr}")
                 cell.value = "=" + "+".join(parts)
             else:
-                amt = (dept_amts.get(code) or {}).get(name)
+                amt = (dept_amts.get(code) or {}).get(letter)
                 cell.value = cell_num(amt)
         ws[f"AU{r}"] = f"=SUM(U{r}:AT{r})"
         ws[f"AU{r}"].number_format = NF
@@ -470,7 +487,33 @@ def write_report(path: Path, payload: dict) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
+def apply_monthly_overlay(entity_amts, profit_cur, profit_prev, parsed, books, period, notes):
+    monthly_acc = parsed.get("monthly_accounts") or {}
+    monthly_profit = parsed.get("monthly_profits") or {}
+    always = books.get("offline_from_monthly_excel") or []
+    if_empty = books.get("overlay_monthly_if_empty") or []
+    for header in always:
+        src = monthly_acc.get(header) or {}
+        if src:
+            entity_amts[header] = src
+            notes.append(f"月更Excel覆盖={header}")
+    for header in if_empty:
+        if entity_amts.get(header):
+            continue
+        src = monthly_acc.get(header) or {}
+        if src:
+            entity_amts[header] = src
+            notes.append(f"月更Excel补空={header}")
+    cur_p = monthly_profit.get(period) or {}
+    prev_p = monthly_profit.get(prev_period(period)) or {}
+    for header in list(always) + list(if_empty):
+        if cur_p.get(header) and (header in always or not profit_cur.get(header)):
+            profit_cur.setdefault(header, {}).update(cur_p[header])
+        if prev_p.get(header) and (header in always or not profit_prev.get(header)):
+            profit_prev.setdefault(header, {}).update(prev_p[header])
+
+
+def run(period: str, input_dir: Path, out: Path, no_api: bool, offline_xlsx: str = "") -> int:
     layout = load_layout()
     books = load_books()
     mapping = load_dept_map()
@@ -478,7 +521,11 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
     secrets: list[str] = []
     synonyms = load_name_synonyms()
     inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
-    parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
+    if offline_xlsx:
+        extra = Path(offline_xlsx).expanduser()
+        if extra.is_file():
+            inspected.extend(inspect_file(extra))
+    parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}, "monthly_accounts": {}, "monthly_profits": {}}
     entity_amts: dict = {e: {} for e in layout["entities"]}
     amount_labels = {row["label"] for row in layout["profit_rows"] if row.get("kind") == "amount" and row.get("label")}
     hq_from_api = False
@@ -621,7 +668,7 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
     ]
     dept_rows = export_depts + api_depts
     report_tmp: dict = {}
-    dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp)
+    dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp, load_ben_gongsi_rules())
 
     prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
     profit_prev = load_prev_profit(prev_xlsx if prev_xlsx.is_file() else None, layout)
@@ -630,6 +677,7 @@ def run(period: str, input_dir: Path, out: Path, no_api: bool) -> int:
         profit_prev.setdefault(ent, {}).update({k: v for k, v in mapped.items() if k in amount_labels})
     if prev_map:
         profit_prev.setdefault("甲骨易", {}).update(prev_map)
+    apply_monthly_overlay(entity_amts, profit_cur, profit_prev, parsed, books, period, notes)
     if not any(profit_prev.get(e) for e in layout["entities"]):
         notes.append("无上月列")
 
@@ -691,16 +739,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input-dir", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--no-api", action="store_true")
+    parser.add_argument("--offline-xlsx", default="")
     args = parser.parse_args(argv)
     period = parse_period(args.period)
     input_dir = discover_input_dir(args.input_dir)
     if args.out:
         out = Path(args.out).expanduser()
     else:
-        desktop = Path.home() / "Desktop"
-        target_dir = desktop if desktop.is_dir() else input_dir
-        out = target_dir / f"月度损益表_{period}.xlsx"
-    return run(period, input_dir, out, bool(args.no_api) or os.environ.get("PL_DEPT_SKIP_API") == "1")
+        out = default_desktop_dir("月度损益表") / f"月度损益表_{period}.xlsx"
+    return run(
+        period,
+        input_dir,
+        out,
+        bool(args.no_api) or os.environ.get("PL_DEPT_SKIP_API") == "1",
+        offline_xlsx=args.offline_xlsx,
+    )
 
 
 if __name__ == "__main__":

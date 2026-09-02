@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -12,9 +13,9 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from common import money
+from common import money, add_money, col_idx
 from inspect_inputs import header_map
-from layout import load_export_aliases
+from layout import load_books, load_export_aliases, load_layout
 
 
 def _norm_code(value) -> str:
@@ -102,6 +103,76 @@ def parse_profit_sheet(ws, headers: dict, aliases: dict) -> dict[str, Decimal | 
     return out
 
 
+def _header_entity(text: str, entities: list[str], aliases: dict) -> str | None:
+    blob = str(text or "")
+    for ent in sorted(entities, key=len, reverse=True):
+        if ent and ent in blob:
+            return ent
+    for short, ent in aliases.items():
+        if short and short in blob:
+            return ent
+    return None
+
+
+def parse_monthly_pl_sheet(ws, layout: dict) -> dict[str, dict[str, dict]]:
+    entities = layout["entities"]
+    pairs = layout.get("entity_pairs") or []
+    out: dict[str, dict[str, dict]] = {}
+    for r in range(3, (ws.max_row or 2) + 1):
+        code = _norm_code(ws.cell(r, 1).value)
+        if not code or not code[0].isdigit():
+            continue
+        name = str(ws.cell(r, 2).value or "").replace("\xa0", "").strip()
+        for pair in pairs:
+            header = pair.get("header")
+            if header not in entities:
+                continue
+            dcol = col_idx(pair["debit"])
+            ccol = col_idx(pair["credit"])
+            debit = money(ws.cell(r, dcol).value)
+            credit = money(ws.cell(r, ccol).value)
+            if debit is None and credit is None:
+                continue
+            bucket = out.setdefault(header, {})
+            if code not in bucket:
+                bucket[code] = {"debit": debit, "credit": credit, "name": name}
+            else:
+                bucket[code]["debit"] = add_money(bucket[code]["debit"], debit)
+                bucket[code]["credit"] = add_money(bucket[code]["credit"], credit)
+    return out
+
+
+def parse_monthly_profit_sheet(ws, layout: dict, books: dict, period: str) -> dict[str, dict[str, dict]]:
+    entities = layout["entities"]
+    aliases = books.get("profit_header_aliases") or {}
+    labels = [row.get("label") for row in layout.get("profit_rows") or [] if row.get("label")]
+    by_period: dict[str, dict[str, dict]] = {}
+    header_map_ent: dict[int, tuple[str, str]] = {}
+    for c in range(2, (ws.max_column or 1) + 1):
+        text = str(ws.cell(1, c).value or "")
+        ent = _header_entity(text, entities, aliases)
+        if not ent:
+            continue
+        m = None
+        found = re.search(r"(20)?(\d{2})年\s*(\d{1,2})\s*月", text)
+        if found:
+            year = int(found.group(2))
+            year = 2000 + year if year < 100 else year
+            month = int(found.group(3))
+            m = f"{year}{month:02d}"
+        header_map_ent[c] = (ent, m or period)
+    for r in range(2, (ws.max_row or 1) + 1):
+        label = str(ws.cell(r, 1).value or "").replace("\xa0", "").strip()
+        if not label or label not in labels:
+            continue
+        for c, (ent, per) in header_map_ent.items():
+            val = money(ws.cell(r, c).value)
+            if val is None:
+                continue
+            by_period.setdefault(per, {}).setdefault(ent, {})[label] = val
+    return by_period
+
+
 def parse_inspected(items: list[dict]) -> dict:
     aliases = load_export_aliases()
     accounts: dict[str, dict[str, dict[str, Decimal | None]]] = {}
@@ -109,9 +180,14 @@ def parse_inspected(items: list[dict]) -> dict:
     profits: dict[str, dict[str, Decimal | None]] = {}
     profits_by_period: dict[str, dict[str, dict[str, Decimal | None]]] = {}
     extra_codes: set[str] = set()
+    monthly_accounts: dict[str, dict[str, dict]] = {}
+    monthly_profits: dict[str, dict[str, dict]] = {}
+    layout = load_layout()
+    books = load_books()
     for item in items:
         path = item["path"]
-        wb = load_workbook(path, data_only=False)
+        data_only = item.get("kind") in {"monthly_overlay", "monthly_profit"}
+        wb = load_workbook(path, data_only=data_only)
         try:
             ws = wb[item["sheet"]]
             headers = {k: (v["row"], v["col"]) for k, v in (item.get("headers") or {}).items()}
@@ -119,6 +195,27 @@ def parse_inspected(items: list[dict]) -> dict:
                 headers = header_map(ws, aliases)
             entity = item.get("entity")
             kind = item["kind"]
+            if kind == "monthly_overlay":
+                parsed = parse_monthly_pl_sheet(ws, layout)
+                for header, codes in parsed.items():
+                    bucket = monthly_accounts.setdefault(header, {})
+                    for code, pair in codes.items():
+                        if code not in bucket:
+                            bucket[code] = pair
+                        else:
+                            bucket[code] = {
+                                "debit": add_money(bucket[code].get("debit"), pair.get("debit")),
+                                "credit": add_money(bucket[code].get("credit"), pair.get("credit")),
+                                "name": pair.get("name") or bucket[code].get("name"),
+                            }
+                continue
+            if kind == "monthly_profit":
+                parsed = parse_monthly_profit_sheet(ws, layout, books, item.get("period") or "")
+                for per, ents in parsed.items():
+                    monthly_profits.setdefault(per, {})
+                    for header, vals in ents.items():
+                        monthly_profits[per].setdefault(header, {}).update(vals)
+                continue
             if kind == "account":
                 parsed = parse_account_sheet(ws, headers)
                 if entity:
@@ -127,8 +224,6 @@ def parse_inspected(items: list[dict]) -> dict:
                         if code not in bucket:
                             bucket[code] = pair
                         else:
-                            from common import add_money
-
                             bucket[code] = {
                                 "debit": add_money(bucket[code]["debit"], pair["debit"]),
                                 "credit": add_money(bucket[code]["credit"], pair["credit"]),
@@ -150,5 +245,7 @@ def parse_inspected(items: list[dict]) -> dict:
         "depts": depts,
         "profits": profits,
         "profits_by_period": profits_by_period,
+        "monthly_accounts": monthly_accounts,
+        "monthly_profits": monthly_profits,
         "extra_codes": sorted(extra_codes),
     }

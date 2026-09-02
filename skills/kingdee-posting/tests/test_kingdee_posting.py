@@ -97,8 +97,16 @@ def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, orde
     }
 
 
-def _run(tmp_path, scene, master=None, lookups=None):
-    return convert.run_dir(tmp_path, scene, "2026-08-27", _master() if master is None else master, lookups if lookups is not None else _lookups())
+def _run(tmp_path, scene, master=None, lookups=None, start_voucher_no=1, out_dir=None):
+    return convert.run_dir(
+        tmp_path,
+        scene,
+        "2026-08-27",
+        _master() if master is None else master,
+        lookups if lookups is not None else _lookups(),
+        start_voucher_no=start_voucher_no,
+        out_dir=out_dir or tmp_path,
+    )
 
 
 def _dummy_pdf(path: Path):
@@ -268,7 +276,7 @@ def test_sales_pack_keeps_consecutive(tmp_path):
     master = _master()
     names = list(dict.fromkeys(row[3] for row in rows))
     master["customer"] += [{"code": str(3000 + i), "name": name} for i, name in enumerate(names)]
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", master, _lookups(extra_customers=names))
+    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", master, _lookups(extra_customers=names), out_dir=tmp_path)
     nums = _voucher_nums(result["kingdee_path"], 12 * 3)
     assert nums.count(1) == 15
     assert nums.count(2) == 21
@@ -277,7 +285,7 @@ def test_sales_pack_keeps_consecutive(tmp_path):
 
 def test_sales_no_master_holds(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
-    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", None, _lookups())
+    result = convert.run_dir(tmp_path, "销项发票", "2026-08-27", None, _lookups(), out_dir=tmp_path)
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
@@ -369,7 +377,7 @@ def test_receipt_pack_alias_pingdu_and_empty_emp(tmp_path):
 
 def test_receipt_no_master_holds(tmp_path):
     _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
-    result = convert.run_dir(tmp_path, "收款", "2026-08-27", None, _lookups())
+    result = convert.run_dir(tmp_path, "收款", "2026-08-27", None, _lookups(), out_dir=tmp_path)
     assert result["bookable_count"] == 0
     assert result["hold_count"] == 1
 
@@ -764,6 +772,7 @@ def test_receipt_order_fallback_and_dual_sales(tmp_path):
         "2026-08-27",
         _master(),
         _lookups(receipt_sales=[], order_sales={"甲科技有限公司": ["于占国", "陈霞"]}),
+        out_dir=tmp_path,
     )
     assert hold["bookable_count"] == 0
     assert hold["hold_count"] == 1
@@ -797,6 +806,8 @@ def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):
                 str(lookups),
                 "--date",
                 "2026-08-27",
+                "--out-dir",
+                str(tmp_path),
             ]
         )
         == 0
@@ -838,6 +849,8 @@ def test_cli_lookups_file_converts(tmp_path):
                 str(lookups),
                 "--date",
                 "2026-08-27",
+                "--out-dir",
+                str(tmp_path),
             ]
         )
         == 0
@@ -1053,6 +1066,34 @@ def test_period_debit_fetch_is_called_when_injected_missing(tmp_path):
         _master(),
         _lookups(ar_balance=[]),
         period_fetch=fetch,
+        out_dir=tmp_path,
     )
     assert called.get("ok") is True
     assert result["bookable_count"] == 1
+
+
+def test_start_voucher_no_shifts_payment_batches(tmp_path, monkeypatch):
+    _write_pay(tmp_path / "付款.xlsx", [["北京某翻译店", 100, "北京某翻译店"], ["无档店", 200, "无档店"]])
+    a = tmp_path / "北京某翻译店"
+    b = tmp_path / "无档店"
+    a.mkdir()
+    b.mkdir()
+    _dummy_pdf(a / "a.pdf")
+    _dummy_pdf(b / "b.pdf")
+    monkeypatch.setattr(
+        convert,
+        "parse_invoice_pdf",
+        lambda p: {"kind": "普票", "seller": p.parent.name, "total": Decimal("100.00") if p.parent.name == "北京某翻译店" else Decimal("200.00"), "tax": None},
+    )
+    result = _run(tmp_path, "付款", start_voucher_no=20)
+    nums = [n for n in _voucher_nums(result["kingdee_path"], 8) if n]
+    assert set(nums) == {20, 21}
+
+
+def test_default_desktop_dir_helper(tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    from datetime import date
+
+    got = convert.default_desktop_dir("金蝶入账", today=date(2026, 9, 2), home=tmp_path)
+    assert got == desktop / "金蝶入账_20260902"

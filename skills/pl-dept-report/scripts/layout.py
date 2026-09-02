@@ -228,10 +228,56 @@ def dept_columns(layout: dict) -> list[tuple[str, str]]:
 
 
 def first_dept_col(layout: dict, excel_name: str) -> str | None:
+    return dept_col_letter(layout, excel_name, 1)
+
+
+def dept_col_letter(layout: dict, excel_name: str, occurrence: int = 1) -> str | None:
+    n = 0
     for name, letter in dept_columns(layout):
         if name == excel_name:
-            return letter
+            n += 1
+            if n == occurrence:
+                return letter
     return None
+
+
+def load_ben_gongsi_rules() -> dict:
+    return load_json("本公司规则.json")
+
+
+def apply_ben_gongsi(
+    entity: str,
+    archive_dept: str,
+    account_code: str,
+    account_name: str,
+    rules: dict,
+    layout: dict,
+) -> tuple[bool, str | None]:
+    """本公司按账套规则。返回 (已处理, 列字母)。已处理且列为 None = 进未映射，禁止猜。"""
+    book = (rules.get("per_entity") or {}).get(entity) or {}
+    if not book:
+        return False, None
+    source = str(book.get("source_dept") or "本公司")
+    if str(archive_dept or "").strip() != source:
+        return False, None
+    code = str(account_code or "")
+    name = str(account_name or "")
+    for prefix in book.get("never_map_prefixes") or []:
+        if code.startswith(str(prefix)):
+            return True, None
+    for rule in book.get("rules") or []:
+        prefixes = [str(p) for p in (rule.get("prefixes") or [])]
+        needles = [str(n) for n in (rule.get("name_contains") or [])]
+        if prefixes and not any(code.startswith(p) for p in prefixes):
+            continue
+        if needles and not any(n in name for n in needles):
+            continue
+        if rule.get("action") == "unmapped":
+            return True, None
+        excel_name = str(rule.get("excel_dept") or "").strip()
+        occ = int(rule.get("occurrence") or 1)
+        return True, dept_col_letter(layout, excel_name, occ)
+    return True, None
 
 
 def map_dept_name(archive_name: str, mapping: dict, layout: dict) -> str | None:
