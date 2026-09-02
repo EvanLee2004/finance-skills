@@ -280,6 +280,54 @@ def apply_ben_gongsi(
     return True, None
 
 
+def accounts_as_bengongsi(
+    entity_amts: dict,
+    existing_dept_rows: list[dict],
+    special_rules: dict,
+    layout: dict,
+) -> list[dict]:
+    """核算项目没有这笔费用时，把科目余额当成该公司的本公司。已有本公司辅助的科目不重复。"""
+    kids = direct_children(layout)
+    names = layout_code_names(layout)
+    have: set[tuple[str, str]] = set()
+    for row in existing_dept_rows or []:
+        ent = str(row.get("entity") or "")
+        book = (special_rules.get("per_entity") or {}).get(ent) or {}
+        source = str(book.get("source_dept") or "本公司")
+        if str(row.get("dept") or "").strip() != source:
+            continue
+        code = str(row.get("code") or "").strip()
+        if code:
+            have.add((ent, code))
+    extra: list[dict] = []
+    for ent, book in (special_rules.get("per_entity") or {}).items():
+        if not book.get("fill_from_accounts_when_assist_lacks_code"):
+            continue
+        source = str(book.get("source_dept") or "本公司")
+        blocked = tuple(str(p) for p in (book.get("never_map_prefixes") or []))
+        for code, pair in (entity_amts.get(ent) or {}).items():
+            code = str(code or "").strip()
+            if not code or not str(code).startswith("5"):
+                continue
+            if any(code.startswith(p) for p in blocked):
+                continue
+            if kids.get(code):
+                continue
+            if (ent, code) in have:
+                continue
+            extra.append(
+                {
+                    "entity": ent,
+                    "dept": source,
+                    "code": code,
+                    "name": names.get(code) or "",
+                    "debit": (pair or {}).get("debit") if isinstance(pair, dict) else None,
+                    "credit": (pair or {}).get("credit") if isinstance(pair, dict) else None,
+                }
+            )
+    return extra
+
+
 def map_dept_name(archive_name: str, mapping: dict, layout: dict) -> str | None:
     raw = str(archive_name or "").strip()
     if not raw:

@@ -341,6 +341,97 @@ def test_map_dakehu_to_ka_and_unmapped_stays_out(tmp_path: Path):
     assert "30.00" not in r.stdout
 
 
+def test_hq_chanpin_yingxiao_xiangmu_map_to_layout_cols(tmp_path: Path):
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [
+            ("550321", "软件服务费", 11.0, None),
+            ("550198", "活动团建费", 13.0, None),
+            ("540103", "翻译语言服务", 17.0, None),
+        ],
+    )
+    _write_assist(
+        tmp_path / "hq_d.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [
+            ("550321", "软件服务费", "产品部", 11.0, None),
+            ("550198", "活动团建费", "营销二部", 13.0, None),
+            ("540103", "翻译语言服务", "项目中心", 17.0, None),
+        ],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    qudao = dept_col_letter(layout, "渠道开发中心", 1)
+    shi = dept_col_letter(layout, "视听", 1)
+    yizu = dept_col_letter(layout, "项目一组", 1)
+    assert qudao and shi and yizu
+    assert ws[f"{qudao}{row['550321']}"].value == 11
+    assert ws[f"{shi}{row['550198']}"].value == 13
+    assert ws[f"{yizu}{row['540103']}"].value == 17
+    report = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
+    assert "产品部" not in report
+    assert "营销二部" not in report
+    assert "项目中心" not in report
+    assert "11" not in r.stdout
+
+
+def test_wenhua_shanghai_accounts_fill_right_when_assist_has_no_expense(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [
+            ("550104", "工资", 21.0, None),
+            ("550111", "差旅费", 8.0, None),
+            ("540101", "工资", 14.0, None),
+            ("550205", "工资", 16.0, None),
+            ("5101", "主营业务收入", None, 9.0),
+        ],
+    )
+    _write_assist(
+        tmp_path / "wh_d.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("510103", "主营业务收入_翻译语言服务", "本公司", None, 9.0)],
+    )
+    _write_account(
+        tmp_path / "sh.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [
+            ("5504", "销售费用", 25.0, None),
+            ("550405", "工资", 19.0, None),
+            ("550408", "差旅费", 6.0, None),
+        ],
+    )
+    _write_assist(
+        tmp_path / "sh_d.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("510103", "主营业务收入_翻译语言服务", "本公司", None, 3.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    local = dept_col_letter(layout, "本地化", 1)
+    shi = dept_col_letter(layout, "视听", 1)
+    yun = dept_col_letter(layout, "运营保障中心", 1)
+    fan = dept_col_letter(layout, "翻译中心", 1)
+    assert local and shi and yun and fan
+    assert ws[f"{shi}{row['550101']}"].value == 21
+    assert ws[f"{shi}{row['550111']}"].value == 8
+    assert ws[f"{fan}{row['540109']}"].value == 14
+    assert ws[f"{yun}{row['550201']}"].value == 16
+    assert ws[f"{local}{row['550101']}"].value == 19
+    assert ws[f"{local}{row['550111']}"].value == 6
+    assert ws[f"{shi}{row['5101']}"].value in (None, "")
+    assert ws[f"{local}{row['5101']}"].value in (None, "")
+    assert "21" not in r.stdout
+    assert "19" not in r.stdout
+
+
 def test_stdout_has_no_amount_or_secret(tmp_path: Path):
     secret = "SUPERSECRET_TOKEN_XYZ"
     fake = tmp_path / "kingdee.local.json"

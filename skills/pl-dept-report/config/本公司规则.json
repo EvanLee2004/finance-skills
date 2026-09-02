@@ -1,8 +1,9 @@
 {
-  "_comment": "文化和上海今年开不了部门辅助核算，核算项目只有本公司。禁止写进全局部门名映射。收入不进右列。规则按科目树+名称，不能整账塞视听/本地化。",
+  "_comment": "文化和上海今年开不了部门辅助核算，核算项目只有本公司。禁止写进全局部门名映射。收入不进右列。规则按科目树+名称，不能整账塞视听/本地化。核算项目没有费用时，用科目余额当本公司再走下面规则。",
   "per_entity": {
     "上海": {
       "source_dept": "本公司",
+      "fill_from_accounts_when_assist_lacks_code": true,
       "never_map_prefixes": ["51", "52", "53"],
       "rules": [
         {
@@ -19,6 +20,7 @@
     },
     "文化": {
       "source_dept": "本公司",
+      "fill_from_accounts_when_assist_lacks_code": true,
       "never_map_prefixes": ["51", "52", "53"],
       "rules": [
         {

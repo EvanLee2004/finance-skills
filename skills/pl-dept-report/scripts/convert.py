@@ -67,10 +67,12 @@ from offline_profit import (
 from layout import (
     account_row_map,
     apply_ben_gongsi,
+    accounts_as_bengongsi,
     build_prefix_remap,
     dept_col_letter,
     dept_columns,
     direct_children,
+    layout_code_names,
     load_ben_gongsi_rules,
     load_books,
     load_dept_map,
@@ -705,8 +707,28 @@ def run(
         if not (hq_from_api and row.get("entity") == "甲骨易")
     ]
     dept_rows = export_depts + api_depts
+    special_rules = load_ben_gongsi_rules()
+    filled = accounts_as_bengongsi(entity_amts, dept_rows, special_rules, layout)
+    if filled:
+        by_ent = sorted({str(r.get("entity") or "") for r in filled if r.get("entity")})
+        notes.append("本公司费用改从科目余额填右列=" + ",".join(by_ent))
+        dept_rows = dept_rows + filled
+    if hq_from_api:
+        pay_needles = ("工资", "社保", "社会保险", "住房公积金", "养老保险")
+        names = layout_code_names(layout)
+        hq_left = entity_amts.get("甲骨易") or {}
+        hq_dept_codes = {str(r.get("code") or "") for r in api_depts}
+        for code, name in names.items():
+            if not any(n in name for n in pay_needles):
+                continue
+            pair = hq_left.get(code) or {}
+            if not pair.get("debit") and not pair.get("credit"):
+                continue
+            if code not in hq_dept_codes:
+                notes.append("总部工资社保无部门辅助，右列未拆这些科目")
+                break
     report_tmp: dict = {}
-    dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp, load_ben_gongsi_rules())
+    dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp, special_rules)
 
     prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
     profit_prev = load_prev_profit(prev_xlsx if prev_xlsx.is_file() else None, layout)

@@ -178,7 +178,7 @@ def inspect_file(path: Path) -> list[dict]:
             headers = header_map(ws, aliases)
             found.append(
                 {
-                    "path": str(path.resolve()),
+                    "path": str(src.resolve()),
                     "sheet": title,
                     "kind": kind,
                     "entity": entity,

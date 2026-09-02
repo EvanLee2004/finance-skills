@@ -59,7 +59,7 @@ flowchart TD
   INS --> MERGE["convert.py 拼表"]
   API --> MERGE
   OFF["代账利润表 xls<br/>山东/四川/济南"] --> MERGE
-  MAP["部门名映射 + 本公司规则<br/>上海费用→靠前本地化<br/>文化差旅招待→视听"] --> MERGE
+  MAP["部门名映射 + 本公司规则<br/>产品部→渠道 营销二部→视听<br/>文化/上海费用可从科目余额补"] --> MERGE
   LAY["版式.json 科目树"] --> MERGE
   MERGE --> X["桌面 月度损益表_今天/<br/>损益表 + 利润表"]
   MERGE --> R["运行报告：有源/缺源<br/>未映射部门个数"]
@@ -83,8 +83,8 @@ flowchart TD
 | 文件 | 改什么 |
 |------|--------|
 | `config/账套清单.json` | 主体与星辰账、哪几家吃月更 Excel |
-| `config/本公司规则.json` | 文化/上海本公司按科目进哪一列 |
-| `config/部门名映射.json` | 档案名 → Excel 列；不要写本公司 |
+| `config/本公司规则.json` | 文化/上海本公司按科目进哪一列；核算项目没费用时从科目余额补 |
+| `config/部门名映射.json` | 档案名 → Excel 列（产品部→渠道开发中心）；不要写本公司 |
 | `config/版式.json` | 科目行、列、冻结（无金额） |
 | `config/引出列名.json` | 引出表头别名 |
 | `config/科目名同义.json` | 引出科目名 → 版式名 |
