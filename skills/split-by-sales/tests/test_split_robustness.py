@@ -18,7 +18,7 @@ PY = sys.executable
 HEADERS17 = [
     "年度", "销售人员", "客户名称", "新智云单号", "文件名", "应收金额", "交付月份",
     "账龄(月份)", "结算阶段", "0604销售预计回款日期", "销售解释说明", "有无合同",
-    "合同分类", "框架合同是否存在PO单", "应收金额是否有客户正式确认", "客户结算周期",
+    "合同分类", "框架合同PO记录", "客户确认", "客户结算周期",
     "是否按月给客户发结算单",
 ]
 
@@ -35,7 +35,8 @@ def make_all(path):
     ws.title = "2026.6.4"
     ws.append(HEADERS17)
     data = [
-        ["2026", "张健", "甲公司", "SO1", "f1", 100, "202603", 2] + [""] * 9,
+        ["2026", "张健", "甲公司", "SO1", "f1", 100, "202603", 2, "", "", "", "", "",
+         "有单次报价PO单，通过邮件确认", "有", "", ""],
         ["2026", "张健", "乙公司", "SO2", "f2", 200, "202512", 8] + [""] * 9,
         ["2026", "张健", "丙公司", "SO2b", "f2b", 150, "202509", 5] + [""] * 9,
         ["2026", "于占国", "丙公司", "SO3", "f3", 300, "202603", 2] + [""] * 9,
@@ -81,6 +82,10 @@ def test_normal_split_reconcile_and_buckets(tmp):
     custs = [str(r[2] or "").strip() for r in ws.iter_rows(min_row=2, values_only=True)]
     custs = [c for c in custs if c]
     assert len(custs) >= 2 and custs == sorted(custs), "张健文件按客户名升序排好"
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    row_jia = next(r for r in rows if str(r[2] or "").strip() == "甲公司")
+    assert row_jia[13] == "有单次报价PO单，通过邮件确认" and row_jia[14] == "有", \
+        "PO/客户确认两列须从 all 的「框架合同PO记录/客户确认」正确带过来（旧口径会留空）"
 
 
 def test_missing_input(tmp):
