@@ -50,6 +50,8 @@ def field_hit(headers: list[str], aliases: dict, field: str) -> bool:
 def classify_xlsx(path: Path, aliases: dict) -> str | None:
     if "结果" in path.stem:
         return None
+    if "核算项目余额表" in path.name:
+        return None
     sheets = header_names(path)
     if not sheets:
         return None

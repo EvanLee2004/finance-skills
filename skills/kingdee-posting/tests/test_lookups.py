@@ -34,6 +34,13 @@ def test_single_line_to_accounts():
     assert (ar, rev, why) == ("113103", "510103", "")
 
 
+def test_prior_month_balance_books_without_invoice_month_debit():
+    box = _box({"ar_balance": [{"customer_code": "1001", "account": "113103", "balance": "80"}]})
+    ar, rev, why = lookups.resolve_ar("1001", "2026-09-07", box)
+    assert (ar, rev, why) == ("113103", "510103", "")
+    assert why == ""
+
+
 def test_unknown_customer_has_no_line():
     box = _box({})
     ar, rev, why = lookups.resolve_ar("1001", "2026-08-01", box)
@@ -162,3 +169,73 @@ def test_zhiyun_missing_credentials(tmp_path, monkeypatch):
     loaded = zhiyun_api.try_load_lookups()
     assert loaded["ok"] is False
     assert loaded["missing_credentials"] is True
+
+
+def _assist(*rows):
+    return lookups.assist_rows_from_dicts(list(rows))
+
+
+def test_pick_assist_unique_1131_books_income_tail():
+    rows = _assist(
+        {
+            "period": "202608",
+            "customer_code": "4146",
+            "customer_name": "甲",
+            "account": "113105",
+            "ending_debit": "1",
+            "ytd_debit": "1",
+        }
+    )
+    ar, rev, why = lookups.pick_assist_account("4146", "2026-09-07", rows)
+    assert (ar, rev, why) == ("113105", "510105", "")
+
+
+def test_pick_assist_two_ending_holds_no_silent_max():
+    rows = _assist(
+        {
+            "period": "202608",
+            "customer_code": "1",
+            "customer_name": "甲",
+            "account": "113103",
+            "ending_debit": "80",
+            "ytd_debit": "80",
+        },
+        {
+            "period": "202608",
+            "customer_code": "1",
+            "customer_name": "甲",
+            "account": "113102",
+            "ending_debit": "20",
+            "ytd_debit": "20",
+        },
+    )
+    ar, _rev, why = lookups.pick_assist_account("1", "2026-09-07", rows)
+    assert ar == ""
+    assert "多条" in why
+    assert "本期借方" not in why
+
+
+def test_pick_assist_missing_asks_new():
+    ar, _rev, why = lookups.pick_assist_account("1", "2026-09-07", [])
+    assert ar == ""
+    assert "是否新建" in why
+
+
+def test_pick_assist_empty_ending_unique_ytd():
+    rows = _assist(
+        {"period": "202608", "customer_code": "1", "name": "甲", "account": "113103", "ytd_debit": "9"},
+        {"period": "202608", "customer_code": "1", "name": "甲", "account": "113102"},
+    )
+    ar, rev, why = lookups.pick_assist_account("1", "2026-09-07", rows)
+    assert (ar, rev, why) == ("113103", "510103", "")
+
+
+def test_pick_assist_uses_prev_completed_month_not_future():
+    rows = _assist(
+        {"period": "202607", "customer_code": "1", "name": "甲", "account": "113103", "ending_debit": "1"},
+        {"period": "202609", "customer_code": "1", "name": "甲", "account": "113102", "ending_debit": "9"},
+        {"period": "202609", "customer_code": "1", "name": "甲", "account": "113103", "ending_debit": "9"},
+    )
+    ar, rev, why = lookups.pick_assist_account("1", "2026-09-07", rows)
+    assert (ar, rev, why) == ("113103", "510103", "")
+    assert lookups.prev_completed_month("2026-09-07") == "202608"

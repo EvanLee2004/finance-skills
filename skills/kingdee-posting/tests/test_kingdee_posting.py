@@ -58,7 +58,7 @@ def _master():
     }
 
 
-def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, order_sales=None, period_debit=None, ar_balance=None):
+def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, order_sales=None, period_debit=None, ar_balance=None, assist_rows=None, include_assist=True):
     lines = customer_lines if customer_lines is not None else {}
     for name in extra_customers or []:
         lines.setdefault(name, [])
@@ -76,8 +76,8 @@ def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, orde
         ]
         for i, _name in enumerate(extra_customers or []):
             balances.append({"customer_code": str(3000 + i), "account": "113103", "balance": "1"})
-    return {
-        "ar_accounts": ["113101", "113102", "113103", "113107"],
+    payload = {
+        "ar_accounts": ["113101", "113102", "113103", "113105", "113107"],
         "ar_balance": balances,
         "customer_lines": lines,
         "receipt_sales": receipt_sales
@@ -95,6 +95,30 @@ def _lookups(extra_customers=None, customer_lines=None, receipt_sales=None, orde
         "order_sales": order_sales if order_sales is not None else {"甲科技有限公司": ["于占国"]},
         "period_debit": period_debit or [],
     }
+    if include_assist:
+        if assist_rows is not None:
+            payload["assist_rows"] = assist_rows
+        else:
+            names_by_code = {c["code"]: c["name"] for c in _master()["customer"]}
+            for i, name in enumerate(extra_customers or []):
+                names_by_code.setdefault(str(3000 + i), name)
+            built = []
+            for b in balances:
+                code = str(b.get("customer_code") or "")
+                built.append(
+                    {
+                        "period": "202607",
+                        "customer_code": code,
+                        "customer_name": names_by_code.get(code, code),
+                        "account": b.get("account"),
+                        "ending_debit": b.get("balance"),
+                        "ending_credit": None,
+                        "ytd_debit": b.get("balance"),
+                        "ytd_credit": None,
+                    }
+                )
+            payload["assist_rows"] = built
+    return payload
 
 
 def _run(tmp_path, scene, master=None, lookups=None, start_voucher_no=1, out_dir=None):
@@ -111,6 +135,34 @@ def _run(tmp_path, scene, master=None, lookups=None, start_voucher_no=1, out_dir
 
 def _dummy_pdf(path: Path):
     path.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+
+
+def _write_assist(path: Path, rows):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "sheet1"
+    ws.cell(1, 1, "核算项目余额表")
+    ws.cell(2, 1, "公司名称：测试")
+    ws.cell(2, 8, "期间：202601-202612")
+    headers = ["期间", "客户编码", "客户名称", "科目编码", "科目名称", "期初", "期初", "本期发生额", "本期发生额", "本年累计", "本年累计", "期末", "期末"]
+    sub = ["期间", "客户编码", "客户名称", "科目编码", "科目名称", "借方", "贷方", "借方", "贷方", "借方", "贷方", "借方", "贷方"]
+    for i, h in enumerate(headers, 1):
+        ws.cell(4, i, h)
+    for i, h in enumerate(sub, 1):
+        ws.cell(5, i, h)
+    r = 6
+    for item in rows:
+        ws.cell(r, 1, item.get("period") or "202607")
+        ws.cell(r, 2, item.get("customer_code"))
+        ws.cell(r, 3, item.get("customer_name"))
+        ws.cell(r, 4, item.get("account"))
+        ws.cell(r, 10, item.get("ytd_debit"))
+        ws.cell(r, 11, item.get("ytd_credit"))
+        ws.cell(r, 12, item.get("ending_debit"))
+        ws.cell(r, 13, item.get("ending_credit"))
+        r += 1
+    wb.save(path)
+    wb.close()
 
 
 def _write_sales(path: Path, rows, org=None, with_org=True, headers=None):
@@ -238,7 +290,7 @@ def test_sales_no_business_line_holds(tmp_path):
     detail = load_workbook(result["detail_path"])
     reason = str(detail.active.cell(2, 2).value or "")
     detail.close()
-    assert "金蝶往来" in reason
+    assert "是否新建" in reason
     assert "无业务线" not in reason
 
 
@@ -642,6 +694,126 @@ def test_voucher_ar_reads_customer_assist(tmp_path, monkeypatch):
     assert empty["balances"] == {}
 
 
+def test_ar_windows_recent_then_year_start():
+    assert kingdee_api.ar_windows("2026-09") == {"recent": ("202608", "202609"), "ytd": ("202601", "202609")}
+    assert kingdee_api.ar_windows("2026-01") == {"recent": ("202601", "202601"), "ytd": ("202601", "202601")}
+    assert kingdee_api.ar_windows("2026-09-07") == {"recent": ("202608", "202609"), "ytd": ("202601", "202609")}
+
+
+def test_fetch_uses_recent_window_when_customer_present(tmp_path, monkeypatch):
+    from decimal import Decimal
+
+    local = tmp_path / "kingdee.local.json"
+    local.write_text(
+        json.dumps(
+            {
+                "client_id": "357164",
+                "client_secret": "x" * 32,
+                "app_key": "KZbQMo3T",
+                "app_secret": "s" * 40,
+                "account_id": "1783803326505631821",
+                "service_id": "795589109148",
+                "outer_instance_id": "572594141763080192",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(local))
+    monkeypatch.setenv("KINGDEE_AR_CACHE", str(tmp_path / "ar.json"))
+    monkeypatch.setattr(kingdee_api, "get_app_token", lambda creds: ("tok", "https://tf.jdy.com"))
+    windows = []
+
+    def fake_request(method, url, used, path, params=None, extra_headers=None, timeout=30):
+        if path == "/jdy/v2/fi/voucher":
+            windows.append((params.get("start_period"), params.get("end_period")))
+            return _FakeResp({"errcode": 0, "data": {"rows": [{"id": "v-aug", "period": "202608"}], "count": 1}})
+        if path == "/jdy/v2/fi/voucher_detail":
+            return _FakeResp(
+                {
+                    "errcode": 0,
+                    "data": {
+                        "period": "202608",
+                        "entry_list": [
+                            {
+                                "account_number": "113103",
+                                "debit_amount": "80",
+                                "credit_amount": "0",
+                                "assist": [{"type": "bd_customer", "number": "1001"}],
+                            }
+                        ],
+                    },
+                }
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(kingdee_api, "_request", fake_request)
+    got = kingdee_api.try_fetch_customer_ar("1001", ["113103"], "2026-09")
+    assert got["ok"] is True
+    assert got["balances"][("1001", "113103")] == Decimal("80.00")
+    assert got["period_debit"] == {}
+    assert windows == [("202608", "202609")]
+
+
+def test_fetch_extends_to_year_start_when_recent_empty(tmp_path, monkeypatch):
+    from decimal import Decimal
+
+    local = tmp_path / "kingdee.local.json"
+    local.write_text(
+        json.dumps(
+            {
+                "client_id": "357164",
+                "client_secret": "x" * 32,
+                "app_key": "KZbQMo3T",
+                "app_secret": "s" * 40,
+                "account_id": "1783803326505631821",
+                "service_id": "795589109148",
+                "outer_instance_id": "572594141763080192",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(local))
+    monkeypatch.setenv("KINGDEE_AR_CACHE", str(tmp_path / "ar.json"))
+    monkeypatch.setattr(kingdee_api, "get_app_token", lambda creds: ("tok", "https://tf.jdy.com"))
+    windows = []
+
+    def fake_request(method, url, used, path, params=None, extra_headers=None, timeout=30):
+        if path == "/jdy/v2/fi/voucher":
+            start = str((params or {}).get("start_period") or "")
+            end = str((params or {}).get("end_period") or "")
+            windows.append((start, end))
+            if start == "202608":
+                return _FakeResp({"errcode": 0, "data": {"rows": [], "count": 0}})
+            if start == "202601":
+                return _FakeResp({"errcode": 0, "data": {"rows": [{"id": "v-mar", "period": "202603"}], "count": 1}})
+            raise AssertionError((start, end))
+        if path == "/jdy/v2/fi/voucher_detail":
+            return _FakeResp(
+                {
+                    "errcode": 0,
+                    "data": {
+                        "period": "202603",
+                        "entry_list": [
+                            {
+                                "account_number": "113103",
+                                "debit_amount": "50",
+                                "credit_amount": "0",
+                                "assist": [{"type": "bd_customer", "number": "1001"}],
+                            }
+                        ],
+                    },
+                }
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(kingdee_api, "_request", fake_request)
+    got = kingdee_api.try_fetch_customer_ar("1001", ["113103"], "2026-09")
+    assert got["ok"] is True
+    assert got["balances"][("1001", "113103")] == Decimal("50.00")
+    assert got["period_debit"] == {}
+    assert windows == [("202608", "202609"), ("202601", "202609")]
+
+
 def test_repo_venv_python_exists():
     got = convert.repo_venv_python()
     assert got is not None
@@ -730,13 +902,18 @@ def test_sales_multi_line_uses_period_debit(tmp_path):
             ],
         ),
     )
-    assert result["bookable_count"] == 1
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "多条" in reason
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
     accounts = [ws.cell(r, 7).value for r in range(4, 7)]
-    assert "113103" in accounts
-    assert "113102" not in accounts
     kd.close()
+    assert "113103" not in accounts
+    assert "113102" not in accounts
 
 
 def test_receipt_uses_lookups_not_table_ar(tmp_path):
@@ -806,6 +983,8 @@ def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):
                 str(lookups),
                 "--date",
                 "2026-08-27",
+                "--start-voucher-no",
+                "1",
                 "--out-dir",
                 str(tmp_path),
             ]
@@ -849,6 +1028,8 @@ def test_cli_lookups_file_converts(tmp_path):
                 str(lookups),
                 "--date",
                 "2026-08-27",
+                "--start-voucher-no",
+                "1",
                 "--out-dir",
                 str(tmp_path),
             ]
@@ -1044,7 +1225,7 @@ def test_sales_zero_balance_without_debit_holds_kingdee_ar(tmp_path):
     detail = load_workbook(result["detail_path"])
     reason = str(detail.active.cell(2, 2).value or "")
     detail.close()
-    assert "金蝶往来" in reason
+    assert "是否新建" in reason
     assert "业务线" not in reason
 
 
@@ -1068,8 +1249,12 @@ def test_period_debit_fetch_is_called_when_injected_missing(tmp_path):
         period_fetch=fetch,
         out_dir=tmp_path,
     )
-    assert called.get("ok") is True
-    assert result["bookable_count"] == 1
+    assert called.get("ok") is not True
+    assert result["bookable_count"] == 0
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "是否新建" in reason
 
 
 def test_start_voucher_no_shifts_payment_batches(tmp_path, monkeypatch):
@@ -1097,3 +1282,141 @@ def test_default_desktop_dir_helper(tmp_path):
 
     got = convert.default_desktop_dir("金蝶入账", today=date(2026, 9, 2), home=tmp_path)
     assert got == desktop / "金蝶入账_20260902"
+
+
+def test_ar_accounts_include_113105():
+    assert "113105" in convert.load_ar_accounts()
+
+
+def test_sales_convert_does_not_pick_by_period_debit():
+    text = (SCRIPTS / "convert.py").read_text(encoding="utf-8")
+    start = text.index("def resolve_sales_party")
+    end = text.index("def parse_invoice_text")
+    body = text[start:end]
+    assert "pick_assist_account" in body
+    assert "resolve_sales_party" in body
+    assert "resolve_ar" not in body
+    assert "period_debit" not in body
+
+
+def test_assist_export_filters_match_probe():
+    assist = _load("kingdee_posting_assist_xlsx", SCRIPTS / "assist_xlsx.py")
+    assert assist.EXPORT_FILTERS["assist_type"] == "客户"
+    assert assist.EXPORT_FILTERS["account"] == "1131"
+    assert assist.EXPORT_FILTERS["period"] == "本年"
+    assert assist.EXPORT_FILTERS["hide_zero_balance"] is False
+    assert "gl_rpt_assistbalance" in assist.ASSIST_FORM
+
+
+def test_kingdee_api_has_no_assist_balance_openapi_path():
+    text = (SCRIPTS / "kingdee_api.py").read_text(encoding="utf-8")
+    assert "gl_rpt_assistbalance" not in text
+    assert "/jdy/v2/fi/voucher" in text
+
+
+def test_sales_reads_assist_xlsx_from_input_dir(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    _write_assist(
+        tmp_path / "核算项目余额表_客户_1131_本年.xlsx",
+        [
+            {
+                "period": "202607",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113105",
+                "ending_debit": "1",
+                "ytd_debit": "1",
+            }
+        ],
+    )
+    result = _run(tmp_path, "销项发票", lookups=_lookups(include_assist=False))
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [ws.cell(r, 7).value for r in range(4, 7)]
+    kd.close()
+    assert "113105" in accounts
+    assert "510105" in accounts
+
+
+def test_sales_police_books_0386_even_if_heading_absent_from_assist(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name="抚顺市公安局")], with_org=False)
+    result = _run(
+        tmp_path,
+        "销项发票",
+        lookups=_lookups(
+            assist_rows=[
+                {
+                    "period": "202607",
+                    "customer_code": "0386",
+                    "customer_name": "公安部",
+                    "account": "113103",
+                    "ending_debit": "1",
+                    "ytd_debit": "1",
+                }
+            ]
+        ),
+    )
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    names = [ws.cell(r, 19).value for r in range(4, 7)]
+    codes = [ws.cell(r, 18).value for r in range(4, 7)]
+    kd.close()
+    assert "公安部" in names
+    assert "0386" in [str(c) for c in codes]
+
+
+def test_sales_default_voucher_no_follows_month_max(tmp_path, monkeypatch):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    master = tmp_path / "master.json"
+    lookups = tmp_path / "lookups.json"
+    master.write_text(json.dumps(_master()), encoding="utf-8")
+    lookups.write_text(json.dumps(_lookups()), encoding="utf-8")
+
+    def fake_request(method, url, used, path, params=None, extra_headers=None, timeout=30):
+        if path == "/jdy/v2/fi/voucher":
+            return _FakeResp(
+                {
+                    "errcode": 0,
+                    "data": {
+                        "rows": [
+                            {"id": "a", "number": 25},
+                            {"id": "b", "number": 18},
+                        ],
+                        "count": 2,
+                    },
+                }
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(convert.kingdee_api, "load_local", lambda: {
+        "client_id": "x",
+        "client_secret": "x" * 32,
+        "app_key": "k",
+        "app_secret": "s" * 40,
+    })
+    monkeypatch.setattr(convert.kingdee_api, "get_app_token", lambda creds: ("tok", "https://tf.jdy.com"))
+    monkeypatch.setattr(convert.kingdee_api, "_request", fake_request)
+    assert (
+        convert.main(
+            [
+                "--input-dir",
+                str(tmp_path),
+                "--scene",
+                "销项发票",
+                "--master",
+                str(master),
+                "--lookups",
+                str(lookups),
+                "--date",
+                "2026-08-27",
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    nums = [n for n in _voucher_nums(tmp_path / "凭证引入_结果.xlsx", 9) if n]
+    assert min(nums) == 26
+    assert 1 not in nums

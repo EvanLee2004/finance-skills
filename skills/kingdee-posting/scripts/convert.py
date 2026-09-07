@@ -58,6 +58,7 @@ except Exception:
     pass
 
 sys.path.insert(0, str(HERE))
+import assist_xlsx as assist_mod  # noqa: E402
 import inspect_inputs as inspect_mod  # noqa: E402
 import kingdee_api  # noqa: E402
 import lookups as lookup_mod  # noqa: E402
@@ -472,7 +473,33 @@ def sales_sheet(wb) -> str | None:
     return None
 
 
-def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str, period_fetch=None) -> list[VoucherLine]:
+def resolve_sales_party(unit: str, applicant: str, inv_day: str, alias_map: dict, master: Master, assist_rows) -> tuple:
+    """特殊规则先走，再抄客户核算项目余额表。档案只核验编码存在。"""
+    records = lookup_mod.assist_records(assist_rows)
+    if names.maps_to_police_ministry(unit, applicant):
+        cus_code = names.POLICE_CODE
+    elif names.is_person_heading(unit):
+        cus_code = names.PERSON_CODE
+    else:
+        query = (alias_map or {}).get(unit, unit)
+        got = names.match_records(query, records)
+        if got.status == "none" and query != unit:
+            got = names.match_records(unit, records)
+        if got.status == "many":
+            return None, "客户核算项目余额表名称不唯一，请斯佳确认"
+        if got.status != "ok" or not got.hit:
+            return None, lookup_mod.HOLD_ASSIST_MISSING
+        cus_code = got.hit[0]
+    ar, rev, why = lookup_mod.pick_assist_account(cus_code, inv_day, assist_rows)
+    if not ar:
+        return None, why or lookup_mod.HOLD_ASSIST_MISSING
+    verified = names.by_code(master.all_customers(), cus_code)
+    if not verified:
+        return None, "总部档案未核验" if not master.enabled else "客户档案没有此编码，请斯佳确认"
+    return (verified[0], verified[1], ar, rev), None
+
+
+def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str, period_fetch=None, assist_rows=None) -> list[VoucherLine]:
     cfg = rules.get("sales") or {}
     tax_account = str(cfg.get("tax_account") or "21710105")
     divisor = Decimal(str(rules.get("tax_rate_divisor") or "1.06"))
@@ -556,22 +583,14 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             lines.append(line)
             continue
         emp_code, emp_name = ehit
-        chit, cerr = master.match_customer(unit, applicant, alias_map)
-        if not chit:
+        rows = assist_rows if assist_rows is not None else list(getattr(box, "assist_rows", None) or [])
+        party, perr = resolve_sales_party(unit, applicant, inv_day, alias_map, master, rows)
+        if not party:
             line.status = "待确认"
-            line.reason = "客户档案一对多" if cerr == "many" else "客户档案没有此抬头，请斯佳确认是否新建"
+            line.reason = perr or lookup_mod.HOLD_ASSIST_MISSING
             lines.append(line)
             continue
-        cus_code, cus_name = chit
-        ar, rev, why = lookup_mod.resolve_ar(cus_code, inv_day, box)
-        if (not ar) and callable(period_fetch):
-            period_fetch(box, cus_code, inv_day, list(box.ar_accounts))
-            ar, rev, why = lookup_mod.resolve_ar(cus_code, inv_day, box)
-        if not ar or not rev:
-            line.status = "待确认"
-            line.reason = why or "缺科目编码"
-            lines.append(line)
-            continue
+        cus_code, cus_name, ar, rev = party
         aux = {
             "aux": True,
             "cus_code": cus_code,
@@ -920,7 +939,12 @@ def run_dir(
     files = report["files"]
     if scene == "销项发票":
         src = Path(files["invoice"])
-        lines = convert_sales(src, master, rules, aliases, box, day, period_fetch=period_fetch)
+        if box.assist_supplied:
+            assist_rows = list(box.assist_rows or [])
+        else:
+            assist_path = assist_mod.ensure_assist_xlsx([input_dir])
+            assist_rows = assist_mod.parse_assist_xlsx(assist_path)
+        lines = convert_sales(src, master, rules, aliases, box, day, assist_rows=assist_rows)
     elif scene == "付款":
         src = Path(files["ledger"])
         lines = convert_payment(input_dir, src, master, rules, aliases)
@@ -941,7 +965,7 @@ def main(argv=None) -> int:
     parser.add_argument("--master")
     parser.add_argument("--lookups")
     parser.add_argument("--no-api", action="store_true")
-    parser.add_argument("--start-voucher-no", type=int, default=1)
+    parser.add_argument("--start-voucher-no", type=int, default=None)
     parser.add_argument("--out-dir", "--out", dest="out_dir")
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
@@ -962,28 +986,37 @@ def main(argv=None) -> int:
             log(f"总部档案未核验（{reason}）；未生成引入表。请检查本机应用号和只读权限后重试。")
             return 2
     lookups = {}
+    scene = args.scene
+    if not scene:
+        inspected = inspect_mod.inspect_dir(root, None)
+        scene = inspected.get("scene") if inspected.get("ready") else None
     if args.lookups:
         lookups = json.loads(Path(args.lookups).read_text(encoding="utf-8"))
-    else:
-        scene = args.scene
-        if not scene:
-            inspected = inspect_mod.inspect_dir(root, None)
-            scene = inspected.get("scene") if inspected.get("ready") else None
-        if scene == "收款":
-            loaded_zy = zhiyun_api.try_load_lookups()
-            if not loaded_zy.get("ok"):
-                reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
-                log(f"智云查找未核验（{reason}）；未生成引入表。请检查本机 zhiyun.local.json 后重试。")
-                return 2
-            lookups = loaded_zy.get("data") or {}
+    elif scene == "收款":
+        loaded_zy = zhiyun_api.try_load_lookups()
+        if not loaded_zy.get("ok"):
+            reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
+            log(f"智云查找未核验（{reason}）；未生成引入表。请检查本机 zhiyun.local.json 后重试。")
+            return 2
+        lookups = loaded_zy.get("data") or {}
     fill_period = None
-    if not args.master:
+    if not args.master and scene == "收款":
 
         def fill_period(box, cus_code, day, accounts):
             got = kingdee_api.try_fetch_customer_ar(cus_code, accounts, lookup_mod.period_month(day))
             if got.get("ok"):
                 box.ar_balance.update(got.get("balances") or {})
                 box.period_debit.update(got.get("period_debit") or got.get("data") or {})
+
+    start_no = args.start_voucher_no
+    if start_no is None:
+        period = (args.date or date.today().isoformat())[:7]
+        fetched = kingdee_api.try_fetch_next_voucher_no(period)
+        if not fetched.get("ok"):
+            reason = "本机没有金蝶应用号" if fetched.get("missing_credentials") else fetched.get("error") or "读取失败"
+            log(f"当前月凭证号未核验（{reason}）；未生成引入表。请检查本机应用号后重试。")
+            return 2
+        start_no = int(fetched["next_number"])
 
     try:
         result = run_dir(
@@ -993,7 +1026,7 @@ def main(argv=None) -> int:
             master_data,
             lookups,
             period_fetch=fill_period,
-            start_voucher_no=args.start_voucher_no,
+            start_voucher_no=start_no,
             out_dir=Path(args.out_dir).expanduser() if args.out_dir else None,
         )
     except SystemExit as e:

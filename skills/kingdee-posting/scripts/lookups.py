@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""预处理查找：金蝶 1131xx 往来定科目、回款/下单销售。合成测试注入，不访问网络。"""
+"""预处理查找：销项抄客户核算项目余额表；收款仍用 1131xx 往来。合成测试注入，不访问网络。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 TWOPLACES = Decimal("0.01")
+
+HOLD_ASSIST_MISSING = "客户核算项目余额表没有此抬头，请斯佳确认是否新建"
+HOLD_ASSIST_MULTI = "客户核算项目余额表有多条应收，请斯佳确认记哪条"
 
 
 def money(v):
@@ -51,6 +54,137 @@ def amt_key(value) -> str:
 
 
 @dataclass
+class AssistRow:
+    period: str
+    customer_code: str
+    customer_name: str
+    account: str
+    ending_debit: Decimal | None = None
+    ending_credit: Decimal | None = None
+    ytd_debit: Decimal | None = None
+    ytd_credit: Decimal | None = None
+
+
+def prev_completed_month(day) -> str:
+    """开票月的上一已过完公历月，YYYYMM。"""
+    s = period_month(day)
+    if len(s) < 7:
+        return ""
+    year = int(s[:4])
+    month = int(s[5:7]) - 1
+    if month <= 0:
+        year -= 1
+        month = 12
+    return f"{year}{month:02d}"
+
+
+def _period_key(raw) -> str:
+    s = str(raw or "").strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits[:6] if len(digits) >= 6 else ""
+
+
+def _has_amt(debit, credit) -> bool:
+    for val in (debit, credit):
+        if val is not None and val != 0:
+            return True
+    return False
+
+
+def assist_records(rows: list[AssistRow]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for row in rows or []:
+        item = (str(row.customer_code or "").strip(), str(row.customer_name or "").strip())
+        if item[0] and item[1] and item not in out:
+            out.append(item)
+    return out
+
+
+def select_period_rows(rows: list[AssistRow], invoice_day: str) -> list[AssistRow]:
+    rows = [r for r in (rows or []) if r.account]
+    if not rows:
+        return []
+    periods = sorted({r.period for r in rows if r.period})
+    if len(periods) <= 1:
+        return list(rows)
+    target = prev_completed_month(invoice_day)
+    if not target:
+        return []
+    exact = [r for r in rows if r.period == target]
+    if exact:
+        return exact
+    older = [p for p in periods if p <= target]
+    if not older:
+        return []
+    best = max(older)
+    return [r for r in rows if r.period == best]
+
+
+def pick_assist_account(customer_code: str, invoice_day: str, rows: list[AssistRow]) -> tuple[str, str, str]:
+    """返回 (应收, 收入, 失败原因)。销项科目只抄客户核算项目余额表。"""
+    code = str(customer_code or "").strip()
+    if not code:
+        return "", "", HOLD_ASSIST_MISSING
+    mine = [r for r in (rows or []) if str(r.customer_code or "").strip() == code and str(r.account or "").startswith("1131")]
+    selected = select_period_rows(mine, invoice_day)
+    by_acc: dict[str, list[AssistRow]] = {}
+    for row in selected:
+        acc = str(row.account or "").strip()
+        if acc:
+            by_acc.setdefault(acc, []).append(row)
+    accounts = list(by_acc)
+    if not accounts:
+        return "", "", HOLD_ASSIST_MISSING
+    if len(accounts) == 1:
+        ar = accounts[0]
+        rev = income_of(ar)
+        if not rev:
+            return "", "", "收入科目无法从应收推导"
+        return ar, rev, ""
+    with_end = [acc for acc in accounts if any(_has_amt(r.ending_debit, r.ending_credit) for r in by_acc[acc])]
+    if len(with_end) >= 2:
+        return "", "", HOLD_ASSIST_MULTI
+    if len(with_end) == 1:
+        ar = with_end[0]
+        rev = income_of(ar)
+        if not rev:
+            return "", "", "收入科目无法从应收推导"
+        return ar, rev, ""
+    with_ytd = [acc for acc in accounts if any(_has_amt(r.ytd_debit, r.ytd_credit) for r in by_acc[acc])]
+    if len(with_ytd) == 1:
+        ar = with_ytd[0]
+        rev = income_of(ar)
+        if not rev:
+            return "", "", "收入科目无法从应收推导"
+        return ar, rev, ""
+    return "", "", HOLD_ASSIST_MULTI
+
+
+def assist_rows_from_dicts(items) -> list[AssistRow]:
+    out: list[AssistRow] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        acc = str(item.get("account") or "").strip()
+        code = str(item.get("customer_code") or item.get("code") or "").strip()
+        if not acc or not code:
+            continue
+        out.append(
+            AssistRow(
+                period=_period_key(item.get("period")),
+                customer_code=code,
+                customer_name=str(item.get("customer_name") or item.get("name") or "").strip(),
+                account=acc,
+                ending_debit=money(item.get("ending_debit") if "ending_debit" in item else item.get("balance")),
+                ending_credit=money(item.get("ending_credit")),
+                ytd_debit=money(item.get("ytd_debit")),
+                ytd_credit=money(item.get("ytd_credit")),
+            )
+        )
+    return out
+
+
+@dataclass
 class LookupBox:
     customer_lines: dict[str, list[str]] = field(default_factory=dict)
     ar_accounts: list[str] = field(default_factory=list)
@@ -60,6 +194,8 @@ class LookupBox:
     order_sales: dict[str, list[str]] = field(default_factory=dict)
     applicant_dept: dict[str, str] = field(default_factory=dict)
     line_accounts: dict[str, str] = field(default_factory=dict)
+    assist_rows: list[AssistRow] = field(default_factory=list)
+    assist_supplied: bool = False
 
     def lines_for(self, customer: str) -> list[str]:
         n = norm_name(customer)
@@ -140,6 +276,8 @@ def box_from_dict(raw: dict | None, ar_or_lines, applicant_dept: dict) -> Lookup
             if s and s not in sales:
                 sales.append(s)
         orders[norm_name(name)] = sales
+    assist_supplied = "assist_rows" in raw
+    assist_rows = assist_rows_from_dicts(raw.get("assist_rows") or [])
     return LookupBox(
         customer_lines=lines,
         ar_accounts=ar_accounts,
@@ -149,6 +287,8 @@ def box_from_dict(raw: dict | None, ar_or_lines, applicant_dept: dict) -> Lookup
         order_sales=orders,
         applicant_dept={k: str(v).strip() for k, v in applicant_dept.items() if not str(k).startswith("_") and v},
         line_accounts={},
+        assist_rows=assist_rows,
+        assist_supplied=assist_supplied,
     )
 
 

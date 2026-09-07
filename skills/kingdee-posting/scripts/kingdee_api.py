@@ -411,19 +411,69 @@ def _debit_from_row(row: dict):
     return None
 
 
-def _ar_window(period: str) -> tuple[str, str]:
+def _shift_yyyymm(yyyymm: str, months: int) -> str:
+    y = int(yyyymm[:4])
+    m = int(yyyymm[4:6]) + months
+    while m <= 0:
+        m += 12
+        y -= 1
+    while m > 12:
+        m -= 12
+        y += 1
+    return f"{y}{m:02d}"
+
+
+def ar_windows(period: str) -> dict[str, tuple[str, str]]:
+    """余额先看近一个月（含开票月），没有这家再拼到当年1月。本期借方仍是开票月。"""
     end = _yyyymm(period)
     if not end:
-        return "", ""
-    # 科目余额表现网拒期间参数；凭证明细按张拉、全年太慢。先扫开票月。
-    return end, end
+        return {"recent": ("", ""), "ytd": ("", "")}
+    year_start = end[:4] + "01"
+    prev = _shift_yyyymm(end, -1)
+    recent_start = prev if prev >= year_start else year_start
+    return {"recent": (recent_start, end), "ytd": (year_start, end)}
+
+
+def _ar_window(period: str) -> tuple[str, str]:
+    return ar_windows(period)["recent"]
+
+
+def _window_key(start: str, end: str) -> str:
+    return f"{start}:{end}"
 
 
 def _save_ar_cache(payload: dict) -> None:
     path = ar_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"cached_at": time.time(), **payload}, ensure_ascii=False), encoding="utf-8")
+        existing: dict = {}
+        if path.is_file():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                existing = {}
+        accounts = list(payload.get("accounts") or [])
+        windows = existing.get("windows") if list(existing.get("accounts") or []) == accounts else None
+        if not isinstance(windows, dict):
+            windows = {}
+            old_start = str(existing.get("start") or "")
+            old_end = str(existing.get("end") or "")
+            if old_start and old_end and list(existing.get("accounts") or []) == accounts:
+                windows[_window_key(old_start, old_end)] = {
+                    "balances": existing.get("balances") or [],
+                    "debits": existing.get("debits") or [],
+                }
+        windows[_window_key(str(payload["start"]), str(payload["end"]))] = {
+            "balances": payload.get("balances") or [],
+            "debits": payload.get("debits") or [],
+        }
+        path.write_text(
+            json.dumps(
+                {"cached_at": time.time(), "accounts": accounts, "windows": windows},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         path.chmod(0o600)
     except OSError:
         return
@@ -440,9 +490,21 @@ def _load_ar_cache(start: str, end: str, accounts: list[str]) -> dict | None:
         return None
     if time.time() - cached_at > cache_ttl_seconds():
         return None
-    if payload.get("start") != start or payload.get("end") != end:
-        return None
     if list(payload.get("accounts") or []) != list(accounts):
+        return None
+    windows = payload.get("windows")
+    if isinstance(windows, dict):
+        block = windows.get(_window_key(start, end))
+        if not isinstance(block, dict):
+            return None
+        return {
+            "start": start,
+            "end": end,
+            "accounts": accounts,
+            "balances": block.get("balances") or [],
+            "debits": block.get("debits") or [],
+        }
+    if payload.get("start") != start or payload.get("end") != end:
         return None
     return payload
 
@@ -533,8 +595,7 @@ def _scan_voucher_ar(creds: dict, token: str, accounts: list[str], start: str, e
     return {"balances": balances, "period_debit": period_debit, "start": start, "end": end, "accounts": list(wanted)}
 
 
-def _ledger_for(accounts: list[str], period: str) -> dict:
-    start, end = _ar_window(period)
+def _ledger_for(accounts: list[str], start: str, end: str) -> dict:
     if not start or not end:
         return {"ok": False, "missing_credentials": False, "error": "period", "balances": {}, "period_debit": {}}
     accs = [str(a).strip() for a in accounts if str(a).strip()]
@@ -561,6 +622,18 @@ def _ledger_for(accounts: list[str], period: str) -> dict:
     return {"ok": True, "missing_credentials": False, "balances": scanned["balances"], "period_debit": scanned["period_debit"]}
 
 
+def _slice_customer(ledger: dict, cus: str, month: str) -> tuple[dict, dict]:
+    balances = {}
+    for (code, acc), val in (ledger.get("balances") or {}).items():
+        if code == cus and val:
+            balances[(code, acc)] = val
+    period_debit = {}
+    for (code, acc, per), val in (ledger.get("period_debit") or {}).items():
+        if code == cus and per == month and val:
+            period_debit[(code, acc, per)] = val
+    return balances, period_debit
+
+
 def try_fetch_period_debit(customer_code: str, accounts: list[str], period: str) -> dict:
     """本期借方。科目余额表现网拒 YYYYMM，改从凭证分录 assist 汇总。"""
     got = try_fetch_customer_ar(customer_code, accounts, period)
@@ -573,27 +646,54 @@ def try_fetch_period_debit(customer_code: str, accounts: list[str], period: str)
 
 
 def try_fetch_customer_ar(customer_code: str, accounts: list[str], period: str) -> dict:
-    """余额=当年1月到开票月凭证借贷净额；本期借方=该月借方。只认 1131xx + 客户核算项目。"""
+    """余额先近一个月（含开票月）凭证净额；没有这家再拼到当年1月。本期借方=开票月借方。"""
     cus = str(customer_code or "").strip()
-    ledger = _ledger_for(accounts, period)
-    if not ledger.get("ok"):
+    wins = ar_windows(period)
+    recent_start, recent_end = wins["recent"]
+    ytd_start, ytd_end = wins["ytd"]
+    month = str(period or "")[:7]
+    if len(month) == 6 and month.isdigit():
+        month = f"{month[:4]}-{month[4:6]}"
+    elif len(month) >= 7:
+        month = month[:7]
+    recent = _ledger_for(accounts, recent_start, recent_end)
+    if not recent.get("ok"):
         return {
             "ok": False,
-            "missing_credentials": bool(ledger.get("missing_credentials")),
-            "error": ledger.get("error"),
+            "missing_credentials": bool(recent.get("missing_credentials")),
+            "error": recent.get("error"),
             "balances": {},
             "period_debit": {},
             "data": {},
         }
-    month = str(period or "")[:7]
-    balances = {}
-    for (code, acc), val in (ledger.get("balances") or {}).items():
-        if code == cus and val:
-            balances[(code, acc)] = val
-    period_debit = {}
-    for (code, acc, per), val in (ledger.get("period_debit") or {}).items():
-        if code == cus and per == month:
-            period_debit[(code, acc, per)] = val
+    balances, period_debit = _slice_customer(recent, cus, month)
+    if balances or period_debit:
+        return {
+            "ok": True,
+            "missing_credentials": False,
+            "balances": balances,
+            "period_debit": period_debit,
+            "data": period_debit,
+        }
+    if (ytd_start, ytd_end) == (recent_start, recent_end):
+        return {
+            "ok": True,
+            "missing_credentials": False,
+            "balances": {},
+            "period_debit": {},
+            "data": {},
+        }
+    ytd = _ledger_for(accounts, ytd_start, ytd_end)
+    if not ytd.get("ok"):
+        return {
+            "ok": False,
+            "missing_credentials": bool(ytd.get("missing_credentials")),
+            "error": ytd.get("error"),
+            "balances": {},
+            "period_debit": {},
+            "data": {},
+        }
+    balances, period_debit = _slice_customer(ytd, cus, month)
     return {
         "ok": True,
         "missing_credentials": False,
@@ -601,3 +701,82 @@ def try_fetch_customer_ar(customer_code: str, accounts: list[str], period: str) 
         "period_debit": period_debit,
         "data": period_debit,
     }
+
+
+def _voucher_no(row) -> int | None:
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("number")
+    if raw is None or str(raw).strip() == "":
+        raw = row.get("bill_no") or row.get("voucher_no")
+    if raw is None or str(raw).strip() == "":
+        return None
+    s = str(raw).strip().replace("记", "").replace("－", "-")
+    if s.startswith("-"):
+        s = s[1:]
+    s = s.replace("-", "")
+    if s.isdigit():
+        return int(s)
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return None
+
+
+def try_fetch_next_voucher_no(period: str | None = None) -> dict:
+    """当前月凭证最大 number + 1。没说起始号时用这个，不得默认从 1 起。"""
+    from datetime import date as date_cls
+
+    yyyymm = _yyyymm(period or "") or date_cls.today().strftime("%Y%m")
+    if not yyyymm:
+        return {"ok": False, "missing_credentials": False, "error": "period"}
+    creds = load_local()
+    if not creds:
+        return {"ok": False, "missing_credentials": True, "error": "no credentials"}
+    try:
+        token, _domain = get_app_token(creds)
+        extra = {"app-token": token}
+        max_no = 0
+        page = 1
+        while page <= 80:
+            resp = _request(
+                "GET",
+                API_HOST + "/jdy/v2/fi/voucher",
+                creds,
+                "/jdy/v2/fi/voucher",
+                params={
+                    "start_period": yyyymm,
+                    "end_period": yyyymm,
+                    "page": str(page),
+                    "page_size": "100",
+                },
+                extra_headers=extra,
+            )
+            if resp.status_code != 200:
+                return {
+                    "ok": False,
+                    "missing_credentials": False,
+                    "error": f"voucher list http {resp.status_code}",
+                }
+            payload = resp.json()
+            rows = _rows_from(payload)
+            for row in rows:
+                n = _voucher_no(row)
+                if n is not None and n > max_no:
+                    max_no = n
+            if len(rows) < 100:
+                break
+            page += 1
+        return {
+            "ok": True,
+            "missing_credentials": False,
+            "next_number": max_no + 1,
+            "max_number": max_no,
+            "period": yyyymm,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "missing_credentials": False,
+            "error": f"{type(e).__name__}: {str(e)[:200]}",
+        }
