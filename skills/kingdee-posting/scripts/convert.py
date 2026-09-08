@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -208,8 +209,16 @@ class VoucherLine:
     key: str = ""
     expl: str = ""
     voucher_no: int | None = None
+    booking_date: str = ""
     extra: dict = field(default_factory=dict)
     entries: list = field(default_factory=list)
+
+
+SCENE_DESKTOP = {
+    "销项发票": "金蝶入账_销项",
+    "付款": "金蝶入账_付款",
+    "收款": "金蝶入账_收款",
+}
 
 
 def unique_lookup(index: dict[str, list[tuple[str, str]]], name: str):
@@ -348,6 +357,13 @@ def assign_vouchers(lines: list[VoucherLine], pack_size: int, keep_consecutive: 
             current = [line]
             continue
         same = norm_name(line.key) == norm_name(current[-1].key)
+        same_day = (line.booking_date or "") == (current[-1].booking_date or "")
+        if not same_day:
+            batch += 1
+            for item in current:
+                item.voucher_no = batch
+            current = [line]
+            continue
         if same or len(current) < pack_size:
             current.append(line)
             continue
@@ -412,7 +428,7 @@ def write_kingdee(path: Path, lines: list[VoucherLine], rules: dict, booking: st
         if line.status != "可入账":
             continue
         for ent in line.entries:
-            ws.cell(row_i, cols["date"], booking)
+            ws.cell(row_i, cols["date"], line.booking_date or booking)
             ws.cell(row_i, cols["word"], rules.get("voucher_word") or "记")
             ws.cell(row_i, cols["number"], line.voucher_no)
             ws.cell(row_i, cols["expl"], line.expl)
@@ -514,6 +530,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
         raise SystemExit("找不到发票 sheet")
     ws_f = wb_f[sheet]
     ws_v = wb_v[sheet]
+    org_map = inspect_mod.load_org_map(wb_f, aliases)
     headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
     idx = header_index(headers, aliases.get("销项发票_列别名") or {})
     needed = ["单位名称", "价税合计", "申请人"]
@@ -548,7 +565,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             source_row=r,
             key=unit,
             expl=f"{prefix}：{unit}" if typ else f"{unit}",
-            extra={"单位名称": unit, "申请人": applicant},
+            extra={"单位名称": unit, "申请人": applicant, "sheet": sheet, "source_amt": str(total) if total is not None else ""},
         )
         if total is None or amt is None or tax is None:
             line.status, line.reason = "待确认", "缺金额"
@@ -566,7 +583,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             line.status, line.reason = "待确认", "缺申请人"
             lines.append(line)
             continue
-        dept = lookup_mod.applicant_dept_code(applicant, box)
+        dept = inspect_mod.dept_for_sales(applicant, org_map, box.applicant_dept)
         if not dept:
             line.status, line.reason = "待确认", "申请人不在部门表"
             lines.append(line)
@@ -652,8 +669,13 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
     fallback = rules.get("fallback_supplier") or {"code": "9999", "name": "其他供应商"}
     wb_f = load_workbook(ledger, data_only=False)
     wb_v = load_workbook(ledger, data_only=True)
-    ws_f = wb_f[wb_f.sheetnames[0]]
-    ws_v = wb_v[wb_v.sheetnames[0]]
+    sheet = inspect_mod.find_payment_sheet(wb_f, aliases)
+    if not sheet:
+        wb_f.close()
+        wb_v.close()
+        raise SystemExit("找不到付款三列表")
+    ws_f = wb_f[sheet]
+    ws_v = wb_v[sheet] if sheet in wb_v.sheetnames else wb_v[wb_v.sheetnames[0]]
     headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
     idx = header_index(headers, aliases.get("付款_列别名") or {})
     if "供应商" not in idx or "应付金额本币" not in idx:
@@ -670,7 +692,12 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
         if not vendor:
             continue
         payable = pick_amount(cell_at(row_f, idx, "应付金额本币"), cell_at(row_v, idx, "应付金额本币"), None)
-        line = VoucherLine(status="可入账", source_row=r, key=vendor, extra={"供应商": vendor})
+        line = VoucherLine(
+            status="可入账",
+            source_row=r,
+            key=vendor,
+            extra={"供应商": vendor, "sheet": sheet, "source_amt": str(payable) if payable is not None else ""},
+        )
         folder = dirs.get(vendor)
         if folder is None:
             line.status, line.reason = "待确认", "缺这家发票夹"
@@ -682,6 +709,13 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
             lines.append(line)
             continue
         metas = [parse_invoice_pdf(p) for p in pdfs]
+        if any(
+            (not m.get("kind")) or (not str(m.get("seller") or "").strip()) or m.get("total") is None
+            for m in metas
+        ):
+            line.status, line.reason = "待确认", "发票缺票种或销售方或金额"
+            lines.append(line)
+            continue
         kinds = {m.get("kind") for m in metas if m.get("kind")}
         if len(kinds) != 1:
             line.status, line.reason = "待确认", "认不清专票还是普票"
@@ -710,10 +744,6 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
             hit, why = master.supplier_fuzzy(strip_ge(vendor))
         if why == "none":
             hit, why = master.supplier_fuzzy(seller)
-        if why == "many":
-            line.status, line.reason = "待确认", "供应商档案一对多"
-            lines.append(line)
-            continue
         if hit:
             sup_code, sup_name = hit
         else:
@@ -778,22 +808,66 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
     return lines
 
 
-def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str, period_fetch=None) -> list[VoucherLine]:
+def match_receipt_customer(master: Master, name: str, alias_map: dict, assist_rows) -> tuple:
+    records = master.all_customers()
+    query = alias_map.get(name, name) if alias_map else name
+    if names.is_haidian_police(name):
+        got = names.match_records(query, records)
+        if got.status == "ok":
+            return got.hit, None
+        if query != name:
+            got = names.match_records(name, records)
+            if got.status == "ok":
+                return got.hit, None
+        return None, "many" if got.status == "many" else "none"
+    chit, cerr = master.match_customer(name, "", alias_map)
+    if chit or cerr == "many":
+        return chit, cerr
+    assist_got = names.match_records(query, lookup_mod.assist_records(assist_rows))
+    if assist_got.status == "ok" and assist_got.hit:
+        hit = names.by_code(records, assist_got.hit[0])
+        return (hit, None) if hit else (None, "none")
+    if query != name:
+        assist_got = names.match_records(name, lookup_mod.assist_records(assist_rows))
+        if assist_got.status == "ok" and assist_got.hit:
+            hit = names.by_code(records, assist_got.hit[0])
+            return (hit, None) if hit else (None, "none")
+    return None, cerr
+
+
+def convert_receipt(
+    path: Path,
+    master: Master,
+    rules: dict,
+    aliases: dict,
+    box,
+    booking: str,
+    period_fetch=None,
+    assist_rows=None,
+) -> list[VoucherLine]:
     cfg = rules.get("receipt") or {}
     alias_map = load_customer_alias()
     hang = load_emp_hang()
+    applicant_dept = load_applicant_dept()
     wb_f = load_workbook(path, data_only=False)
     wb_v = load_workbook(path, data_only=True)
-    ws_f = wb_f[wb_f.sheetnames[0]]
-    ws_v = wb_v[wb_v.sheetnames[0]]
+    sheet = inspect_mod.find_receipt_sheet(wb_f, aliases)
+    if not sheet:
+        wb_f.close()
+        wb_v.close()
+        raise SystemExit("找不到收款 sheet")
+    ws_f = wb_f[sheet]
+    ws_v = wb_v[sheet] if sheet in wb_v.sheetnames else wb_v[wb_v.sheetnames[0]]
     headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
     idx = header_index(headers, aliases.get("收款_列别名") or {})
-    needed = ["日期", "客户名称", "借方（增加）", "部门编码"]
+    needed = ["日期", "客户名称", "借方（增加）"]
     missing = [k for k in needed if k not in idx]
     if missing:
         wb_f.close()
         wb_v.close()
         raise SystemExit("收款表缺列：" + "、".join(missing))
+    org_map = inspect_mod.load_org_map(wb_f, aliases)
+    rows = list(assist_rows) if assist_rows is not None else lookup_mod.rows_from_balance_box(box)
     bank = str(cfg.get("bank_account") or "100201")
     lines: list[VoucherLine] = []
     max_row = ws_f.max_row or 1
@@ -805,49 +879,56 @@ def convert_receipt(path: Path, master: Master, rules: dict, aliases: dict, box,
             continue
         amt = pick_amount(cell_at(row_f, idx, "借方（增加）"), cell_at(row_v, idx, "借方（增加）"), None)
         rec_day = as_day(cell_at(row_v, idx, "日期") or cell_at(row_f, idx, "日期"), booking)
-        dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码"))
+        table_dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码")) if "部门编码" in idx else ""
+        table_sales = str(cell_at(row_f, idx, "销售") or "").strip() if "销售" in idx else ""
         line = VoucherLine(
             status="可入账",
             source_row=r,
             key=cust,
             expl=f"收：{cust}",
-            extra={"客户名称": cust},
+            booking_date=rec_day,
+            extra={"客户名称": cust, "sheet": sheet, "source_amt": str(amt) if amt is not None else ""},
         )
         if amt is None:
             line.status, line.reason = "待确认", "缺金额"
             lines.append(line)
             continue
-        if not dept or dept.startswith("="):
-            line.status, line.reason = "待确认", "缺部门编码"
-            lines.append(line)
-            continue
-        chit, cerr = master.match_customer(cust, "", alias_map)
+        chit, cerr = match_receipt_customer(master, cust, alias_map, rows)
         if not chit:
             line.status = "待确认"
             line.reason = "客户档案一对多" if cerr == "many" else "客户档案没有此抬头，请斯佳确认是否新建"
             lines.append(line)
             continue
         cus_code, cus_name = chit
+        ar, _rev, why = lookup_mod.pick_assist_account(cus_code, rec_day, rows)
+        if not ar:
+            line.status, line.reason = "待确认", why or lookup_mod.HOLD_ASSIST_MISSING
+            lines.append(line)
+            continue
+        if table_sales:
+            sales, swhy = table_sales, ""
+        else:
+            sales, swhy = lookup_mod.resolve_sales_any(
+                [cus_name, cust, alias_map.get(cust, cust)], rec_day, amt, box
+            )
+        if not sales:
+            line.status, line.reason = "待确认", swhy or "找不到销售"
+            lines.append(line)
+            continue
+        line.extra["销售"] = sales
+        dept = table_dept if table_dept and not table_dept.startswith("=") else inspect_mod.dept_for_sales(
+            sales, org_map, applicant_dept
+        )
+        if not dept:
+            line.status, line.reason = "待确认", "没有销售就没有部门" if not sales else "销售不在部门表"
+            lines.append(line)
+            continue
         dhit, derr = master.department(dept)
         if not dhit:
             line.status, line.reason = "待确认", derr or "部门档案未核验"
             lines.append(line)
             continue
         dept, dep_name = dhit
-        ar, _rev, why = lookup_mod.resolve_ar(cus_code, rec_day, box)
-        if (not ar) and callable(period_fetch):
-            period_fetch(box, cus_code, rec_day, list(box.ar_accounts))
-            ar, _rev, why = lookup_mod.resolve_ar(cus_code, rec_day, box)
-        if not ar:
-            line.status, line.reason = "待确认", why or "缺科目编码"
-            lines.append(line)
-            continue
-        sales, swhy = lookup_mod.resolve_sales_any([cus_name, cust, alias_map.get(cust, cust)], rec_day, amt, box)
-        if not sales:
-            line.status, line.reason = "待确认", swhy or "找不到销售"
-            lines.append(line)
-            continue
-        line.extra["销售"] = sales
         ehit, eerr = master.match_employee(sales, hang)
         emp_code = emp_name = ""
         if ehit:
@@ -898,7 +979,93 @@ def shift_voucher_numbers(lines: list[VoucherLine], start_no: int | None) -> Non
             line.voucher_no = int(line.voucher_no) + delta
 
 
-def write_outputs(out_dir: Path, scene: str, lines: list[VoucherLine], rules: dict, booking: str, stem: str):
+def reason_counts(lines) -> list[tuple[str, int]]:
+    c = Counter()
+    for line in lines or []:
+        status = getattr(line, "status", "")
+        reason = str(getattr(line, "reason", "") or "").strip()
+        if status != "可入账" and reason:
+            c[reason] += 1
+    return sorted(c.items(), key=lambda x: (-x[1], x[0]))
+
+
+def first_sheet_name(lines) -> str:
+    for line in lines or []:
+        sheet = (getattr(line, "extra", None) or {}).get("sheet")
+        if sheet:
+            return str(sheet)
+    return ""
+
+
+def tieout_amounts(lines) -> tuple[Decimal, Decimal, Decimal]:
+    src = Decimal("0")
+    debit = Decimal("0")
+    credit = Decimal("0")
+    for line in lines or []:
+        if getattr(line, "status", "") != "可入账":
+            continue
+        amt = money((getattr(line, "extra", None) or {}).get("source_amt"))
+        if amt is not None:
+            src += amt
+        for ent in getattr(line, "entries", None) or []:
+            d = money(ent.get("debit"))
+            c = money(ent.get("credit"))
+            if d is not None:
+                debit += d
+            if c is not None:
+                credit += c
+    return src, debit, credit
+
+
+def write_note(
+    path: Path,
+    *,
+    scene: str,
+    source_count: int,
+    bookable_count: int,
+    hold_count: int,
+    sheet: str,
+    start_voucher_no: int | None,
+    assist_name: str,
+    reasons: list[tuple[str, int]],
+    extras: list[str] | None = None,
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    title = {"销项发票": "销项发票", "付款": "付款", "收款": "收款"}.get(scene, scene)
+    lines = [
+        f"# {title}入金蝶对照说明",
+        "",
+        f"- 源：{source_count}",
+        f"- 可入账：{bookable_count}",
+        f"- 待确认：{hold_count}",
+        f"- 读了哪个 sheet：{sheet or '（未记）'}",
+        f"- 起始凭证号：{start_voucher_no if start_voucher_no else '（未取）'}",
+        f"- 余额表：{assist_name or '（本批未用文件名）'}",
+        "- 原因类别：",
+    ]
+    if reasons:
+        for reason, n in reasons:
+            lines.append(f"  - {reason}：{n}")
+    else:
+        lines.append("  - （无）")
+    for extra in extras or []:
+        lines.append(f"- {extra}")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def write_outputs(
+    out_dir: Path,
+    scene: str,
+    lines: list[VoucherLine],
+    rules: dict,
+    booking: str,
+    stem: str,
+    start_voucher_no: int | None = None,
+    assist_name: str = "",
+    extras: list[str] | None = None,
+):
     out_dir.mkdir(parents=True, exist_ok=True)
     detail = out_dir / f"{stem}_明细结果.xlsx"
     kingdee = out_dir / "凭证引入_结果.xlsx"
@@ -906,6 +1073,20 @@ def write_outputs(out_dir: Path, scene: str, lines: list[VoucherLine], rules: di
     write_kingdee(kingdee, lines, rules, booking, TEMPLATE)
     bookable = sum(1 for x in lines if x.status == "可入账")
     hold = sum(1 for x in lines if x.status != "可入账")
+    sheet = first_sheet_name(lines)
+    note = write_note(
+        out_dir / "对照说明.md",
+        scene=scene,
+        source_count=len(lines),
+        bookable_count=bookable,
+        hold_count=hold,
+        sheet=sheet,
+        start_voucher_no=start_voucher_no,
+        assist_name=assist_name,
+        reasons=reason_counts(lines),
+        extras=extras,
+    )
+    src_amt, debit, credit = tieout_amounts(lines)
     return {
         "scene": scene,
         "source_count": len(lines),
@@ -913,8 +1094,32 @@ def write_outputs(out_dir: Path, scene: str, lines: list[VoucherLine], rules: di
         "hold_count": hold,
         "kingdee_path": str(kingdee),
         "detail_path": str(detail),
+        "note_path": str(note),
         "out_dir": str(out_dir),
+        "sheet": sheet,
+        "start_voucher_no": start_voucher_no,
+        "assist_name": assist_name,
+        "tieout_source": str(src_amt),
+        "tieout_debit": str(debit),
+        "tieout_credit": str(credit),
     }
+
+
+def _assist_rows_for_run(input_dir: Path, box, required: bool) -> tuple[list, str]:
+    if box.assist_supplied:
+        return list(box.assist_rows or []), ""
+    found = assist_mod.find_assist_xlsx([input_dir])
+    if found:
+        return assist_mod.parse_assist_xlsx(found), found.name
+    if required:
+        path = assist_mod.ensure_assist_xlsx([input_dir])
+        return assist_mod.parse_assist_xlsx(path), path.name
+    try:
+        path = assist_mod.ensure_assist_xlsx([input_dir])
+        return assist_mod.parse_assist_xlsx(path), path.name
+    except SystemExit as e:
+        log(str(e))
+        return lookup_mod.rows_from_balance_box(box), ""
 
 
 def run_dir(
@@ -926,6 +1131,7 @@ def run_dir(
     period_fetch=None,
     start_voucher_no: int = 1,
     out_dir: Path | None = None,
+    ar_xlsx: Path | None = None,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
@@ -937,23 +1143,45 @@ def run_dir(
     box = load_box(lookups)
     day = booking or date.today().isoformat()
     files = report["files"]
+    assist_name = ""
+    extras: list[str] = []
     if scene == "销项发票":
         src = Path(files["invoice"])
-        if box.assist_supplied:
-            assist_rows = list(box.assist_rows or [])
-        else:
-            assist_path = assist_mod.ensure_assist_xlsx([input_dir])
-            assist_rows = assist_mod.parse_assist_xlsx(assist_path)
+        assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True)
+        extras.append("销项部门：同文件组织架构优先，没有再用申请人部门.json")
+        extras.append("记账日：跑批当天")
         lines = convert_sales(src, master, rules, aliases, box, day, assist_rows=assist_rows)
     elif scene == "付款":
         src = Path(files["ledger"])
+        extras.append("记账日：跑批当天")
+        extras.append("付款按表头认三列表，不读中行付款")
         lines = convert_payment(input_dir, src, master, rules, aliases)
     else:
         src = Path(files["receipt"])
-        lines = convert_receipt(src, master, rules, aliases, box, day, period_fetch=period_fetch)
+        if ar_xlsx:
+            assist_rows = assist_mod.parse_assist_xlsx(Path(ar_xlsx))
+            assist_name = Path(ar_xlsx).name
+        else:
+            assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=False)
+        extras.append("记账日：表上收款日")
+        extras.append("表上销售有则用，空则智云回款→下单")
+        lines = convert_receipt(
+            src, master, rules, aliases, box, day, period_fetch=period_fetch, assist_rows=assist_rows
+        )
     shift_voucher_numbers(lines, start_voucher_no)
-    dest = Path(out_dir) if out_dir else default_desktop_dir("金蝶入账")
-    return write_outputs(dest, scene, lines, rules, day, src.stem)
+    prefix = SCENE_DESKTOP.get(scene, "金蝶入账")
+    dest = Path(out_dir) if out_dir else default_desktop_dir(prefix)
+    return write_outputs(
+        dest,
+        scene,
+        lines,
+        rules,
+        day,
+        src.stem,
+        start_voucher_no=start_voucher_no,
+        assist_name=assist_name,
+        extras=extras,
+    )
 
 
 def main(argv=None) -> int:
@@ -994,20 +1222,11 @@ def main(argv=None) -> int:
         lookups = json.loads(Path(args.lookups).read_text(encoding="utf-8"))
     elif scene == "收款":
         loaded_zy = zhiyun_api.try_load_lookups()
-        if not loaded_zy.get("ok"):
+        if loaded_zy.get("ok"):
+            lookups = loaded_zy.get("data") or {}
+        else:
             reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
-            log(f"智云查找未核验（{reason}）；未生成引入表。请检查本机 zhiyun.local.json 后重试。")
-            return 2
-        lookups = loaded_zy.get("data") or {}
-    fill_period = None
-    if not args.master and scene == "收款":
-
-        def fill_period(box, cus_code, day, accounts):
-            got = kingdee_api.try_fetch_customer_ar(cus_code, accounts, lookup_mod.period_month(day))
-            if got.get("ok"):
-                box.ar_balance.update(got.get("balances") or {})
-                box.period_debit.update(got.get("period_debit") or got.get("data") or {})
-
+            log(f"智云查找未核验（{reason}）；缺销售的行将待确认，其余仍出表。")
     start_no = args.start_voucher_no
     if start_no is None:
         period = (args.date or date.today().isoformat())[:7]
@@ -1025,7 +1244,6 @@ def main(argv=None) -> int:
             args.date,
             master_data,
             lookups,
-            period_fetch=fill_period,
             start_voucher_no=start_no,
             out_dir=Path(args.out_dir).expanduser() if args.out_dir else None,
         )

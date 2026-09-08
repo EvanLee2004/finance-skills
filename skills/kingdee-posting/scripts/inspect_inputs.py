@@ -26,6 +26,26 @@ def load_aliases() -> dict:
     return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
 
 
+def code_str(v) -> str:
+    if v is None or v == "":
+        return ""
+    if isinstance(v, bool):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, int):
+        return str(v)
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        return s[:-2]
+    return s
+
+
+def norm_name(name: str) -> str:
+    s = (name or "").strip().replace("(", "（").replace(")", "）")
+    return "".join(s.split())
+
+
 def header_names(path: Path) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     try:
@@ -47,25 +67,171 @@ def field_hit(headers: list[str], aliases: dict, field: str) -> bool:
     return any(h in names for h in headers)
 
 
-def classify_xlsx(path: Path, aliases: dict) -> str | None:
+def _cleaned(headers) -> list[str]:
+    return [str(h).strip() for h in (headers or []) if h is not None and str(h).strip()]
+
+
+def is_sales_sheet(name: str, headers: list[str], aliases: dict | None = None) -> bool:
+    title = str(name or "")
+    if "组织架构" in title or "流水" in title:
+        return False
+    if "收款" in title and "发票" not in title:
+        return False
+    sales_a = (aliases or {}).get("销项发票_列别名") or {}
+    cleaned = _cleaned(headers)
+    return field_hit(cleaned, sales_a, "单位名称") and field_hit(cleaned, sales_a, "价税合计")
+
+
+def is_receipt_sheet(name: str, headers: list[str], aliases: dict | None = None) -> bool:
+    title = str(name or "")
+    if "流水" in title:
+        return False
+    if "收款" in title and "付款" not in title:
+        return True
+    rec_a = (aliases or {}).get("收款_列别名") or {}
+    cleaned = _cleaned(headers)
+    if any("价税合计" in h for h in cleaned):
+        return False
+    if any(h == "贷方（减少）" or h.startswith("贷方（减少）") for h in cleaned):
+        return False
+    has_cust = "客户名称" in cleaned or field_hit(cleaned, rec_a, "客户名称")
+    has_debit = "借方（增加）" in cleaned or field_hit(cleaned, rec_a, "借方（增加）")
+    return has_cust and has_debit
+
+
+def is_payment_sheet(name: str, headers: list[str], aliases: dict | None = None) -> bool:
+    title = str(name or "")
+    if "流水" in title or "组织架构" in title:
+        return False
+    if "中行付款" in title or ("中行" in title and "付款" in title):
+        return False
+    if "收款" in title:
+        return False
+    pay_a = (aliases or {}).get("付款_列别名") or {}
+    cleaned = _cleaned(headers)
+    if any("价税合计" in h for h in cleaned):
+        return False
+    return field_hit(cleaned, pay_a, "供应商") and field_hit(cleaned, pay_a, "应付金额本币")
+
+
+def workbook_has_receipt(path: Path, aliases: dict | None = None) -> bool:
+    return any(is_receipt_sheet(name, headers, aliases) for name, headers in header_names(path).items())
+
+
+def _pick_named(named: list[str], headered: list[str]) -> str | None:
+    if named:
+        return named[0]
+    if headered:
+        return headered[0]
+    return None
+
+
+def find_receipt_sheet(wb, aliases: dict | None = None) -> str | None:
+    named = []
+    headered = []
+    for name in wb.sheetnames:
+        ws = wb[name]
+        row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        headers = _cleaned(row)
+        if not is_receipt_sheet(name, headers, aliases):
+            continue
+        if "收款" in str(name) and "流水" not in str(name) and "付款" not in str(name):
+            named.append(name)
+        else:
+            headered.append(name)
+    return _pick_named(named, headered)
+
+
+def find_payment_sheet(wb, aliases: dict | None = None) -> str | None:
+    named = []
+    headered = []
+    for name in wb.sheetnames:
+        ws = wb[name]
+        row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        headers = _cleaned(row)
+        if not is_payment_sheet(name, headers, aliases):
+            continue
+        if "付款" in str(name) and "中行" not in str(name):
+            named.append(name)
+        else:
+            headered.append(name)
+    return _pick_named(named, headered)
+
+
+def load_org_map(wb, aliases: dict | None = None) -> dict[str, str]:
+    org_a = (aliases or {}).get("组织架构_列别名") or {"姓名": ["姓名"], "部门编码": ["部门编码"]}
+    chosen = None
+    for name in wb.sheetnames:
+        if name == "组织架构":
+            chosen = name
+            break
+    if chosen is None:
+        for name in wb.sheetnames:
+            if "组织架构" in str(name) and "营销" not in str(name):
+                chosen = name
+                break
+    if chosen is None:
+        return {}
+    ws = wb[chosen]
+    rows = list(ws.iter_rows(min_row=1, values_only=True))
+    if not rows:
+        return {}
+    headers = [str(c).strip() if c is not None else "" for c in rows[0]]
+    name_i = dept_i = None
+    for i, h in enumerate(headers):
+        if h in (org_a.get("姓名") or ["姓名"]) and name_i is None:
+            name_i = i
+        if h in (org_a.get("部门编码") or ["部门编码"]) and dept_i is None:
+            dept_i = i
+    if name_i is None or dept_i is None:
+        return {}
+    out: dict[str, str] = {}
+    for row in rows[1:]:
+        if not row or name_i >= len(row) or dept_i >= len(row):
+            continue
+        person = str(row[name_i] or "").strip()
+        dept = code_str(row[dept_i])
+        if person and dept and not dept.startswith("="):
+            out[person] = dept
+            out[norm_name(person)] = dept
+    return out
+
+
+def dept_for_sales(sales: str, org_map: dict[str, str], applicant_dept: dict[str, str]) -> str:
+    raw = str(sales or "").strip()
+    if not raw:
+        return ""
+    return (
+        org_map.get(raw)
+        or org_map.get(norm_name(raw))
+        or applicant_dept.get(raw)
+        or applicant_dept.get(norm_name(raw))
+        or ""
+    )
+
+
+def classify_xlsx_kinds(path: Path, aliases: dict) -> list[str]:
     if "结果" in path.stem:
-        return None
+        return []
     if "核算项目余额表" in path.name:
-        return None
+        return []
     sheets = header_names(path)
     if not sheets:
-        return None
-    sales_a = aliases.get("销项发票_列别名") or {}
-    pay_a = aliases.get("付款_列别名") or {}
-    rec_a = aliases.get("收款_列别名") or {}
-    for headers in sheets.values():
-        if field_hit(headers, sales_a, "单位名称") and field_hit(headers, sales_a, "价税合计"):
-            return "销项发票"
-        if field_hit(headers, pay_a, "供应商") and field_hit(headers, pay_a, "应付金额本币"):
-            return "付款"
-        if field_hit(headers, rec_a, "客户名称") and field_hit(headers, rec_a, "借方（增加）"):
-            return "收款"
-    return None
+        return []
+    kinds: list[str] = []
+    for name, headers in sheets.items():
+        if is_sales_sheet(name, headers, aliases) and "销项发票" not in kinds:
+            kinds.append("销项发票")
+        if is_payment_sheet(name, headers, aliases) and "付款" not in kinds:
+            kinds.append("付款")
+        if is_receipt_sheet(name, headers, aliases) and "收款" not in kinds:
+            kinds.append("收款")
+    return kinds
+
+
+def classify_xlsx(path: Path, aliases: dict) -> str | None:
+    kinds = classify_xlsx_kinds(path, aliases)
+    return kinds[0] if kinds else None
 
 
 def payment_folders(root: Path, ledger: Path | None) -> list[Path]:
@@ -94,9 +260,9 @@ def inspect_dir(input_dir: Path, scene: str | None = None) -> dict:
         }
     for p in sorted(root.iterdir()):
         if p.suffix.lower() in {".xlsx", ".xlsm"} and not p.name.startswith("~$"):
-            kind = classify_xlsx(p, aliases)
-            if kind:
-                found[kind].append(str(p))
+            for kind in classify_xlsx_kinds(p, aliases):
+                if str(p) not in found[kind]:
+                    found[kind].append(str(p))
     hits = [k for k, v in found.items() if v]
     mixed = len(hits) > 1
     if scene:
@@ -137,8 +303,8 @@ def inspect_dir(input_dir: Path, scene: str | None = None) -> dict:
             ask = "付款还缺：" + "；".join(missing) + "。台账放外面，一家一个夹，夹里放发票 PDF。"
     elif chosen == "收款":
         if not found["收款"]:
-            missing.append("收款表（日期 / 客户名称 / 借方（增加）/ 部门编码）")
-            ask = "还缺收款表。日期、客户、金额、部门编码放进这个文件夹即可，销售和科目由技能补。"
+            missing.append("收款表（日期 / 客户名称 / 借方（增加）；中行收款 sheet 即可）")
+            ask = "还缺收款表。把月底稿放进这个文件夹即可，技能读「中行收款」。部门用组织架构，不必另填部门编码列。"
         else:
             files["receipt"] = found["收款"][0]
     else:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""预处理查找：销项抄客户核算项目余额表；收款仍用 1131xx 往来。合成测试注入，不访问网络。"""
+"""预处理查找：销项/收款科目只抄客户核算项目余额表。合成测试注入，不访问网络。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -385,3 +385,26 @@ def resolve_sales_any(customers, day: str, amount, box: LookupBox) -> tuple[str,
 
 def applicant_dept_code(name: str, box: LookupBox) -> str:
     return box.applicant_dept.get(str(name or "").strip()) or ""
+
+
+def rows_from_balance_box(box) -> list[AssistRow]:
+    existing = list(getattr(box, "assist_rows", None) or [])
+    if existing:
+        return existing
+    out: list[AssistRow] = []
+    for item, val in (getattr(box, "ar_balance", None) or {}).items():
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        cus, acc = str(item[0] or "").strip(), str(item[1] or "").strip()
+        if not cus or not acc:
+            continue
+        out.append(
+            AssistRow(
+                period="",
+                customer_code=cus,
+                customer_name="",
+                account=acc,
+                ending_debit=val if isinstance(val, Decimal) else money(val),
+            )
+        )
+    return out

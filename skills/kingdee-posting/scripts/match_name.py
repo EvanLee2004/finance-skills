@@ -34,10 +34,15 @@ def is_person_heading(name: str) -> bool:
     return 2 <= len(n) <= 4
 
 
+def is_haidian_police(name: str) -> bool:
+    raw = name or ""
+    return "公安" in raw and "海淀" in raw
+
+
 def maps_to_police_ministry(name: str, applicant: str = "") -> bool:
     if "公安" not in (name or ""):
         return False
-    if (applicant or "").strip() == "陈霞" and "海淀" in (name or ""):
+    if is_haidian_police(name) and (applicant or "").strip() == "陈霞":
         return False
     return True
 

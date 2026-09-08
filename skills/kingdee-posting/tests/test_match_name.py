@@ -44,5 +44,7 @@ def test_person_and_police_flags():
     assert m.is_person_heading("咪咕数字传媒有限公司") is False
     assert m.maps_to_police_ministry("平度市公安局", "于占国") is True
     assert m.maps_to_police_ministry("北京市公安局海淀分局", "陈霞") is False
+    assert m.is_haidian_police("北京市公安局海淀分局") is True
+    assert m.is_haidian_police("平度市公安局") is False
     assert m.hang_employee("童睿智", {"童睿智": "郑瑞"}) == "郑瑞"
     assert m.hang_employee("路人甲", {"童睿智": "郑瑞"}) == "路人甲"

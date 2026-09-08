@@ -929,7 +929,7 @@ def test_receipt_uses_lookups_not_table_ar(tmp_path):
 
 
 def test_receipt_order_fallback_and_dual_sales(tmp_path):
-    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "表内销售", "15", "113101"]])
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "", "15", "113101"]])
     fallback = _run(
         tmp_path,
         "收款",
@@ -994,8 +994,21 @@ def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):
     assert (tmp_path / "凭证引入_结果.xlsx").exists()
 
 
-def test_cli_receipt_refuses_without_zhiyun_lookups(tmp_path, monkeypatch):
+def test_cli_receipt_without_zhiyun_still_outputs(tmp_path, monkeypatch):
     _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
+    _write_assist(
+        tmp_path / "核算项目余额表_客户_1131_本年.xlsx",
+        [
+            {
+                "period": "202607",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113103",
+                "ending_debit": "1",
+                "ytd_debit": "1",
+            }
+        ],
+    )
     master = tmp_path / "master.json"
     master.write_text(json.dumps(_master()), encoding="utf-8")
     monkeypatch.setattr(
@@ -1003,10 +1016,26 @@ def test_cli_receipt_refuses_without_zhiyun_lookups(tmp_path, monkeypatch):
         "try_load_lookups",
         lambda: {"ok": False, "missing_credentials": True, "data": None},
     )
-    assert convert.main(
-        ["--input-dir", str(tmp_path), "--scene", "收款", "--master", str(master)]
-    ) == 2
-    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert (
+        convert.main(
+            [
+                "--input-dir",
+                str(tmp_path),
+                "--scene",
+                "收款",
+                "--master",
+                str(master),
+                "--start-voucher-no",
+                "8",
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert (tmp_path / "收款_明细结果.xlsx").exists()
+    assert (tmp_path / "对照说明.md").exists()
 
 
 def test_cli_lookups_file_converts(tmp_path):
