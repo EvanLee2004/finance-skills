@@ -10,7 +10,7 @@
   S5 删行：应收金额=0（已回款/核销）
   S6 复核：年度自检 / #N/A 清单 / 名称残留
   S7 排序：按年度降序
-  S8 透视汇总 Sheet2：应收金额 按 销售人员→客户
+  S8 透视汇总：原生数据透视表按 销售人员→客户 汇总应收金额，支持刷新识别新增行
 
 S1–S3 移植自验收过的 merge_receivables.py（账龄/交付月份与赵成品逐行 100% 一致）。
 
@@ -28,6 +28,11 @@ import argparse
 import datetime
 from collections import defaultdict
 import pandas as pd
+
+try:
+    from native_pivot import install_native_pivot
+except ImportError:
+    install_native_pivot = None
 
 # Windows GBK 终端下 print 含 ✓ 等符号会 UnicodeEncodeError（数据其实已写好、只是末尾打印崩、看着像失败）。
 # 统一把标准输出设成 UTF-8、容错，彻底避免这个吓人的报错。
@@ -686,7 +691,7 @@ def suspect_attribution(orig_counts, departed_names):
 
 # --------------------------- S8 透视 ---------------------------
 def build_pivot(master_out):
-    """应收金额 按 销售人员→客户 求和（成品 Sheet2 同款）。"""
+    """生成 S8 的销售人员→客户汇总，供原生透视表初始显示和缓存使用。"""
     d = master_out[["销售人员", "客户名称", "应收金额"]].copy()
     d["应收金额"] = pd.to_numeric(d["应收金额"], errors="coerce").fillna(0)
     piv = (d.groupby(["销售人员", "客户名称"], dropna=False)["应收金额"]
@@ -744,7 +749,7 @@ def _style_master_body(ws, nrow, ncol, amount_col_idx):
 
 
 def _write_pivot_grouped(ws, pivot):
-    """把 销售人员→客户名称→应收金额 写成"像数据透视表"的分组汇总：
+    """写入原生透视表升级失败时保留的静态分组汇总：
     销售人员按总额降序、每人一行加粗小计 + 下面客户明细（按金额降序）、
     客户明细行 outline 分组可 +/- 折叠、末尾总计。金额套会计专用格式。"""
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -791,9 +796,21 @@ def _write_pivot_grouped(ws, pivot):
     ws.freeze_panes = "A2"
 
 
+def _upgrade_pivot_output(out_path, master_out, pivot):
+    """把静态 S8 汇总升级成可刷新原生透视表；失败时保留静态备份。"""
+    if install_native_pivot is None:
+        log("⚠ S8 原生透视表模块缺失，保留静态透视汇总")
+        return
+    try:
+        install_native_pivot(out_path, master_out, pivot)
+        log("· S8 透视汇总：已生成原生可刷新透视表，数据源覆盖主表实际列")
+    except Exception as exc:
+        log(f"⚠ S8 原生透视表生成失败，保留静态透视汇总：{exc}")
+
+
 def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unmatched, variants, residual, ycheck, removed, report_df):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    # 透视汇总不走 pandas（要做分组/折叠/会计格式），用 openpyxl 手工渲染，故从这里剔除
+    # 先写静态汇总；随后升级为原生透视表，静态版本保留为审计备份。
     sheets = {
         "主表": master_out,
         "认列告警": col_warn, "归属变更": reassign, "归属存疑": suspect,
@@ -808,12 +825,13 @@ def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unm
         ws_master = w.sheets["主表"]
         _style_master_header(ws_master, ncol)                       # 表头美化（不改数据）
         _style_master_body(ws_master, len(master_out) + 1, ncol, amount_idx)  # 正文加边框 + 应收金额会计格式
-        # 分组汇总「透视汇总」——手工建表后挪到第 2 个 sheet（紧跟主表）
+        # 先建静态「透视汇总」，升级步骤会将其改名为「透视汇总_静态备份」。
         wb = w.book
         pv = wb.create_sheet("透视汇总")
         _write_pivot_grouped(pv, pivot)
         wb._sheets.remove(pv)
         wb._sheets.insert(1, pv)
+    _upgrade_pivot_output(out_path, master_out, pivot)
     return out_path
 
 
@@ -858,6 +876,7 @@ def write_restricted_workbook(out_path, master_out):
         _write_pivot_grouped(pv, pivot)
         wb._sheets.remove(pv)
         wb._sheets.insert(1, pv)
+    _upgrade_pivot_output(out_path, master_out, pivot)
     return out_path
 
 
