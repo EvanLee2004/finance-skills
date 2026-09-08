@@ -16,6 +16,16 @@
 
 **核销（`ar-hexiao-daily`）**：李尚最新已合入 `main`，更新时覆盖（业务规则跟仓库）。`*.local.json` 不进仓。
 
+## 一图看懂
+
+```mermaid
+flowchart TD
+  A["说：更新财务skills"] --> B["先拉 Gitee main"]
+  B --> C["只覆盖白名单"]
+  C --> D["保留她本机 config"]
+  D --> E["汇报 SHA，重启 opencode"]
+```
+
 ## 怎么跑
 
 ```bash

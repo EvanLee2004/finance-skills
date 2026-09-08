@@ -7,6 +7,15 @@
 - **推荐**：帮我理清需求
 - 也可：我不知道怎么说 / 帮我把需求说清楚
 
+## 一图看懂
+
+```mermaid
+flowchart TD
+  A["需求含糊"] --> B["先问 1～5 个选择题"]
+  B --> C["她选清楚"]
+  C --> D["再接对应财务技能"]
+```
+
 - 触发：用户说「帮我理清需求 / 我不知道咋说」，或要跑某技能但信息不全、含糊时；**也可在提示词开头粘一段固定"开场白"主动触发**（见使用手册）。
 - 核心铁律见 `SKILL.md`。
 - **改编自 [trailofbits/skills](https://github.com/trailofbits/skills) 的 `ask-questions-if-underspecified`（CC BY-SA 4.0, © Trail of Bits）；本技能文件同以 CC BY-SA 4.0 共享。**

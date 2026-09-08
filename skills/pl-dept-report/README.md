@@ -33,8 +33,8 @@
 
 | 谁 | 做什么 |
 |---|---|
-| **她** | 说「**月度损益表**」；可说期间 `202608`。已有引出也可以随口给一个文件夹 |
-| **AI** | 总部只读 API 取甲骨易；另外 4 本用本机已登录斯佳号切账套引出（或扫工作区/桌面已有引出）→ 调 `convert.py` → 出两个 sheet + 运行报告 → **停下报路径** |
+| **她** | 说「**月度损益表**」；可说期间 `202608`。已有引出也可以随口给一个文件夹。网页账密只在本机缺文件时问一次 |
+| **AI** | 总部只读 API 取甲骨易；另外 4 本先扫工作区/桌面已有引出，没有再跑 `xingchen_export.py`（账密读 `~/.config/finance/xingchen.local.json`）→ 调 `convert.py` → 出两个 sheet + 运行报告 → **停下报路径** |
 | **她** | 打开表看列顺序、空列、核对公式；口径要调就改 `config/` 再跑 |
 
 **她会看到的话长这样**：
@@ -48,29 +48,23 @@
 - ⛔ 对话报金额 / 口令 / secret
 - ⛔ 解绑总部、点购买 API、点引入/审核/过账
 - ⛔ 把用友部门费用技能当成这张表
+- ⛔ 读「内网勿外传」口令 md、复用 Chrome 配置目录、把账密打进对话
 
 ## 4. 一图看懂
 
 ```mermaid
 flowchart TD
-  IN["她说月度损益表<br/>可带期间"] --> FIND["扫工作区引出 / Downloads 核算项目<br/>或同事金蝶号网页引出"]
-  FIND --> INS["inspect_inputs.py<br/>按 sheet/表头/公司名称认"]
-  KEY["本机 kingdee.local.json"] --> API["总部只读 API"]
-  INS --> MERGE["convert.py 拼表"]
-  API --> MERGE
-  OFF["代账利润表 xls<br/>山东/四川/济南"] --> MERGE
-  MAP["部门名映射 + 本公司规则<br/>产品部→渠道 营销二部→视听<br/>文化/上海费用可从科目余额补"] --> MERGE
-  LAY["版式.json 科目树"] --> MERGE
-  MERGE --> X["桌面 月度损益表_今天/<br/>损益表 + 利润表"]
-  MERGE --> R["运行报告：有源/缺源<br/>未映射部门个数"]
-  X --> F["合计/核对 = Excel 公式"]
+  A["说：月度损益表"] --> B["取数：总部 API / 四本引出"]
+  B --> C["脚本拼成两个 sheet"]
+  C --> D["桌面交出损益表 + 利润表"]
+  D --> E["她打开看，不改数凑平"]
 ```
 
 ## 5. 输入 / 输出
 
 | 输入 | 处理 | 输出 |
 |---|---|---|
-| 期间 YYYYMM（默认上月）；可选引出文件夹；山东/四川/济南代账利润表；本机密钥 | 总部 API 或引出；4 本星辰账引出；三家线下吃利润表本月金额 | 默认桌面 `月度损益表_YYYYMMDD/月度损益表_YYYYMM.xlsx` |
+| 期间 YYYYMM（默认上月）；可选引出文件夹；山东/四川/济南代账利润表；本机 `kingdee.local.json`；缺引出时本机 `xingchen.local.json` | 总部 API 或引出；4 本星辰账网页引出；三家线下吃利润表本月金额 | 默认桌面 `月度损益表_YYYYMMDD/月度损益表_YYYYMM.xlsx` |
 
 左列 8 家顺序：甲骨易、文化、上海、山东分公司、湖南分公司、湖南子公司、四川分公司、济南子公司。
 
@@ -88,15 +82,20 @@ flowchart TD
 | `config/版式.json` | 科目行、列、冻结（无金额） |
 | `config/引出列名.json` | 引出表头别名 |
 | `config/科目名同义.json` | 引出科目名 → 版式名 |
+| `config/xingchen.local.example.json` | 网页登录字段样例（不要真值） |
+| 本机 `kingdee.local.json` | 连接器；不进仓；更新不覆盖 |
+| 本机 `xingchen.local.json` | 网页登录手机号/密码；不进仓；更新不覆盖 |
+| 本机 `xingchen.playwright-state.json` | 登录会话；过期会再登；不进仓 |
 
 ## 8. 怎么跑
 
 ```bash
-python3 scripts/inspect_inputs.py --input-dir <文件夹>
-python3 scripts/convert.py --period 202608 --input-dir <文件夹> --out 月度损益表_202608.xlsx
+python3 scripts/convert.py --period 202608
+# 她给了引出文件夹才加 --input-dir；没给不要加
+# 缺四本引出时脚本会调 xingchen_export.py
 ```
 
-依赖：仓内 `.venv` 的 `openpyxl`、`requests`。跑不起来说「配下环境」。
+依赖：仓内 `.venv` 的 `openpyxl`、`requests`、网页引出还要 `playwright`。跑不起来说「配下环境」，不要对系统 Python `pip install`。
 
 ## 9. 验收口径
 
@@ -108,7 +107,7 @@ python3 scripts/convert.py --period 202608 --input-dir <文件夹> --out 月度�
 ## 10. 数据红线与已知边界
 
 - 密钥、真引出、真金额表不进仓库；对话不回显金额
-- 另外 4 本星辰账 v1 用引出，不加购 KEY、不解绑总部
+- 另外 4 本星辰账 v1 用网页引出，不加购 KEY、不解绑总部。账密只读 `xingchen.local.json` 或环境变量，不要读斯佳口令 md、不要复用 Chrome 配置目录
 - 科目余额期间参数不通时总部改凭证 5 开头汇总；右列优先核算项目余额表引出，没有才退回凭证部门辅助
 - 总部工资/社保核算项目没有部门就空着问她，不要倒填损益表成品
 - 上月利润列没有源就空，禁止复制当月

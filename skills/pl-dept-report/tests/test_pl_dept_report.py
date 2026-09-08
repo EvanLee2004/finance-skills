@@ -1039,3 +1039,24 @@ def test_default_desktop_dir_helper(tmp_path: Path):
     desktop.mkdir()
     got = default_desktop_dir("月度损益表", today=date(2026, 9, 2), home=tmp_path)
     assert got == desktop / "月度损益表_20260902"
+
+
+def test_xingchen_creds_from_local_json_or_env(tmp_path: Path, monkeypatch):
+    from xingchen_login import ASK_CREDS, _looks_logged_in, load_creds
+
+    monkeypatch.delenv("XINGCHEN_USER", raising=False)
+    monkeypatch.delenv("XINGCHEN_PASSWORD", raising=False)
+    monkeypatch.setenv("XINGCHEN_LOCAL_JSON", str(tmp_path / "missing.json"))
+    assert load_creds() is None
+    path = tmp_path / "xingchen.local.json"
+    path.write_text('{"username": "u", "password": "p"}\n', encoding="utf-8")
+    monkeypatch.setenv("XINGCHEN_LOCAL_JSON", str(path))
+    got = load_creds()
+    assert got == {"username": "u", "password": "p"}
+    monkeypatch.setenv("XINGCHEN_USER", "eu")
+    monkeypatch.setenv("XINGCHEN_PASSWORD", "ep")
+    got = load_creds()
+    assert got == {"username": "eu", "password": "ep"}
+    assert "xingchen.local.json" in ASK_CREDS
+    assert _looks_logged_in("https://service.jdy.com/workbench/web/index.html", "进入使用")
+    assert not _looks_logged_in("https://www.jdy.com/login/", "账号登录")

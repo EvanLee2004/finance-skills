@@ -2,14 +2,13 @@
 # -*- coding: utf-8 -*-
 """本机星辰引出助手：切账套 → 科目余额表 / 核算项目余额表 / 利润表 → xlsx。
 
-只给本机取数用，不是同事必装依赖。口令只读本机文件，不打印、不进 git。
-禁止点引入 / 审核 / 过账 / 购买。优先复用已登录的斯佳 Chrome 配置目录。
+口令只读 ~/.config/finance/xingchen.local.json，会话写 playwright-state。不打印、不进 git。
+脚本没有引入 / 审核 / 过账 / 购买 / 生成报表按钮。
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import re
 import sys
 import time
 from pathlib import Path
@@ -19,13 +18,10 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from layout import load_books
+from xingchen_login import STATE_PATH as STATE
+from xingchen_login import ensure_login, load_creds, save_state
 
 HOME = Path.home()
-STATE = HOME / ".config" / "finance" / "xingchen.playwright-state.json"
-PROFILE = HOME / ".cache" / "chrome-devtools-mcp" / "chrome-profile"
-SIJIA_MD = Path(
-    "/Users/evanlee/Documents/甲骨易实习/项目/长期项目/自动化记账（金蝶）/原始素材/实操批次/20260826_金蝶斯佳账号_内网勿外传.md"
-)
 WORKBENCH = "https://service.jdy.com/workbench/web/index.html"
 XINGCHEN_HOME = "https://tf.jdy.com/ierp/index.html?formId=home_page"
 ASSIST_FORM = "https://tf.jdy.com/ierp/index.html?formId=gl_rpt_assistbalance"
@@ -49,44 +45,11 @@ def _export_books() -> list[tuple[str, str, str]]:
     return out
 
 
-def _sijia_login() -> tuple[str, str]:
-    if not SIJIA_MD.is_file():
-        raise SystemExit("missing_sijia_file")
-    text = SIJIA_MD.read_text(encoding="utf-8")
-    user = ""
-    password = ""
-    for line in text.splitlines():
-        if "登录名" in line and "`" in line:
-            m = re.search(r"`([^`]+)`", line)
-            if m:
-                user = m.group(1).strip()
-        if ("密码" in line or "口令" in line) and "`" in line and "服务密码" not in line:
-            m = re.search(r"`([^`]+)`", line)
-            if m and m.group(1).strip() not in {"u13439472096"}:
-                password = m.group(1).strip()
-    if not user or not password:
-        raise SystemExit("missing_sijia_fields")
-    return user, password
-
-
 async def _ensure_login(page) -> None:
-    await page.goto(WORKBENCH, wait_until="domcontentloaded")
-    await page.wait_for_timeout(1500)
-    if "workbench" in page.url and await page.get_by_text("进入使用").count():
-        await page.get_by_text("进入使用").first.click()
-        await page.wait_for_timeout(3000)
-        return
-    user, password = _sijia_login()
-    user_box = page.locator('input[type="text"], input[type="tel"]').first
-    pwd_box = page.locator('input[type="password"]').first
-    if await user_box.count():
-        await user_box.fill(user)
-        await pwd_box.fill(password)
-        await page.get_by_text("登录", exact=True).first.click()
-        await page.wait_for_timeout(4000)
-    if await page.get_by_text("进入使用").count():
-        await page.get_by_text("进入使用").first.click()
-        await page.wait_for_timeout(4000)
+    creds = load_creds()
+    if not creds:
+        raise SystemExit("missing_creds")
+    await ensure_login(page, creds)
 
 
 async def _dismiss_overlays(page) -> None:
@@ -240,22 +203,15 @@ async def export_book(page, key: str, legal: str, header: str, period: str, out_
 
 
 async def _open_context(p):
-    if PROFILE.is_dir():
-        try:
-            ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE),
-                channel="chrome",
-                headless=False,
-                accept_downloads=True,
-            )
-            return ctx, None, "profile"
-        except Exception:
-            pass
-    browser = await p.chromium.launch(headless=False, channel="chrome")
-    ctx = await browser.new_context(
-        accept_downloads=True,
-        storage_state=str(STATE) if STATE.is_file() else None,
-    )
+    browser = await p.chromium.launch(headless=True)
+    kwargs = {
+        "accept_downloads": True,
+        "locale": "zh-CN",
+        "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"},
+    }
+    if STATE.is_file():
+        kwargs["storage_state"] = str(STATE)
+    ctx = await browser.new_context(**kwargs)
     return ctx, browser, "fresh"
 
 
@@ -269,10 +225,8 @@ async def main_async(period: str, out_dir: Path, keys: list[str]) -> int:
     async with async_playwright() as p:
         ctx, browser, mode = await _open_context(p)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        if mode != "profile":
-            await _ensure_login(page)
-            await ctx.storage_state(path=str(STATE))
-            STATE.chmod(0o600)
+        await _ensure_login(page)
+        await save_state(ctx)
         results = []
         for key, legal, header in catalog:
             results.append(await export_book(page, key, legal, header, period, out_dir))

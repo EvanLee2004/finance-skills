@@ -78,7 +78,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [dept-expense-alloc](skills/dept-expense-alloc/) | **部门费用归集分摊（月度）**：用友余额+收入底稿+人员归属+按人费用 → 部门科目余额表+利润表，主体合计=部门合计核对≈0 | ✅ v1.0.0 可交付 · **已入包** · 待真实月份试用 |
 | [ar-hexiao-daily](skills/ar-hexiao-daily/) | **应收核销日清**：出纳按核销日取智云数 → SOD 级判定 → 一份《核销日清》→ **她确认** → 写前复核 → 统一写盈亏明细 + 流转安全子集；含跑批台账查漏天（**永不写智云**） | ✅ 测试 186 · **opencode 端到端实测通过**（715 格与她手填逐格一致）· 待工位真 T-1 验收 |
 | [order-daily-summary](skills/order-daily-summary/) | **九点下单统计**：登录智云抓下单表 → 组织架构归多语（不含运保）/数据/游戏/其他 →「下单数据(万元)」xlsx | ✅ 单测 24 · **内网真机复测通过（2026-07-24）** |
-| [kingdee-posting](skills/kingdee-posting/) | **金蝶入账**：销项发票 / 付款 / 收款 → 凭证引入表；科目/销售由智云预处理补；人审后再自己去金蝶点引入 | 合成测试绿 |
+| [kingdee-posting](skills/kingdee-posting/) | **金蝶入账**：销项发票 / 付款 / 收款 → 凭证引入表；销项科目抄客户核算项目余额表；收款销售先回款再下单；人审后再自己去金蝶点引入 | 合成测试绿 |
 | [kingdee-gl-import](skills/kingdee-gl-import/) | **序时账入金蝶**：凭证导入模板 / 凭证列表 → 官方引入表；凭证号可指定起始；附件列空；人去金蝶引入 | 合成测试绿 |
 | [qige-invoice-to-kingdee](skills/qige-invoice-to-kingdee/) | **琪哥发票入金蝶**（兼容入口）：触发仍进销项；口径以 `kingdee-posting` 为准 | 🟡 测试保留 |
 | [pl-dept-report](skills/pl-dept-report/) | **月度损益表 / 科目余额表**：金蝶星辰有账套的主体拼成损益表+利润表；山东/四川/济南吃月更 Excel；公式自写核对 | ✅ 合成测试绿 · 已入包 |
@@ -104,7 +104,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx，批注修订、插图、提正文 | ✅ 已入库 · 已入包 |
 | [pptx](skills/pptx/) | **PPT 演示文稿**：做幻灯片、改模板、抽正文、合并拆分 deck | ✅ 已入库 · 已入包 |
 
-**合计：12 业务 + 3 行为/环境（含更新）+ 4 基座 = 19（更新白名单）。** `project-detail-to-ledger` 在仓内但不进白名单，直至另定。
+**合计：13 业务 + 3 行为/环境（含更新）+ 4 基座 = 20（更新白名单）。** `project-detail-to-ledger` 在仓内但不进白名单，直至另定。
 
 > **环境依赖（部署到同事机器时注意）**：① 四类通用基座的"校验"脚本 `office/validate.py` 用了 `match` 语法，**需 Python ≥3.10**（3.9 会报 SyntaxError）——核心读写不受影响，仅可选校验步骤受限。② `xlsx/recalc.py`、`pptx/thumbnail.py`、`docx/accept_changes.py` 依赖 **LibreOffice（soffice）**重算/转图/接受修订；没装 LibreOffice 时这几个功能降级，openpyxl/python-docx/pypdf 的基本读写仍正常。  
 > **以上环境问题统一交给 `env-doctor` 处理**——任何技能缺库/缺工具，agent 查它的清单按国内镜像装齐再重试。  
@@ -182,7 +182,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 
 Agent 走 `update-finance-skills`：从 **Gitee** `main` 拉最新 → 只覆盖白名单 → 保留本机 `config/`（核销业务规则跟仓库） → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
 
-完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v20 第三节 B 段一致）。
+完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v21 第三节 B 段一致）。
 
 ### 开发机已 clone 时（可选手工）
 
