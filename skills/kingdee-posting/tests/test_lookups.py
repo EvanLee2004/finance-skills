@@ -149,6 +149,18 @@ def test_dual_order_sales_holds_for_sijia():
     assert "斯佳" in why
 
 
+def test_receipt_sales_peel_company_suffix():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "甲科技", "date": "2026-08-01", "amount": "10", "sales": ["于占国"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("甲科技有限公司", "2026-08-01", Decimal("10.00"), box)
+    assert (name, why) == ("于占国", "")
+
+
 def test_records_to_lookups_merges_lines_and_receipts():
     got = zhiyun_api.records_to_lookups(
         [
@@ -213,6 +225,7 @@ def test_pick_assist_two_ending_holds_no_silent_max():
     assert ar == ""
     assert "多条" in why
     assert "本期借方" not in why
+    assert lookups.list_assist_accounts("1", "2026-09-07", rows) == ["113103", "113102"]
 
 
 def test_pick_assist_missing_asks_new():

@@ -31,9 +31,28 @@ def money(v):
         return None
 
 
+SUFFIXES = ("股份有限公司", "有限责任公司", "有限公司")
+
+
 def norm_name(name: str) -> str:
     s = (name or "").strip().replace("(", "（").replace(")", "）")
     return "".join(s.split())
+
+
+def peel_name(name: str) -> str:
+    n = norm_name(name)
+    for suf in SUFFIXES:
+        if n.endswith(suf) and len(n) > len(suf) + 1:
+            return n[: -len(suf)]
+    return n
+
+
+def name_variants(name: str) -> list[str]:
+    out: list[str] = []
+    for raw in (norm_name(name), peel_name(name)):
+        if raw and raw not in out:
+            out.append(raw)
+    return out
 
 
 def period_month(day) -> str:
@@ -120,11 +139,10 @@ def select_period_rows(rows: list[AssistRow], invoice_day: str) -> list[AssistRo
     return [r for r in rows if r.period == best]
 
 
-def pick_assist_account(customer_code: str, invoice_day: str, rows: list[AssistRow]) -> tuple[str, str, str]:
-    """返回 (应收, 收入, 失败原因)。销项科目只抄客户核算项目余额表。"""
+def group_assist_accounts(customer_code: str, invoice_day: str, rows: list[AssistRow]) -> dict[str, list[AssistRow]]:
     code = str(customer_code or "").strip()
     if not code:
-        return "", "", HOLD_ASSIST_MISSING
+        return {}
     mine = [r for r in (rows or []) if str(r.customer_code or "").strip() == code and str(r.account or "").startswith("1131")]
     selected = select_period_rows(mine, invoice_day)
     by_acc: dict[str, list[AssistRow]] = {}
@@ -132,6 +150,19 @@ def pick_assist_account(customer_code: str, invoice_day: str, rows: list[AssistR
         acc = str(row.account or "").strip()
         if acc:
             by_acc.setdefault(acc, []).append(row)
+    return by_acc
+
+
+def list_assist_accounts(customer_code: str, invoice_day: str, rows: list[AssistRow]) -> list[str]:
+    return list(group_assist_accounts(customer_code, invoice_day, rows))
+
+
+def pick_assist_account(customer_code: str, invoice_day: str, rows: list[AssistRow]) -> tuple[str, str, str]:
+    """返回 (应收, 收入, 失败原因)。销项科目只抄客户核算项目余额表。"""
+    code = str(customer_code or "").strip()
+    if not code:
+        return "", "", HOLD_ASSIST_MISSING
+    by_acc = group_assist_accounts(code, invoice_day, rows)
     accounts = list(by_acc)
     if not accounts:
         return "", "", HOLD_ASSIST_MISSING
@@ -212,11 +243,28 @@ class LookupBox:
         return []
 
     def order_sales_for(self, customer: str) -> list[str]:
-        return list(self.order_sales.get(norm_name(customer)) or [])
+        keys = set(name_variants(customer))
+        found: list[str] = []
+        for cname, sales in (self.order_sales or {}).items():
+            if keys & set(name_variants(cname)):
+                for person in sales or []:
+                    if person and person not in found:
+                        found.append(person)
+        return found
 
     def receipt_sales_for(self, customer: str, day: str, amount) -> list[str]:
-        key = (norm_name(customer), str(day or "")[:10], amt_key(amount))
-        return list(self.receipt_sales.get(key) or [])
+        keys = set(name_variants(customer))
+        day_s = str(day or "")[:10]
+        amt = amt_key(amount)
+        found: list[str] = []
+        for (cname, rec_day, rec_amt), sales in (self.receipt_sales or {}).items():
+            if rec_day != day_s or rec_amt != amt:
+                continue
+            if keys & set(name_variants(cname)):
+                for person in sales or []:
+                    if person and person not in found:
+                        found.append(person)
+        return found
 
 
 def box_from_dict(raw: dict | None, ar_or_lines, applicant_dept: dict) -> LookupBox:
@@ -355,32 +403,45 @@ def resolve_ar_any(customers, invoice_day: str, customer_code: str, box: LookupB
 
 def resolve_sales(customer: str, day: str, amount, box: LookupBox) -> tuple[str, str]:
     """返回 (销售, 失败原因)。"""
+    sales, why, _cands = resolve_sales_detail(customer, day, amount, box)
+    return sales, why
+
+
+def resolve_sales_detail(customer: str, day: str, amount, box: LookupBox) -> tuple[str, str, list[str]]:
     rec = box.receipt_sales_for(customer, day, amount)
     if len(rec) == 1:
-        return rec[0], ""
+        return rec[0], "", rec
     if len(rec) > 1:
-        return "", "回款销售不唯一"
+        return "", "回款销售不唯一", rec
     orders = box.order_sales_for(customer)
     if len(orders) == 1:
-        return orders[0], ""
+        return orders[0], "", orders
     if len(orders) > 1:
-        return "", "下单对上两个销售，请斯佳单独处理"
-    return "", "找不到销售"
+        return "", "下单对上两个销售，请斯佳单独处理", orders
+    return "", "找不到销售", []
 
 
 def resolve_sales_any(customers, day: str, amount, box: LookupBox) -> tuple[str, str]:
+    sales, why, _cands = resolve_sales_any_detail(customers, day, amount, box)
+    return sales, why
+
+
+def resolve_sales_any_detail(customers, day: str, amount, box: LookupBox) -> tuple[str, str, list[str]]:
     last = "找不到销售"
+    last_cands: list[str] = []
     seen = []
     for name in customers:
         n = norm_name(name)
         if not n or n in seen:
             continue
         seen.append(n)
-        sales, why = resolve_sales(name, day, amount, box)
+        sales, why, cands = resolve_sales_detail(name, day, amount, box)
         if sales:
-            return sales, ""
+            return sales, "", cands
         last = why or last
-    return "", last
+        if cands:
+            last_cands = cands
+    return "", last, last_cands
 
 
 def applicant_dept_code(name: str, box: LookupBox) -> str:

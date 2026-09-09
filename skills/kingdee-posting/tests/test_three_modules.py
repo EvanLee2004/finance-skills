@@ -86,6 +86,19 @@ def test_inspect_receipt_does_not_require_dept_column(tmp_path):
     assert report["ready"] is True
 
 
+def test_inspect_standalone_six_col_receipt_ready(tmp_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "收款"
+    ws.append(["日期", "客户名称", "借方（增加）", "销售", "部门编码", "应收账款编码"])
+    ws.append(["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"])
+    wb.save(tmp_path / "收款.xlsx")
+    wb.close()
+    report = inspect_inputs.inspect_dir(tmp_path, "收款")
+    assert report["ready"] is True
+    assert report["scene"] == "收款"
+
+
 def test_convert_receipt_named_sheet_not_flow_or_org(tmp_path):
     _write_month_draft(
         tmp_path / "稿.xlsx",
@@ -231,8 +244,10 @@ def test_assist_xlsx_two_ending_holds(tmp_path):
     assert result["hold_count"] == 1
     detail = load_workbook(result["detail_path"])
     reason = str(detail.active.cell(2, 2).value or "")
+    extra = json.loads(str(detail.active.cell(2, 7).value or "{}"))
     detail.close()
     assert "多条" in reason
+    assert extra.get("候选1131") == ["113103", "113107"]
 
 
 def test_table_ar_code_ignored_on_six_col(tmp_path):
@@ -458,3 +473,69 @@ def test_bookable_tieout_zero(tmp_path):
     result = _run(tmp_path, "收款")
     assert result["tieout_source"] == result["tieout_debit"] == result["tieout_credit"]
     assert Decimal(result["tieout_debit"]) - Decimal(result["tieout_credit"]) == 0
+
+
+def test_receipt_employee_dept_fallback(tmp_path):
+    master = _master()
+    master["employee"].append({"code": "399", "name": "李测试", "dept": "15"})
+    _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "李测试", ""]], org=None)
+    result = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-09-07",
+        master,
+        _lookups(receipt_sales=[{"customer": "甲科技有限公司", "date": "2026-09-01", "amount": "10.00", "sales": ["李测试"]}]),
+        start_voucher_no=1,
+        out_dir=tmp_path,
+    )
+    assert result["bookable_count"] == 1
+    assert result["hold_count"] == 0
+
+
+def test_receipt_peel_name_matches_zhiyun(tmp_path):
+    _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "", ""]])
+    result = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-09-07",
+        _master(),
+        _lookups(receipt_sales=[{"customer": "甲科技", "date": "2026-09-01", "amount": "10.00", "sales": ["于占国"]}]),
+        start_voucher_no=1,
+        out_dir=tmp_path,
+    )
+    assert result["bookable_count"] == 1
+
+
+def test_sales_multi_assist_extra_lists_accounts(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=True)
+    result = convert.run_dir(
+        tmp_path,
+        "销项发票",
+        "2026-09-07",
+        _master(),
+        _lookups(
+            assist_rows=[
+                {
+                    "period": "202608",
+                    "customer_code": "1001",
+                    "customer_name": "甲科技有限公司",
+                    "account": "113103",
+                    "ending_debit": "80",
+                },
+                {
+                    "period": "202608",
+                    "customer_code": "1001",
+                    "customer_name": "甲科技有限公司",
+                    "account": "113107",
+                    "ending_debit": "20",
+                },
+            ]
+        ),
+        start_voucher_no=1,
+        out_dir=tmp_path,
+    )
+    assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    extra = json.loads(str(detail.active.cell(2, 7).value or "{}"))
+    detail.close()
+    assert extra.get("候选1131") == ["113103", "113107"]

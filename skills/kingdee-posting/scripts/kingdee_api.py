@@ -302,7 +302,35 @@ def _code_name(item: dict) -> dict | None:
     return {"code": code, "name": name}
 
 
-def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int = 2000) -> list[dict]:
+def _dept_code(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for key in ("dept_number", "dept_code", "department_number", "dept_num"):
+        raw = item.get(key)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    nested = item.get("dept") or item.get("department")
+    if isinstance(nested, dict):
+        raw = nested.get("number") or nested.get("code") or nested.get("dept_number")
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    if isinstance(nested, str) and nested.strip():
+        return nested.strip()
+    return ""
+
+
+def _map_master(item: dict, kind: str = "") -> dict | None:
+    mapped = _code_name(item)
+    if not mapped:
+        return None
+    if kind == "employee":
+        dept = _dept_code(item)
+        if dept:
+            mapped["dept"] = dept
+    return mapped
+
+
+def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int = 2000, kind: str = "") -> list[dict]:
     # app-token 的 domain 是租户域名；基础档案 OpenAPI 固定走官方网关。
     # 使用租户域名会返回 404，不能静默降级为空档案。
     host = API_HOST
@@ -320,7 +348,7 @@ def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int =
             raise RuntimeError(f"{path} not json") from e
         rows = _rows_from(payload)
         for item in rows:
-            mapped = _code_name(item)
+            mapped = _map_master(item, kind)
             if mapped:
                 out.append(mapped)
         if len(rows) < page_size:
@@ -341,7 +369,7 @@ def try_load_master() -> dict:
         token, domain = get_app_token(creds)
         data = {
             "customer": fetch_list(creds, token, domain, "/jdy/v2/bd/customer"),
-            "employee": fetch_list(creds, token, domain, "/jdy/v2/bd/emp"),
+            "employee": fetch_list(creds, token, domain, "/jdy/v2/bd/emp", kind="employee"),
             "supplier": fetch_list(creds, token, domain, "/jdy/v2/bd/supplier"),
             "department": fetch_list(creds, token, domain, "/jdy/v2/bd/department"),
         }

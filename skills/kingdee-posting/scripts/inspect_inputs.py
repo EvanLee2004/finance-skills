@@ -197,7 +197,12 @@ def load_org_map(wb, aliases: dict | None = None) -> dict[str, str]:
     return out
 
 
-def dept_for_sales(sales: str, org_map: dict[str, str], applicant_dept: dict[str, str]) -> str:
+def dept_for_sales(
+    sales: str,
+    org_map: dict[str, str],
+    applicant_dept: dict[str, str],
+    emp_dept: str = "",
+) -> str:
     raw = str(sales or "").strip()
     if not raw:
         return ""
@@ -206,7 +211,7 @@ def dept_for_sales(sales: str, org_map: dict[str, str], applicant_dept: dict[str
         or org_map.get(norm_name(raw))
         or applicant_dept.get(raw)
         or applicant_dept.get(norm_name(raw))
-        or ""
+        or str(emp_dept or "").strip()
     )
 
 

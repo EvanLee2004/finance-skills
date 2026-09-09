@@ -468,6 +468,19 @@ def test_kingdee_api_missing_credentials(tmp_path, monkeypatch):
     assert loaded["ok"] is False
 
 
+def test_map_master_keeps_employee_dept_only():
+    emp = kingdee_api._map_master(
+        {"number": "103", "name": "于占国", "dept_number": "15"},
+        "employee",
+    )
+    cus = kingdee_api._map_master(
+        {"number": "1001", "name": "甲科技有限公司", "dept_number": "15"},
+        "customer",
+    )
+    assert emp == {"code": "103", "name": "于占国", "dept": "15"}
+    assert cus == {"code": "1001", "name": "甲科技有限公司"}
+
+
 def test_fetch_list_uses_official_api_host_not_token_domain(monkeypatch):
     seen = []
 
@@ -955,8 +968,10 @@ def test_receipt_order_fallback_and_dual_sales(tmp_path):
     assert hold["hold_count"] == 1
     detail = load_workbook(hold["detail_path"])
     reason = str(detail.active.cell(2, 2).value or "")
+    extra = json.loads(str(detail.active.cell(2, 7).value or "{}"))
     detail.close()
     assert "斯佳" in reason
+    assert extra.get("候选销售") == ["于占国", "陈霞"]
 
 
 def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):

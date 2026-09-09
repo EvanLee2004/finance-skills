@@ -234,6 +234,7 @@ class Master:
     def __init__(self, data: dict | None):
         data = data or {}
         self.emp: dict[str, list[tuple[str, str]]] = {}
+        self.emp_dept: dict[str, list[str]] = {}
         self.dept: dict[str, str] = {}
         self.cus: dict[str, list[tuple[str, str]]] = {}
         self.sup: dict[str, list[tuple[str, str]]] = {}
@@ -242,6 +243,11 @@ class Master:
             code = code_str(e.get("code"))
             if name and code:
                 self.emp.setdefault(norm_name(name), []).append((code, name))
+            dept = code_str(e.get("dept") or e.get("dept_code") or e.get("dept_number"))
+            if name and dept:
+                bucket = self.emp_dept.setdefault(norm_name(name), [])
+                if dept not in bucket:
+                    bucket.append(dept)
         for d in data.get("department") or []:
             code = code_str(d.get("code"))
             name = str(d.get("name") or "").strip()
@@ -308,6 +314,16 @@ class Master:
     def match_employee(self, name: str, hang: dict | None = None):
         mapped = names.hang_employee(name, hang or {})
         return unique_lookup(self.emp, mapped)
+
+    def employee_dept_code(self, name: str, hang: dict | None = None) -> str:
+        mapped = names.hang_employee(name, hang or {})
+        ehit, eerr = unique_lookup(self.emp, mapped)
+        if not ehit or eerr == "many":
+            return ""
+        depts = list(self.emp_dept.get(norm_name(mapped)) or [])
+        if len(depts) != 1:
+            return ""
+        return depts[0]
 
     def department(self, code: str):
         code = code_str(code)
@@ -502,17 +518,18 @@ def resolve_sales_party(unit: str, applicant: str, inv_day: str, alias_map: dict
         if got.status == "none" and query != unit:
             got = names.match_records(unit, records)
         if got.status == "many":
-            return None, "客户核算项目余额表名称不唯一，请斯佳确认"
+            return None, "客户核算项目余额表名称不唯一，请斯佳确认", {}
         if got.status != "ok" or not got.hit:
-            return None, lookup_mod.HOLD_ASSIST_MISSING
+            return None, lookup_mod.HOLD_ASSIST_MISSING, {}
         cus_code = got.hit[0]
+    extra = {"候选1131": lookup_mod.list_assist_accounts(cus_code, inv_day, assist_rows)}
     ar, rev, why = lookup_mod.pick_assist_account(cus_code, inv_day, assist_rows)
     if not ar:
-        return None, why or lookup_mod.HOLD_ASSIST_MISSING
+        return None, why or lookup_mod.HOLD_ASSIST_MISSING, extra
     verified = names.by_code(master.all_customers(), cus_code)
     if not verified:
-        return None, "总部档案未核验" if not master.enabled else "客户档案没有此编码，请斯佳确认"
-    return (verified[0], verified[1], ar, rev), None
+        return None, "总部档案未核验" if not master.enabled else "客户档案没有此编码，请斯佳确认", extra
+    return (verified[0], verified[1], ar, rev), None, extra
 
 
 def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, booking: str, period_fetch=None, assist_rows=None) -> list[VoucherLine]:
@@ -583,7 +600,9 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             line.status, line.reason = "待确认", "缺申请人"
             lines.append(line)
             continue
-        dept = inspect_mod.dept_for_sales(applicant, org_map, box.applicant_dept)
+        dept = inspect_mod.dept_for_sales(
+            applicant, org_map, box.applicant_dept, master.employee_dept_code(applicant, hang)
+        )
         if not dept:
             line.status, line.reason = "待确认", "申请人不在部门表"
             lines.append(line)
@@ -601,7 +620,9 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             continue
         emp_code, emp_name = ehit
         rows = assist_rows if assist_rows is not None else list(getattr(box, "assist_rows", None) or [])
-        party, perr = resolve_sales_party(unit, applicant, inv_day, alias_map, master, rows)
+        party, perr, meta = resolve_sales_party(unit, applicant, inv_day, alias_map, master, rows)
+        if meta.get("候选1131"):
+            line.extra["候选1131"] = meta["候选1131"]
         if not party:
             line.status = "待确认"
             line.reason = perr or lookup_mod.HOLD_ASSIST_MISSING
@@ -900,24 +921,31 @@ def convert_receipt(
             lines.append(line)
             continue
         cus_code, cus_name = chit
+        ar_cands = lookup_mod.list_assist_accounts(cus_code, rec_day, rows)
+        if ar_cands:
+            line.extra["候选1131"] = ar_cands
         ar, _rev, why = lookup_mod.pick_assist_account(cus_code, rec_day, rows)
         if not ar:
             line.status, line.reason = "待确认", why or lookup_mod.HOLD_ASSIST_MISSING
             lines.append(line)
             continue
+        sales_cands: list[str] = []
         if table_sales:
             sales, swhy = table_sales, ""
         else:
-            sales, swhy = lookup_mod.resolve_sales_any(
+            sales, swhy, sales_cands = lookup_mod.resolve_sales_any_detail(
                 [cus_name, cust, alias_map.get(cust, cust)], rec_day, amt, box
             )
+        if sales_cands:
+            line.extra["候选销售"] = sales_cands
         if not sales:
             line.status, line.reason = "待确认", swhy or "找不到销售"
             lines.append(line)
             continue
         line.extra["销售"] = sales
+        emp_dept = master.employee_dept_code(sales, hang)
         dept = table_dept if table_dept and not table_dept.startswith("=") else inspect_mod.dept_for_sales(
-            sales, org_map, applicant_dept
+            sales, org_map, applicant_dept, emp_dept
         )
         if not dept:
             line.status, line.reason = "待确认", "没有销售就没有部门" if not sales else "销售不在部门表"
@@ -1148,7 +1176,7 @@ def run_dir(
     if scene == "销项发票":
         src = Path(files["invoice"])
         assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True)
-        extras.append("销项部门：同文件组织架构优先，没有再用申请人部门.json")
+        extras.append("销项部门：组织架构优先，否则申请人部门.json，再职员档案唯一部门")
         extras.append("记账日：跑批当天")
         lines = convert_sales(src, master, rules, aliases, box, day, assist_rows=assist_rows)
     elif scene == "付款":
@@ -1164,7 +1192,7 @@ def run_dir(
         else:
             assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=False)
         extras.append("记账日：表上收款日")
-        extras.append("表上销售有则用，空则智云回款→下单")
+        extras.append("表上销售有则用，空则智云回款→下单；部门可回退职员档案")
         lines = convert_receipt(
             src, master, rules, aliases, box, day, period_fetch=period_fetch, assist_rows=assist_rows
         )
