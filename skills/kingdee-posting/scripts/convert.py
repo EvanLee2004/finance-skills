@@ -168,12 +168,41 @@ def load_applicant_ar() -> dict:
     return {str(k).strip(): str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
 
 
-def preferred_ar_for(person: str, hang: dict | None = None) -> str:
-    table = load_applicant_ar()
+def load_customer_sales_ar() -> dict[str, dict[str, str]]:
+    raw = load_json(CONFIG / "申请人科目.json", {})
+    out: dict[str, dict[str, str]] = {}
+    for cust, people in (raw.get("_客户销售") or {}).items():
+        if str(cust).startswith("_") or not isinstance(people, dict):
+            continue
+        cleaned = {
+            str(k).strip(): str(v).strip()
+            for k, v in people.items()
+            if not str(k).startswith("_") and v
+        }
+        if cleaned:
+            out[str(cust).strip()] = cleaned
+    return out
+
+
+def load_receipt_skip() -> list[str]:
+    raw = load_json(CONFIG / "收款不记.json", {})
+    return [str(x).strip() for x in (raw.get("headings") or []) if str(x).strip()]
+
+
+def preferred_ar_for(person: str, hang: dict | None = None, customer: str = "") -> str:
     raw = str(person or "").strip()
     hung = names.hang_employee(raw, hang or {})
-    for key in (raw, names.norm_name(raw), hung, names.norm_name(hung)):
-        if key and key in table:
+    keys = [k for k in (raw, names.norm_name(raw), hung, names.norm_name(hung)) if k]
+    if str(customer or "").strip():
+        for cname, people in load_customer_sales_ar().items():
+            if not lookup_mod.matching_name_keys(customer, [cname]):
+                continue
+            for key in keys:
+                if key in people:
+                    return lookup_mod.preferred_ar_code(people[key])
+    table = load_applicant_ar()
+    for key in keys:
+        if key in table:
             return lookup_mod.preferred_ar_code(table[key])
     return ""
 
@@ -654,7 +683,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
         emp_code, emp_name = ehit
         rows = assist_rows if assist_rows is not None else list(getattr(box, "assist_rows", None) or [])
         party, perr, meta = resolve_sales_party(
-            unit, applicant, inv_day, alias_map, master, rows, preferred_ar=preferred_ar_for(applicant, hang)
+            unit, applicant, inv_day, alias_map, master, rows, preferred_ar=preferred_ar_for(applicant, hang, customer=unit)
         )
         if meta.get("候选1131"):
             line.extra["候选1131"] = meta["候选1131"]
@@ -905,6 +934,7 @@ def convert_receipt(
     alias_map = load_customer_alias()
     hang = load_emp_hang()
     applicant_dept = load_applicant_dept()
+    skip_headings = load_receipt_skip()
     wb_f = load_workbook(path, data_only=False)
     wb_v = load_workbook(path, data_only=True)
     sheet = inspect_mod.find_receipt_sheet(wb_f, aliases)
@@ -949,6 +979,10 @@ def convert_receipt(
             line.status, line.reason = "待确认", "缺金额"
             lines.append(line)
             continue
+        if names.receipt_skip(cust, skip_headings):
+            line.status, line.reason = "待确认", names.HOLD_SKIP_RECEIPT
+            lines.append(line)
+            continue
         chit, cerr = match_receipt_customer(master, cust, alias_map, rows)
         if not chit:
             line.status = "待确认"
@@ -973,14 +1007,14 @@ def convert_receipt(
             lines.append(line)
             continue
         sales = names.hang_employee(sales, hang)
+        line.extra["销售"] = sales
         ar, _rev, why = lookup_mod.pick_assist_account(
-            cus_code, rec_day, rows, preferred_ar=preferred_ar_for(sales, hang)
+            cus_code, rec_day, rows, preferred_ar=preferred_ar_for(sales, hang, customer=cus_name or cust)
         )
         if not ar:
             line.status, line.reason = "待确认", why or lookup_mod.HOLD_ASSIST_MISSING
             lines.append(line)
             continue
-        line.extra["销售"] = sales
         emp_dept = master.employee_dept_code(sales, hang)
         dept = table_dept if table_dept and not table_dept.startswith("=") else inspect_mod.dept_for_sales(
             sales, org_map, applicant_dept, emp_dept
@@ -1263,7 +1297,7 @@ def run_dir(
         else:
             assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=False)
         extras.append("记账日：表上收款日")
-        extras.append("表上销售有则用，空则智云回款→下单；部门可回退职员档案")
+        extras.append("表上销售有则用，空则智云回款（名称或到账日+金额）→下单；部门可回退职员档案")
         lines = convert_receipt(
             src, master, rules, aliases, box, day, period_fetch=period_fetch, assist_rows=assist_rows
         )

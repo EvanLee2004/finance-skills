@@ -3,9 +3,11 @@
 """预处理查找：销项/收款科目只抄客户核算项目余额表。合成测试注入，不访问网络。"""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 TWOPLACES = Decimal("0.01")
+_PAY_TAIL = re.compile(r"第[一二三四五六七八九十百千零〇两0-9]+(?:收缴户|账户|收款户|专户)$")
 
 HOLD_ASSIST_MISSING = "客户核算项目余额表没有此抬头，请斯佳确认是否新建"
 HOLD_ASSIST_MULTI = "客户核算项目余额表有多条应收，请斯佳确认记哪条"
@@ -48,12 +50,40 @@ def peel_name(name: str) -> str:
     return n
 
 
+def peel_pay_tail(name: str) -> str:
+    """银行抬头常带「第二收缴户」；智云开票客户没有这段。"""
+    n = peel_name(name)
+    stripped = _PAY_TAIL.sub("", n)
+    return stripped if stripped else n
+
+
 def name_variants(name: str) -> list[str]:
     out: list[str] = []
-    for raw in (norm_name(name), peel_name(name)):
+    for raw in (norm_name(name), peel_name(name), peel_pay_tail(name)):
         if raw and raw not in out:
             out.append(raw)
     return out
+
+
+def names_overlap(left: str, right: str) -> bool:
+    return bool(set(name_variants(left)) & set(name_variants(right)))
+
+
+def matching_name_keys(query: str, keys) -> list[str]:
+    """先变体相交，再唯一包含。多个包含键都留下，销售是否唯一交给调用方。"""
+    keys = [str(k) for k in (keys or []) if str(k).strip()]
+    exact = [k for k in keys if names_overlap(query, k)]
+    if exact:
+        return exact
+    qn = peel_pay_tail(query) or peel_name(query) or norm_name(query)
+    if len(qn) < 4:
+        return []
+    contain = []
+    for k in keys:
+        kn = peel_pay_tail(k) or peel_name(k) or norm_name(k)
+        if qn in kn or kn in qn:
+            contain.append(k)
+    return contain
 
 
 def period_month(day) -> str:
@@ -279,27 +309,43 @@ class LookupBox:
         return []
 
     def order_sales_for(self, customer: str) -> list[str]:
-        keys = set(name_variants(customer))
         found: list[str] = []
-        for cname, sales in (self.order_sales or {}).items():
-            if keys & set(name_variants(cname)):
-                for person in sales or []:
-                    if person and person not in found:
-                        found.append(person)
+        for cname in matching_name_keys(customer, (self.order_sales or {}).keys()):
+            for person in (self.order_sales or {}).get(cname) or []:
+                if person and person not in found:
+                    found.append(person)
         return found
 
     def receipt_sales_for(self, customer: str, day: str, amount) -> list[str]:
-        keys = set(name_variants(customer))
         day_s = str(day or "")[:10]
         amt = amt_key(amount)
-        found: list[str] = []
+        named: list[str] = []
+        by_money: list[str] = []
+        named_row = False
         for (cname, rec_day, rec_amt), sales in (self.receipt_sales or {}).items():
             if rec_day != day_s or rec_amt != amt:
                 continue
-            if keys & set(name_variants(cname)):
+            for person in sales or []:
+                if person and person not in by_money:
+                    by_money.append(person)
+            if matching_name_keys(customer, [cname]):
+                named_row = True
                 for person in sales or []:
-                    if person and person not in found:
-                        found.append(person)
+                    if person and person not in named:
+                        named.append(person)
+        if named_row:
+            return named
+        return by_money
+
+    def receipt_history_sales_for(self, customer: str) -> list[str]:
+        """这笔到账还没登时：同一开票客户历史回款仍唯一的销售。"""
+        found: list[str] = []
+        for (cname, _day, _amt), sales in (self.receipt_sales or {}).items():
+            if not matching_name_keys(customer, [cname]):
+                continue
+            for person in sales or []:
+                if person and person not in found:
+                    found.append(person)
         return found
 
 
@@ -454,6 +500,11 @@ def resolve_sales_detail(customer: str, day: str, amount, box: LookupBox) -> tup
         return orders[0], "", orders
     if len(orders) > 1:
         return "", "下单对上两个销售，请斯佳单独处理", orders
+    hist = box.receipt_history_sales_for(customer)
+    if len(hist) == 1:
+        return hist[0], "", hist
+    if len(hist) > 1:
+        return "", "回款销售不唯一", hist
     return "", "找不到销售", []
 
 

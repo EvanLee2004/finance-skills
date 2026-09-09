@@ -47,6 +47,22 @@ def maps_to_police_ministry(name: str, applicant: str = "") -> bool:
     return True
 
 
+HOLD_SKIP_RECEIPT = "斯佳确认不记"
+
+
+def receipt_skip(name: str, headings) -> bool:
+    q = norm_name(name)
+    if not q:
+        return False
+    for raw in headings or []:
+        item = str(raw or "").strip()
+        if item.startswith("_") or not item:
+            continue
+        if q == norm_name(item):
+            return True
+    return False
+
+
 def hang_employee(name: str, mapping: dict[str, str]) -> str:
     raw = (name or "").strip()
     if not raw:

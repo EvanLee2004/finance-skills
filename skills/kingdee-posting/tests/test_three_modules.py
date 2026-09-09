@@ -124,6 +124,154 @@ def test_convert_receipt_without_dept_column_uses_org(tmp_path):
     assert "15" in depts
 
 
+def test_receipt_skip_headings_do_not_ask_new_or_sales(tmp_path):
+    _write_month_draft(
+        tmp_path / "稿.xlsx",
+        [
+            ["2026-09-01", "财付通支付科技有限公司", 10, "于占国", ""],
+            ["2026-09-01", "中国人民解放军北京资金集中收付管理中心第二收缴户", 20, "", ""],
+        ],
+    )
+    result = _run(tmp_path, "收款")
+    assert result["source_count"] == 2
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 2
+    detail = load_workbook(result["detail_path"])
+    reasons = [str(detail.active.cell(r, 2).value or "") for r in range(2, 4)]
+    detail.close()
+    assert reasons == ["斯佳确认不记", "斯佳确认不记"]
+
+
+def test_preferred_ar_zhenghao_yuzhanguo_is_07():
+    assert convert.preferred_ar_for("于占国", customer="深圳市正浩创新科技股份有限公司") == "113107"
+    assert convert.preferred_ar_for("于占国", customer="甲科技有限公司") == "113103"
+    assert convert.preferred_ar_for("于占国") == "113103"
+
+
+def test_zhenghao_yuzhanguo_books_07(tmp_path):
+    assist = tmp_path / "核算项目余额表_客户_1131_本年.xlsx"
+    _write_assist(
+        assist,
+        [
+            {
+                "period": "202608",
+                "customer_code": "3844",
+                "customer_name": "深圳市正浩创新科技股份有限公司",
+                "account": "113101",
+                "ending_debit": "80",
+            },
+            {
+                "period": "202608",
+                "customer_code": "3844",
+                "customer_name": "深圳市正浩创新科技股份有限公司",
+                "account": "113107",
+                "ending_debit": "20",
+            },
+        ],
+    )
+    _write_month_draft(
+        tmp_path / "稿.xlsx",
+        [["2026-09-01", "深圳市正浩创新科技股份有限公司", 10, "于占国", ""]],
+    )
+    result = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-09-07",
+        _master(),
+        _lookups(include_assist=False),
+        out_dir=tmp_path,
+        ar_xlsx=assist,
+    )
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 8)]
+    kd.close()
+    assert "113107" in accounts
+    assert "113101" not in accounts
+
+
+def test_jia_yuzhanguo_without_03_still_holds(tmp_path):
+    assist = tmp_path / "核算项目余额表_客户_1131_本年.xlsx"
+    _write_assist(
+        assist,
+        [
+            {
+                "period": "202608",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113101",
+                "ending_debit": "80",
+            },
+            {
+                "period": "202608",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113107",
+                "ending_debit": "20",
+            },
+        ],
+    )
+    _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "于占国", ""]])
+    result = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-09-07",
+        _master(),
+        _lookups(include_assist=False),
+        out_dir=tmp_path,
+        ar_xlsx=assist,
+    )
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+    detail = load_workbook(result["detail_path"])
+    reason = str(detail.active.cell(2, 2).value or "")
+    extra = json.loads(str(detail.active.cell(2, 7).value or "{}"))
+    detail.close()
+    assert "多条" in reason
+    assert extra.get("候选1131") == ["113101", "113107"]
+
+
+def test_jia_yuzhanguo_with_03_still_03(tmp_path):
+    assist = tmp_path / "核算项目余额表_客户_1131_本年.xlsx"
+    _write_assist(
+        assist,
+        [
+            {
+                "period": "202608",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113103",
+                "ending_debit": "80",
+            },
+            {
+                "period": "202608",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113107",
+                "ending_debit": "20",
+            },
+        ],
+    )
+    _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "于占国", ""]])
+    result = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-09-07",
+        _master(),
+        _lookups(include_assist=False),
+        out_dir=tmp_path,
+        ar_xlsx=assist,
+    )
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 8)]
+    kd.close()
+    assert "113103" in accounts
+    assert "113107" not in accounts
+
+
 def test_table_sales_used_before_zhiyun(tmp_path):
     _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "陈霞", ""]])
     result = _run(

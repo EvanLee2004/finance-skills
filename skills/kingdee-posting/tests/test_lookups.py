@@ -161,6 +161,118 @@ def test_receipt_sales_peel_company_suffix():
     assert (name, why) == ("于占国", "")
 
 
+def test_receipt_sales_peel_collection_account():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "甲科技有限公司", "date": "2026-08-01", "amount": "10", "sales": ["于占国"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("甲科技有限公司第二收缴户", "2026-08-01", Decimal("10.00"), box)
+    assert (name, why) == ("于占国", "")
+
+
+def test_receipt_sales_date_amount_when_bank_name_differs():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "开票客户甲", "date": "2026-09-01", "amount": "10", "sales": ["于占国"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("银行收缴户乙", "2026-09-01", Decimal("10.00"), box)
+    assert (name, why) == ("于占国", "")
+
+
+def test_receipt_sales_date_amount_two_sales_holds():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "开票客户甲", "date": "2026-09-01", "amount": "10", "sales": ["于占国"]},
+                {"customer": "开票客户乙", "date": "2026-09-01", "amount": "10", "sales": ["陈霞"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("银行收缴户", "2026-09-01", Decimal("10.00"), box)
+    assert name == ""
+    assert "不唯一" in why
+
+
+def test_named_receipt_without_sales_does_not_steal_other_customer():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "甲科技有限公司", "date": "2026-09-01", "amount": "10", "sales": []},
+                {"customer": "乙科技有限公司", "date": "2026-09-01", "amount": "10", "sales": ["陈霞"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("甲科技有限公司", "2026-09-01", Decimal("10.00"), box)
+    assert name == ""
+    assert why == "找不到销售"
+
+
+def test_receipt_history_unique_when_this_payment_missing():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "开票客户甲", "date": "2026-07-01", "amount": "80", "sales": ["于占国"]},
+                {"customer": "开票客户甲", "date": "2026-08-01", "amount": "90", "sales": ["于占国"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("开票客户甲", "2026-09-03", Decimal("12.00"), box)
+    assert (name, why) == ("于占国", "")
+
+
+def test_receipt_history_two_sales_holds():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "开票客户甲", "date": "2026-07-01", "amount": "80", "sales": ["于占国"]},
+                {"customer": "开票客户甲", "date": "2026-08-01", "amount": "90", "sales": ["陈霞"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("开票客户甲", "2026-09-03", Decimal("12.00"), box)
+    assert name == ""
+    assert "不唯一" in why
+
+
+def test_this_payment_beats_receipt_history():
+    box = _box(
+        {
+            "receipt_sales": [
+                {"customer": "开票客户甲", "date": "2026-07-01", "amount": "80", "sales": ["陈霞"]},
+                {"customer": "开票客户甲", "date": "2026-09-03", "amount": "12", "sales": ["于占国"]},
+            ]
+        }
+    )
+    name, why = lookups.resolve_sales("开票客户甲", "2026-09-03", Decimal("12.00"), box)
+    assert (name, why) == ("于占国", "")
+
+
+def test_order_sales_unique_contain():
+    box = _box({"order_sales": {"甲科技有限公司": ["陈霞"]}})
+    name, why = lookups.resolve_sales("甲科技有限公司北京分公司", "2026-08-01", "10", box)
+    assert (name, why) == ("陈霞", "")
+
+
+def test_order_sales_contain_two_customers_holds():
+    box = _box(
+        {
+            "order_sales": {
+                "某某中心一部": ["陈霞"],
+                "某某中心二部": ["于占国"],
+            }
+        }
+    )
+    name, why = lookups.resolve_sales("某某中心", "2026-08-01", "10", box)
+    assert name == ""
+    assert "斯佳" in why
+
+
 def test_records_to_lookups_merges_lines_and_receipts():
     got = zhiyun_api.records_to_lookups(
         [
@@ -174,6 +286,25 @@ def test_records_to_lookups_merges_lines_and_receipts():
     assert got["customer_lines"]["甲科技有限公司"] == ["ICT", "游戏综合本地化"]
     assert got["order_sales"]["甲科技有限公司"] == ["于占国", "陈霞"]
     assert got["receipt_sales"][0]["sales"] == ["于占国"]
+
+
+def test_records_to_lookups_keeps_invoice_customer():
+    got = zhiyun_api.records_to_lookups(
+        [{"客户": "集团甲", "开票客户": "子公司乙", "销售": "于占国"}],
+        [
+            {
+                "客户": "集团甲",
+                "开票客户": "子公司乙",
+                "到账日期": "2026-08-01",
+                "到账金额/本币": "10",
+                "销售": "于占国",
+            }
+        ],
+    )
+    assert got["order_sales"]["集团甲"] == ["于占国"]
+    assert got["order_sales"]["子公司乙"] == ["于占国"]
+    names = {item["customer"] for item in got["receipt_sales"]}
+    assert names == {"集团甲", "子公司乙"}
 
 
 def test_zhiyun_missing_credentials(tmp_path, monkeypatch):

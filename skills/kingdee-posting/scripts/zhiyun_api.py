@@ -71,6 +71,15 @@ def _first(rec: dict, names: tuple[str, ...]) -> str:
     return ""
 
 
+def _all_names(rec: dict, names: tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for name in names:
+        val = str(rec.get(name) or "").strip()
+        if val and val not in out:
+            out.append(val)
+    return out
+
+
 def split_vals(raw: str) -> list[str]:
     out = []
     for part in re.split(r"[/,，、|]", str(raw or "")):
@@ -84,32 +93,37 @@ def records_to_lookups(order_records, receipt_records) -> dict:
     customer_lines: dict[str, list[str]] = {}
     order_sales: dict[str, list[str]] = {}
     for rec in order_records or []:
-        name = _first(rec, CUSTOMER_FIELDS)
-        if not name:
+        names = _all_names(rec, CUSTOMER_FIELDS)
+        if not names:
             continue
-        lines = customer_lines.setdefault(name, [])
-        for line in split_vals(_first(rec, LINE_FIELDS)):
-            if line not in lines:
-                lines.append(line)
-        sales = order_sales.setdefault(name, [])
-        for person in split_vals(_first(rec, SALES_FIELDS)):
-            if person not in sales:
-                sales.append(person)
+        people = split_vals(_first(rec, SALES_FIELDS))
+        lines_found = split_vals(_first(rec, LINE_FIELDS))
+        for name in names:
+            lines = customer_lines.setdefault(name, [])
+            for line in lines_found:
+                if line not in lines:
+                    lines.append(line)
+            sales = order_sales.setdefault(name, [])
+            for person in people:
+                if person not in sales:
+                    sales.append(person)
     grouped: dict[tuple[str, str, str], dict] = {}
     for rec in receipt_records or []:
-        name = _first(rec, CUSTOMER_FIELDS)
+        names = _all_names(rec, CUSTOMER_FIELDS)
         day = _first(rec, DATE_FIELDS).replace("/", "-").replace(".", "-")[:10]
         amount = _first(rec, AMOUNT_FIELDS)
         key_amt = lookup_mod.amt_key(amount)
-        if not (name and len(day) == 10 and key_amt):
+        if not (names and len(day) == 10 and key_amt):
             continue
-        item = grouped.setdefault(
-            (lookup_mod.norm_name(name), day, key_amt),
-            {"customer": name, "date": day, "amount": amount, "sales": []},
-        )
-        for person in split_vals(_first(rec, SALES_FIELDS)):
-            if person not in item["sales"]:
-                item["sales"].append(person)
+        people = split_vals(_first(rec, SALES_FIELDS))
+        for name in names:
+            item = grouped.setdefault(
+                (lookup_mod.norm_name(name), day, key_amt),
+                {"customer": name, "date": day, "amount": amount, "sales": []},
+            )
+            for person in people:
+                if person not in item["sales"]:
+                    item["sales"].append(person)
     return {
         "customer_lines": customer_lines,
         "order_sales": order_sales,
