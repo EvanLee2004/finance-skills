@@ -231,6 +231,8 @@ def apply_offline_profit(
     records: list[dict],
     period: str,
     notes: list[str],
+    skip_split_entities: set[str] | None = None,
+    skip_split_codes: dict[str, set[str]] | None = None,
 ) -> None:
     rules = load_offline_rules()
     layout = load_layout()
@@ -248,9 +250,17 @@ def apply_offline_profit(
         if not values:
             continue
         notes.append(f"线下利润表={ent}")
+        pay_codes = (skip_split_codes or {}).get(ent) or set()
+        skip_split = ent in (skip_split_entities or set())
         for label, amt in values.items():
             profit_cur.setdefault(ent, {})[label] = amt
             spec = ((splits.get(ent) or {}).get(label)) or defaults.get(label)
+            leaf = str((spec or {}).get("leaf") or (spec or {}).get("parent") or "")
+            if pay_codes and label in {"管理费用", "销售费用", "成本"} and leaf:
+                if any(c == leaf or str(c).startswith(leaf) for c in pay_codes):
+                    continue
+            elif skip_split and label in {"管理费用", "销售费用", "成本"}:
+                continue
             if not spec:
                 continue
             parent = spec.get("parent")

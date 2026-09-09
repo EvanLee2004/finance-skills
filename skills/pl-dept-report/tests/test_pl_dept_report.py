@@ -105,28 +105,28 @@ def test_same_dept_across_books_is_summed(tmp_path: Path):
     _write_account(
         tmp_path / "wh.xlsx",
         "北京甲骨易文化传媒有限公司",
-        [("540103", "翻译语言服务", 10.0, None)],
+        [("550198", "活动团建费", 10.0, None)],
     )
     _write_assist(
         tmp_path / "wh_d.xlsx",
         "北京甲骨易文化传媒有限公司",
-        [("540103", "翻译语言服务", "大客户", 10.0, None)],
+        [("550198", "活动团建费", "大客户", 10.0, None)],
     )
     _write_account(
         tmp_path / "sh.xlsx",
         "甲骨易智译（上海）科技有限公司",
-        [("540103", "翻译语言服务", 15.0, None)],
+        [("550198", "活动团建费", 15.0, None)],
     )
     _write_assist(
         tmp_path / "sh_d.xlsx",
         "甲骨易智译（上海）科技有限公司",
-        [("540103", "翻译语言服务", "大客户", 15.0, None)],
+        [("550198", "活动团建费", "大客户", 15.0, None)],
     )
     out = tmp_path / "out.xlsx"
     _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
     ws = openpyxl.load_workbook(out)["损益表"]
     layout = load_layout()
-    row = account_row_map(layout)["540103"]
+    row = account_row_map(layout)["550198"]
     ka = next(letter for name, letter in dept_columns(layout) if name == "KA")
     assert ws[f"{ka}{row}"].value == 25.0
     assert ws[f"E{row}"].value == 10
@@ -310,21 +310,21 @@ def test_map_dakehu_to_ka_and_unmapped_stays_out(tmp_path: Path):
     _write_account(
         tmp_path / "a.xlsx",
         "甲骨易（北京）语言科技股份有限公司",
-        [("540103", "翻译语言服务", 80.0, None)],
+        [("550198", "活动团建费", 80.0, None)],
     )
     _write_assist(
         tmp_path / "b.xlsx",
         "甲骨易（北京）语言科技股份有限公司",
         [
-            ("540103", "翻译语言服务", "大客户", 50.0, None),
-            ("540103", "翻译语言服务", "神秘事业部", 30.0, None),
+            ("550198", "活动团建费", "大客户", 50.0, None),
+            ("550198", "活动团建费", "神秘事业部", 30.0, None),
         ],
     )
     out = tmp_path / "out.xlsx"
     r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
     ws = openpyxl.load_workbook(out)["损益表"]
     layout = load_layout()
-    row = account_row_map(layout)["540103"]
+    row = account_row_map(layout)["550198"]
     ka_col = None
     for name, letter in dept_columns(layout):
         if name == "KA":
@@ -372,10 +372,12 @@ def test_hq_chanpin_yingxiao_xiangmu_map_to_layout_cols(tmp_path: Path):
     qudao = dept_col_letter(layout, "渠道开发中心", 1)
     shi = dept_col_letter(layout, "视听", 1)
     yizu = dept_col_letter(layout, "项目一组", 1)
-    assert qudao and shi and yizu
+    director = dept_col_letter(layout, "项目总监及助理", 1)
+    assert qudao and shi and yizu and director
     assert ws[f"{qudao}{row['550321']}"].value == 11
     assert ws[f"{shi}{row['550198']}"].value == 13
-    assert ws[f"{yizu}{row['540103']}"].value == 17
+    assert ws[f"{director}{row['540103']}"].value == 17
+    assert ws[f"{yizu}{row['540103']}"].value in (None, "")
     report = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
     assert "产品部" not in report
     assert "营销二部" not in report
@@ -624,13 +626,13 @@ def test_formulas_not_dead_numbers_balanced_and_unbalanced(tmp_path: Path):
 
     bad = tmp_path / "bad"
     bad.mkdir()
-    _write_account(bad / "a.xlsx", "甲骨易（北京）语言科技股份有限公司", [("540103", "翻译语言服务", 80.0, None)])
-    _write_assist(bad / "d.xlsx", "甲骨易（北京）语言科技股份有限公司", [("540103", "翻译语言服务", "KA", 50.0, None)])
+    _write_account(bad / "a.xlsx", "甲骨易（北京）语言科技股份有限公司", [("550198", "活动团建费", 80.0, None)])
+    _write_assist(bad / "d.xlsx", "甲骨易（北京）语言科技股份有限公司", [("550198", "活动团建费", "KA", 50.0, None)])
     out2 = bad / "out.xlsx"
     _run(["--period", "202608", "--input-dir", str(bad), "--out", str(out2), "--no-api"])
     wb2 = openpyxl.load_workbook(out2, data_only=False)
     book2, _ = eval_workbook(wb2)
-    av2 = book2.cell_value("损益表", account_row_map(layout)["540103"], 48)
+    av2 = book2.cell_value("损益表", account_row_map(layout)["550198"], 48)
     assert abs(Decimal(str(av2))) > Decimal("0.05")
 
 
@@ -1002,7 +1004,10 @@ def test_agency_profit_fills_shandong_sichuan_jinan(tmp_path: Path):
     sichuan_dept = dept_col_letter(layout, "四川分公司", 1)
     jinan_zgs = dept_col_letter(layout, "济南子公司", 1)
     assert ws[f"{jinan_dept}{row['54011101']}"].value == 88
-    assert ws[f"{sichuan_dept}{row['550201']}"].value == 22
+    finance = dept_col_letter(layout, "财务中心", 1)
+    assert finance
+    assert ws[f"{finance}{row['550201']}"].value == 22
+    assert ws[f"{sichuan_dept}{row['550201']}"].value in (None, "")
     assert ws[f"{jinan_zgs}{row['540109']}"].value == 55
     assert pf["E6"].value == 88
     assert pf["H6"].value == 22
@@ -1060,3 +1065,215 @@ def test_xingchen_creds_from_local_json_or_env(tmp_path: Path, monkeypatch):
     assert "xingchen.local.json" in ASK_CREDS
     assert _looks_logged_in("https://service.jdy.com/workbench/web/index.html", "进入使用")
     assert not _looks_logged_in("https://www.jdy.com/login/", "账号登录")
+
+
+def _write_payroll(path: Path) -> None:
+    wb = openpyxl.Workbook()
+    org = wb.active
+    org.title = "组织架构"
+    org["A2"] = "姓名"
+    org["B2"] = "组织架构-1"
+    org["C2"] = "组织架构-2"
+    org["A3"] = "甲"
+    org["B3"] = "渠道开发中心"
+    org["C3"] = "技术部"
+    org["A4"] = "乙"
+    org["B4"] = "营销中心"
+    org["C4"] = "本地化事业部"
+    org["A5"] = "丙"
+    org["B5"] = "项目中心"
+    org["C5"] = "本地化事业部"
+    org["A6"] = "戊"
+    org["B6"] = "运营保障中心"
+    org["C6"] = "运营保障中心"
+    wage = wb.create_sheet("202608甲骨易工资")
+    for i, h in enumerate(["序号", "姓名", "组织架构1", "组织架构2", "部门", "地区", "身份证号码", "基本工资"], 1):
+        wage.cell(1, i).value = h
+    wage["A2"] = 1
+    wage["B2"] = "甲"
+    wage["C2"] = "渠道开发中心"
+    wage["D2"] = "技术部"
+    wage["H2"] = 10
+    wage["A3"] = 2
+    wage["B3"] = "乙"
+    wage["C3"] = "营销中心"
+    wage["D3"] = "本地化事业部"
+    wage["H3"] = 20
+    wage["A4"] = 3
+    wage["B4"] = "丙"
+    wage["C4"] = "项目中心"
+    wage["D4"] = "本地化事业部"
+    wage["H4"] = 30
+    chengdu = wb.create_sheet("202608成都")
+    chengdu["A1"] = "工资表"
+    chengdu["A2"] = "编制单位：甲骨易（北京）语言科技股份有限公司成都分公司"
+    chengdu["A3"] = "序号"
+    chengdu["B3"] = "姓名"
+    chengdu["C3"] = "部门"
+    chengdu["F3"] = "基本工资"
+    chengdu["A4"] = 1
+    chengdu["B4"] = "丁"
+    chengdu["C4"] = "财务中心"
+    chengdu["F4"] = 22
+    culture = wb.create_sheet("文化工资")
+    for i, h in enumerate(["序号", "姓名", "组织架构1", "组织架构2", "部门", "地区", "身份证号码", "基本工资"], 1):
+        culture.cell(1, i).value = h
+    culture["A2"] = 1
+    culture["B2"] = "戊"
+    culture["C2"] = "运营保障中心"
+    culture["D2"] = "运营保障中心"
+    culture["H2"] = 5
+    agency = wb.create_sheet("202608济南子")
+    agency["A1"] = "甲骨易（北京）语言科技股份有限公司8月对帐单"
+    agency["A2"] = "序号"
+    agency["B2"] = "姓名"
+    agency["H2"] = "养老保险"
+    agency["J2"] = "失业保险"
+    agency["L2"] = "工伤保险"
+    agency["M2"] = "医疗保险"
+    agency["O2"] = "公积金"
+    agency["A3"] = None
+    agency["H3"] = "雇主"
+    agency["A5"] = "1"
+    agency["B5"] = "己"
+    agency["H5"] = 3
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    wb.close()
+
+
+def test_payroll_maps_rd_localization_sichuan_and_skips_double_count(tmp_path: Path):
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [
+            ("550301", "工资", 10.0, None),
+            ("550101", "工资", 20.0, None),
+            ("540109", "工资", 30.0, None),
+        ],
+    )
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("550201", "工资", 99.0, None)],
+    )
+    _write_assist(
+        tmp_path / "wh_dept.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("550201", "工资", "本公司", 99.0, None)],
+    )
+    _write_agency_profit(
+        tmp_path / "sc.xlsx",
+        "甲骨易（北京）语言科技股份有限公司四川分公司",
+        "期间：2026年08月",
+        88.0,
+    )
+    _write_agency_profit(
+        tmp_path / "jn.xlsx",
+        "甲骨易(济南)科技有限公司",
+        "2026-08",
+        55.0,
+    )
+    _write_payroll(tmp_path / "202608_职工薪酬台账.xlsx")
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    tech = dept_col_letter(layout, "技术中心", 1)
+    local1 = dept_col_letter(layout, "本地化", 1)
+    local2 = dept_col_letter(layout, "本地化", 2)
+    yun = dept_col_letter(layout, "运营保障中心", 1)
+    finance = dept_col_letter(layout, "财务中心", 1)
+    sichuan = dept_col_letter(layout, "四川分公司", 1)
+    jinan_z = dept_col_letter(layout, "济南子公司", 1)
+    assert ws[f"{tech}{row['550301']}"].value == 10
+    assert ws[f"{local1}{row['550101']}"].value == 20
+    assert ws[f"{local2}{row['540109']}"].value == 30
+    assert ws[f"{yun}{row['550201']}"].value == 5
+    assert ws[f"{finance}{row['550201']}"].value == 22
+    assert ws[f"{sichuan}{row['550201']}"].value in (None, "")
+    assert ws[f"O{row['550201']}"].value == 22
+    assert ws[f"Q{row['540109']}"].value == 55
+    assert ws[f"{jinan_z}{row['540109']}"].value == 55
+    assert ws[f"{jinan_z}{row['54011101']}"].value == 3
+    pf = openpyxl.load_workbook(out)["利润表"]
+    assert pf["E1"].value == "山东26年 8月"
+    assert pf["H1"].value == "四川26年 8月"
+    assert pf["I1"].value == "济南子公司26年8月"
+    assert ws["A2"].font.name == "等线"
+    assert ws["A2"].font.bold is not True
+    assert ws["A2"].fill.fgColor.rgb.endswith("D6DCE4")
+    assert ws[f"C{row['540109']}"].fill.fgColor.rgb.endswith("E2EFDA")
+
+
+def test_resolve_dept_channel_and_localization():
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import resolve_dept, load_payroll_rules
+
+    rules = load_payroll_rules()
+    dept, occ, prefix = resolve_dept("渠道开发中心", "技术部", rules)
+    assert dept == "技术中心"
+    assert prefix is None
+    assert (rules.get("center_to_prefix") or {}).get("渠道开发中心") == "5503"
+    dept, occ, _ = resolve_dept("营销中心", "本地化事业部", rules)
+    assert dept == "本地化" and occ == 1
+    dept, occ, _ = resolve_dept("项目中心", "本地化事业部", rules)
+    assert dept == "本地化" and occ == 2
+    dept, _occ, prefix = resolve_dept("人力资源部", "", rules, entity="湖南分公司", extra_key="人力资源部")
+    assert dept == "湖南分公司" and prefix == "5502"
+
+
+def test_depreciation_amort_tax_finance_and_540103_forced_depts(tmp_path: Path):
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [
+            ("540103", "翻译语言服务", 40.0, None),
+            ("550252", "折旧费", 12.0, None),
+            ("550253", "无形资产摊销", 8.0, None),
+            ("550319", "折旧费", 3.0, None),
+            ("540201", "城市维护建设税", 5.0, None),
+            ("550404", "手续费", 7.0, None),
+        ],
+    )
+    _write_assist(
+        tmp_path / "hq_d.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [
+            ("540103", "翻译语言服务", "项目一组", 25.0, None),
+            ("540103", "翻译语言服务", "数据系统中心", 15.0, None),
+            ("550404", "手续费", "KA", 7.0, None),
+        ],
+    )
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("540201", "城市维护建设税", 2.0, None), ("550404", "手续费", 1.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    ws = openpyxl.load_workbook(out, data_only=False)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)
+    director = dept_col_letter(layout, "项目总监及助理", 1)
+    yizu = dept_col_letter(layout, "项目一组", 1)
+    data = dept_col_letter(layout, "数据系统中心", 1)
+    yun = dept_col_letter(layout, "运营保障中心", 1)
+    finance = dept_col_letter(layout, "财务中心", 1)
+    ka = dept_col_letter(layout, "KA", 1)
+    assert director and yun and finance
+    assert ws[f"{director}{row['540103']}"].value == 40
+    assert ws[f"{yizu}{row['540103']}"].value in (None, "")
+    assert ws[f"{data}{row['540103']}"].value in (None, "")
+    assert ws[f"{yun}{row['550252']}"].value == 12
+    assert ws[f"{yun}{row['550253']}"].value == 8
+    assert ws[f"{yun}{row['550319']}"].value == 3
+    assert ws[f"{finance}{row['540201']}"].value == 7
+    assert ws[f"{finance}{row['550404']}"].value == 8
+    assert ws[f"{ka}{row['550404']}"].value in (None, "")
+    book, _ = eval_workbook(openpyxl.load_workbook(out, data_only=False))
+    for code in ("540103", "550252", "550253", "550319", "540201", "550404"):
+        av = book.cell_value("损益表", row[code], 48)
+        assert abs(Decimal(str(av or 0))) <= Decimal("0.05"), code

@@ -130,6 +130,8 @@ def col_letter(idx: int) -> str:
 def money(value) -> Decimal | None:
     if value is None or str(value).strip() in {"", "-", "—", "None"}:
         return None
+    if hasattr(value, "year") and hasattr(value, "month") and not isinstance(value, Decimal):
+        return None
     try:
         return Decimal(str(value).replace(",", "")).quantize(MONEY_Q, rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError):

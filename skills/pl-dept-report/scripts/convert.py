@@ -41,13 +41,14 @@ def _reexec_repo_venv_if_needed() -> None:
 _reexec_repo_venv_if_needed()
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, Border, Side
+from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 from common import (
     CHECK_TOL,
     add_money,
     cell_num,
+    col_idx,
     default_desktop_dir,
     default_period,
     discover_input_dir,
@@ -63,6 +64,12 @@ from offline_profit import (
     apply_offline_profit,
     load_offline_rules,
     parse_agency_file,
+)
+from payroll_ledger import (
+    apply_payroll,
+    discover_payroll_files,
+    is_payroll_account_name,
+    parse_payroll_file,
 )
 from layout import (
     account_row_map,
@@ -84,6 +91,9 @@ from layout import (
 from parse_export import parse_inspected
 
 NF = r'_ * #,##0.00_ ;_ * \-#,##0.00_ ;_ * "-"??_ ;_ @_ '
+HEADER_FILL = PatternFill("solid", fgColor="D6DCE4")
+PAY_FILL = PatternFill("solid", fgColor="E2EFDA")
+PAY_ROW_EXTRA = ("大额互助", "补充医疗", "残保金", "其他奖金")
 THIN = Border(
     left=Side(style="thin", color="B0B0B0"),
     right=Side(style="thin", color="B0B0B0"),
@@ -180,12 +190,92 @@ def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict,
     return amounts
 
 
+def load_residual_rules() -> dict:
+    return load_json("残差归集.json")
+
+
+def match_residual_rule(code: str, name: str, rules: dict) -> dict | None:
+    for rule in rules.get("rules") or []:
+        if code in {str(c) for c in (rule.get("codes") or [])}:
+            return rule
+        if name in {str(n) for n in (rule.get("name_equals") or [])}:
+            return rule
+        if any(code.startswith(str(p)) for p in (rule.get("code_prefixes") or [])):
+            return rule
+    return None
+
+
+def leaf_left_nature(entity_amts: dict, code: str, layout: dict):
+    total = None
+    for bucket in (entity_amts or {}).values():
+        pair = (bucket or {}).get(code) or {}
+        if not isinstance(pair, dict):
+            continue
+        amt = nature_amount(code, pair.get("debit"), pair.get("credit"), layout)
+        if amt is not None:
+            total = add_money(total, amt)
+    return total
+
+
+def apply_residual_alloc(entity_amts: dict, dept_amts: dict, layout: dict, notes: list[str]) -> None:
+    """斯佳指定叶子：左列有数就整笔进固定部门，覆盖核算项目拆分。"""
+    rules = load_residual_rules()
+    kids = direct_children(layout)
+    names = layout_code_names(layout)
+    hits: list[str] = []
+    for acc in layout["accounts"]:
+        code = str(acc.get("code") or "")
+        if not code or kids.get(code):
+            continue
+        name = str(acc.get("name") or names.get(code) or "")
+        rule = match_residual_rule(code, name, rules)
+        if not rule:
+            continue
+        letter = dept_col_letter(layout, str(rule.get("excel_dept") or ""), 1)
+        if not letter:
+            continue
+        amt = leaf_left_nature(entity_amts, code, layout)
+        if amt is None:
+            continue
+        dept_amts[code] = {letter: amt}
+        hits.append(f"{code}->{rule.get('excel_dept')}")
+    if hits:
+        notes.append("残差归集=" + ",".join(hits))
+
+
+def rollup_entity_parents(entity_amts: dict, layout: dict) -> None:
+    """叶子有数、父行空着时，把子级加到父行，避免核对只剩部门合计。"""
+    kids = direct_children(layout)
+    codes = [str(a["code"]) for a in layout["accounts"] if a.get("code")]
+    for code in sorted(codes, key=len, reverse=True):
+        children = kids.get(code) or []
+        if not children:
+            continue
+        for bucket in entity_amts.values():
+            cell = bucket.get(code) or {}
+            if cell.get("debit") is not None or cell.get("credit") is not None:
+                continue
+            debit = None
+            credit = None
+            hit = False
+            for child in children:
+                pair = bucket.get(child) or {}
+                if pair.get("debit") is None and pair.get("credit") is None:
+                    continue
+                hit = True
+                debit = add_money(debit, pair.get("debit"))
+                credit = add_money(credit, pair.get("credit"))
+            if hit:
+                bucket[code] = {"debit": debit, "credit": credit}
+
+
 def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None:
     ws = wb.create_sheet("损益表", 0)
     ws.freeze_panes = layout.get("freeze") or "C3"
-    header_font = Font(name="等线", size=11, bold=True)
+    header_font = Font(name="等线", size=11, bold=False)
     parent_font = Font(name="宋体", size=10, bold=True)
     leaf_font = Font(name="等线", size=11, bold=False)
+    au_font = Font(name="宋体", size=10, bold=False)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left = Alignment(horizontal="left", vertical="center")
 
@@ -193,6 +283,8 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
     ws["B2"] = "科目名称"
     ws["A2"].font = header_font
     ws["B2"].font = header_font
+    ws["A2"].fill = HEADER_FILL
+    ws["B2"].fill = HEADER_FILL
     for pair in layout["entity_pairs"]:
         ws[f"{pair['debit']}2"] = "本期发生借方"
         ws[f"{pair['credit']}2"] = "本期发生贷方"
@@ -200,19 +292,26 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
         ws[f"{pair['credit']}2"].font = header_font
         ws[f"{pair['debit']}2"].alignment = center
         ws[f"{pair['credit']}2"].alignment = center
+        ws[f"{pair['debit']}2"].fill = HEADER_FILL
+        ws[f"{pair['credit']}2"].fill = HEADER_FILL
     ws["S2"] = "本期发生借方"
     ws["T2"] = "本期发生贷方"
     ws["S2"].font = header_font
     ws["T2"].font = header_font
+    ws["S2"].fill = HEADER_FILL
+    ws["T2"].fill = HEADER_FILL
     for name, letter in dept_columns(layout):
         cell = ws[f"{letter}2"]
         cell.value = name
         cell.font = header_font
         cell.alignment = center
+        cell.fill = HEADER_FILL
     ws["AU2"] = "费用合计"
     ws["AV2"] = "核对"
-    ws["AU2"].font = header_font
+    ws["AU2"].font = au_font
     ws["AV2"].font = header_font
+    ws["AU2"].fill = HEADER_FILL
+    ws["AV2"].fill = HEADER_FILL
 
     for group in layout.get("row1_groups") or []:
         start, end = group["start"], group["end"]
@@ -221,7 +320,12 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
         cell.value = group["label"]
         cell.font = header_font
         cell.alignment = center
+        cell.fill = HEADER_FILL
+        for col in range(col_idx(start), col_idx(end) + 1):
+            ws.cell(1, col).fill = HEADER_FILL
     ws.merge_cells("A1:B1")
+    ws["A1"].fill = HEADER_FILL
+    ws["B1"].fill = HEADER_FILL
 
     for letter, width in (layout.get("column_widths") or {}).items():
         ws.column_dimensions[letter].width = width
@@ -274,8 +378,14 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
         else:
             ws[f"AV{r}"] = f"=S{r}-AU{r}"
         ws[f"AV{r}"].number_format = NF
+        pay_row = is_payroll_account_name(str(acc.get("name") or "")) or any(
+            n in str(acc.get("name") or "") for n in PAY_ROW_EXTRA
+        )
         for col in range(1, 49):
-            ws.cell(r, col).border = THIN
+            cell = ws.cell(r, col)
+            cell.border = THIN
+            if pay_row:
+                cell.fill = PAY_FILL
 
 
 def profit_label_rows(layout: dict) -> dict[str, int]:
@@ -290,15 +400,23 @@ def write_profit_sheet(wb, layout: dict, period: str, current: dict, previous: d
     ws = wb.create_sheet("利润表", 1)
     header_font = Font(name="等线", size=11, bold=True)
     bold_font = Font(name="等线", size=11, bold=True)
-    normal = Font(name="等线", size=11, bold=False)
+    normal = Font(name="宋体", size=10, bold=False)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     y, m = int(period[:4]), int(period[4:6])
     prev = prev_period(period)
     py, pm = int(prev[:4]), int(prev[4:6])
     entities = layout["entities"]
+    short_name = {"山东分公司": "山东", "四川分公司": "四川"}
+
+    def profit_title(ent: str, year: int, month: int) -> str:
+        shown = short_name.get(ent, ent)
+        if ent == "济南子公司":
+            return f"{shown}{year % 100}年{month}月"
+        return f"{shown}{year % 100}年 {month}月"
+
     for j, ent in enumerate(entities):
-        ws.cell(1, 2 + j).value = f"{ent}{y % 100}年 {m}月"
-        ws.cell(1, 10 + j).value = f"{ent}{py % 100}年 {pm}月"
+        ws.cell(1, 2 + j).value = profit_title(ent, y, m)
+        ws.cell(1, 10 + j).value = profit_title(ent, py, pm)
         ws.cell(1, 2 + j).font = header_font
         ws.cell(1, 10 + j).font = header_font
         ws.cell(1, 2 + j).alignment = center
@@ -320,8 +438,6 @@ def write_profit_sheet(wb, layout: dict, period: str, current: dict, previous: d
         ws.cell(r, 1).value = label or None
         kind = spec.get("kind")
         bold = kind in {"operating", "total_profit", "actual_profit", "net_profit"} or label in {
-            "收入",
-            "成本",
             "利润总额",
             "净利润",
             "应交所得税",
@@ -724,6 +840,35 @@ def run(
         notes.append(dept_note)
     special_rules = load_ben_gongsi_rules()
     filled = accounts_as_bengongsi(entity_amts, dept_rows, special_rules, layout)
+    payroll_files = discover_payroll_files([input_dir, *extra_files], period)
+    payroll_parsed: dict = {}
+    if payroll_files:
+        payroll_parsed = parse_payroll_file(payroll_files[0], period)
+        if payroll_parsed.get("rows"):
+            pay_ent_names = {
+                (str(r.get("entity") or ""), str(r.get("name") or ""))
+                for r in payroll_parsed["rows"]
+            }
+            pay_ent_codes = {
+                (str(r.get("entity") or ""), str(r.get("code") or ""))
+                for r in payroll_parsed["rows"]
+            }
+
+            def _payroll_overlap(row: dict) -> bool:
+                ent = str(row.get("entity") or "")
+                code = str(row.get("code") or "")
+                name = str(row.get("name") or "")
+                return (ent, code) in pay_ent_codes or (ent, name) in pay_ent_names
+
+            kept = [row for row in filled if not _payroll_overlap(row)]
+            if len(kept) != len(filled):
+                notes.append("薪酬台账优先，本公司工资社保改走台账")
+            filled = kept
+            dept_rows = [
+                row
+                for row in dept_rows
+                if str(row.get("dept") or "") != "本公司" or not _payroll_overlap(row)
+            ]
     if filled:
         by_ent = sorted({str(r.get("entity") or "") for r in filled if r.get("entity")})
         notes.append("本公司费用改从科目余额填右列=" + ",".join(by_ent))
@@ -747,6 +892,14 @@ def run(
             break
     report_tmp: dict = {}
     dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp, special_rules)
+    payroll_covered: set[str] = set()
+    payroll_codes: dict[str, set[str]] = {}
+    if payroll_parsed.get("rows"):
+        payroll_covered, payroll_codes = apply_payroll(
+            entity_amts, dept_amts, payroll_parsed, layout, notes, report_tmp
+        )
+        if payroll_covered:
+            notes[:] = [n for n in notes if "总部工资社保无部门辅助" not in n]
 
     prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
     profit_prev = load_prev_profit(prev_xlsx if prev_xlsx.is_file() else None, layout)
@@ -758,7 +911,16 @@ def run(
     offline_records = []
     if not skip_offline:
         offline_records = collect_offline_records(inspected, extra_files, period, notes)
-        apply_offline_profit(entity_amts, dept_amts, profit_cur, offline_records, period, notes)
+        apply_offline_profit(
+            entity_amts,
+            dept_amts,
+            profit_cur,
+            offline_records,
+            period,
+            notes,
+            skip_split_entities=payroll_covered,
+            skip_split_codes=payroll_codes,
+        )
         needed = (load_offline_rules().get("entities") or [])
         have = {r.get("entity") for r in offline_records}
         missing_off = [e for e in needed if e not in have]
@@ -766,6 +928,8 @@ def run(
             notes.append("缺线下利润表=" + ",".join(missing_off))
     else:
         notes.append("线下利润表=跳过")
+    apply_residual_alloc(entity_amts, dept_amts, layout, notes)
+    rollup_entity_parents(entity_amts, layout)
     if not any(profit_prev.get(e) for e in layout["entities"]):
         notes.append("无上月列")
 
@@ -814,7 +978,7 @@ def run(
         asks.append(
             f"缺{names}的代账利润表（小企业利润表，有本月金额）。损益表成品不能当源。请把表放到文件夹或告诉我路径；若先不处理这几家，说一声我留空。"
         )
-    if any("总部工资社保无部门辅助" in n for n in notes):
+    if any("总部工资社保无部门辅助" in n for n in notes) and not payroll_covered:
         asks.append("总部核算项目余额表和凭证都没有把工资/社保挂到部门。这些格子请给拆分表或手填，不要拿做好的损益表倒填。")
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
@@ -844,6 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="")
     parser.add_argument("--no-api", action="store_true")
     parser.add_argument("--offline-xlsx", action="append", default=[])
+    parser.add_argument("--payroll-xlsx", action="append", default=[])
     parser.add_argument("--skip-offline", action="store_true")
     args = parser.parse_args(argv)
     period = parse_period(args.period)
@@ -857,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         input_dir,
         out,
         bool(args.no_api) or os.environ.get("PL_DEPT_SKIP_API") == "1",
-        offline_xlsx=args.offline_xlsx,
+        offline_xlsx=list(args.offline_xlsx or []) + list(args.payroll_xlsx or []),
         skip_offline=bool(args.skip_offline),
     )
 

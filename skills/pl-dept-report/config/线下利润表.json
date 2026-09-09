@@ -36,7 +36,7 @@
       "管理费用": {
         "parent": "5502",
         "leaf": "550201",
-        "excel_dept": "四川分公司",
+        "excel_dept": "财务中心",
         "side": "debit"
       }
     },
