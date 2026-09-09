@@ -12,6 +12,7 @@ import time
 from common import add_money, money
 from kingdee_client import get_app_token, request, rows_from
 from layout import load_layout, parent_code
+from rent_abstract import lines_from_entries
 
 
 def _item_name(row: dict) -> str:
@@ -187,6 +188,7 @@ def fetch_vouchers_pl(creds: dict, token: str, period: str, layout: dict) -> dic
     ids, notes = _voucher_ids(creds, token, period)
     accounts: dict[str, dict] = {}
     depts: list[dict] = []
+    rent_entries: list[dict] = []
     ok = 0
     miss = 0
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -222,11 +224,18 @@ def fetch_vouchers_pl(creds: dict, token: str, period: str, layout: dict) -> dic
                 dept = _dept_from_assist(entry.get("assist"))
                 if dept and acc in codes:
                     depts.append({"code": acc, "dept": dept, "debit": debit, "credit": credit, "entity": "甲骨易"})
+                if acc.startswith("550212") or "房租" in str(entry.get("account_name") or entry.get("name") or ""):
+                    rent_entries.append(entry)
     notes.append(f"voucher_detail_ok={ok}")
     notes.append(f"voucher_detail_miss={miss}")
     notes.append(f"hq_account_codes={len(accounts)}")
     notes.append(f"hq_dept_lines={len(depts)}")
-    return {"accounts": accounts, "depts": depts, "notes": notes}
+    return {
+        "accounts": accounts,
+        "depts": depts,
+        "notes": notes,
+        "rent_lines": lines_from_entries(rent_entries),
+    }
 
 
 def fetch_departments(creds: dict, token: str) -> list[dict]:
@@ -285,7 +294,22 @@ def load_hq_cache(period: str) -> dict | None:
     profit = {}
     for k, v in (raw.get("profit") or {}).items():
         profit[k] = money(v)
-    return {"accounts": accounts, "depts": depts, "profit": profit, "notes": raw.get("notes") or ["hq_cache"]}
+    rent_lines = []
+    for row in raw.get("rent_lines") or []:
+        rent_lines.append(
+            {
+                "code": row.get("code"),
+                "excel_dept": row.get("excel_dept"),
+                "amount": money(row.get("amount")),
+            }
+        )
+    return {
+        "accounts": accounts,
+        "depts": depts,
+        "profit": profit,
+        "notes": raw.get("notes") or ["hq_cache"],
+        "rent_lines": rent_lines,
+    }
 
 
 def save_hq_cache(period: str, payload: dict) -> None:
@@ -311,6 +335,14 @@ def save_hq_cache(period: str, payload: dict) -> None:
             for r in (payload.get("depts") or [])
         ],
         "profit": {k: str(v) for k, v in (payload.get("profit") or {}).items() if v is not None},
+        "rent_lines": [
+            {
+                "code": r.get("code"),
+                "excel_dept": r.get("excel_dept"),
+                "amount": str(r["amount"]) if r.get("amount") is not None else None,
+            }
+            for r in (payload.get("rent_lines") or [])
+        ],
     }
     path.write_text(json.dumps(dump, ensure_ascii=False), encoding="utf-8")
     path.chmod(0o600)
@@ -328,6 +360,7 @@ def fetch_hq(period: str, creds: dict, *, ledger: bool = True) -> dict:
     accounts: dict = {}
     depts: list = []
     depts_master: list = []
+    rent_lines: list = []
     if ledger:
         cached = None if os.environ.get("PL_DEPT_USE_CACHE") == "0" else load_hq_cache(period)
         if cached and cached.get("accounts"):
@@ -340,6 +373,7 @@ def fetch_hq(period: str, creds: dict, *, ledger: bool = True) -> dict:
                 "profit": profit,
                 "notes": notes,
                 "department_master": [],
+                "rent_lines": cached.get("rent_lines") or [],
             }
         bal_rows, bal_err = fetch_account_balance(creds, token, period)
         if bal_err:
@@ -347,6 +381,7 @@ def fetch_hq(period: str, creds: dict, *, ledger: bool = True) -> dict:
             scanned = fetch_vouchers_pl(creds, token, period, layout)
             accounts = scanned["accounts"]
             depts = scanned["depts"]
+            rent_lines = scanned.get("rent_lines") or []
             notes.extend(scanned.get("notes") or [])
         else:
             notes.append(f"account_balance_rows={len(bal_rows)}")
@@ -360,6 +395,7 @@ def fetch_hq(period: str, creds: dict, *, ledger: bool = True) -> dict:
                 }
             scanned = fetch_vouchers_pl(creds, token, period, layout)
             depts = scanned["depts"]
+            rent_lines = scanned.get("rent_lines") or []
             notes.append("assist_openapi_skipped")
             notes.extend(scanned.get("notes") or [])
         depts_master = fetch_departments(creds, token)
@@ -371,6 +407,7 @@ def fetch_hq(period: str, creds: dict, *, ledger: bool = True) -> dict:
         "profit": profit,
         "notes": notes,
         "department_master": depts_master if ledger else [],
+        "rent_lines": rent_lines,
     }
     if ledger and accounts:
         save_hq_cache(period, result)

@@ -263,6 +263,8 @@ def apply_offline_profit(
                 continue
             if not spec:
                 continue
+            if spec.get("profit_only"):
+                continue
             parent = spec.get("parent")
             leaf = spec.get("leaf") or parent
             dump = writable_leaf(leaf, layout) if leaf else leaf

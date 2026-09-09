@@ -65,6 +65,7 @@ from offline_profit import (
     load_offline_rules,
     parse_agency_file,
 )
+from rent_abstract import apply_rent_abstract_split, collect_rent_from_dir
 from payroll_ledger import (
     apply_payroll,
     discover_payroll_files,
@@ -107,12 +108,12 @@ def is_income(code: str, layout: dict) -> bool:
 
 
 def nature_amount(code: str, debit, credit, layout: dict):
+    """与核对公式同口径：收入取贷方发生，费用取借方发生。结转后借贷同额不再净成 0。"""
     if debit is None and credit is None:
         return None
-    d = debit or Decimal("0")
-    c = credit or Decimal("0")
-    net = (c - d) if is_income(code, layout) else (d - c)
-    return net
+    if is_income(code, layout):
+        return None if credit is None else Decimal(str(credit))
+    return None if debit is None else Decimal(str(debit))
 
 
 def load_prev_profit(path: Path | None, layout: dict) -> dict[str, dict]:
@@ -150,12 +151,21 @@ def pick_dept_rows(folded_depts: list[dict], api_depts: list[dict], hq_from_api:
     return others + file_hq + list(api_depts or []), None
 
 
-def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict, special_rules: dict | None = None):
+def merge_dept_rows(
+    rows: list[dict],
+    layout: dict,
+    mapping: dict,
+    report: dict,
+    special_rules: dict | None = None,
+    entity_amts: dict | None = None,
+):
     kids = direct_children(layout)
     amounts: dict[str, dict[str, Decimal]] = {}
     unmapped: list[str] = []
     seen_unmapped: set[str] = set()
+    blocked: dict[str, Decimal] = {}
     special_rules = special_rules or {}
+    entity_amts = entity_amts or {}
     for row in rows:
         code = str(row.get("code") or "").strip()
         if not code:
@@ -174,6 +184,11 @@ def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict,
             excel_dept = map_dept_name(archive, mapping, layout)
             letter = dept_col_letter(layout, excel_dept, 1) if excel_dept else None
         if not letter:
+            if amt and is_income(code, layout):
+                ent = str(row.get("entity") or "")
+                pair = (entity_amts.get(ent) or {}).get(code) or {}
+                if not pair.get("debit") and not pair.get("credit"):
+                    blocked[code] = add_money(blocked.get(code), amt)
             name = archive
             tag = f"{row.get('entity') or ''}:{name}" if name == "本公司" else name
             if tag and tag not in seen_unmapped and amt:
@@ -187,6 +202,7 @@ def merge_dept_rows(rows: list[dict], layout: dict, mapping: dict, report: dict,
         bucket = amounts.setdefault(code, {})
         bucket[letter] = (bucket.get(letter) or Decimal("0")) + amt
     report["unmapped_depts"] = unmapped
+    report["income_blocked"] = blocked
     return amounts
 
 
@@ -241,6 +257,117 @@ def apply_residual_alloc(entity_amts: dict, dept_amts: dict, layout: dict, notes
         hits.append(f"{code}->{rule.get('excel_dept')}")
     if hits:
         notes.append("残差归集=" + ",".join(hits))
+
+
+def apply_income_redirect(dept_amts: dict, layout: dict, notes: list[str]) -> None:
+    """收入行：金蝶档案挂到分公司列的，按金标改挂。费用列不动。"""
+    for rule in (load_residual_rules().get("income_dept_redirect") or []):
+        src = dept_col_letter(layout, str(rule.get("from_dept") or ""), 1)
+        dst = dept_col_letter(layout, str(rule.get("excel_dept") or ""), 1)
+        prefixes = [str(p) for p in (rule.get("prefixes") or ["51"])]
+        if not src or not dst or src == dst:
+            continue
+        moved = False
+        for code, bucket in dept_amts.items():
+            if not any(str(code).startswith(p) for p in prefixes):
+                continue
+            amt = bucket.get(src)
+            if amt is None:
+                continue
+            bucket[dst] = add_money(bucket.get(dst), amt)
+            del bucket[src]
+            moved = True
+        if moved:
+            notes.append(f"收入改挂={rule.get('from_dept')}->{rule.get('excel_dept')}")
+
+
+def apply_income_leftover(
+    entity_amts: dict,
+    dept_amts: dict,
+    layout: dict,
+    notes: list[str],
+    blocked: dict | None = None,
+) -> None:
+    """收入叶子：左列贷方合计比右列多出来的，进指定部门。不覆盖已拆的核算项目。"""
+    wrapped = {"rules": load_residual_rules().get("income_leftover") or []}
+    kids = direct_children(layout)
+    names = layout_code_names(layout)
+    hits: list[str] = []
+    for acc in layout["accounts"]:
+        code = str(acc.get("code") or "")
+        if not code or kids.get(code) or not is_income(code, layout):
+            continue
+        name = str(acc.get("name") or names.get(code) or "")
+        rule = match_residual_rule(code, name, wrapped)
+        if not rule:
+            continue
+        letter = dept_col_letter(layout, str(rule.get("excel_dept") or ""), 1)
+        if not letter:
+            continue
+        left = leaf_left_nature(entity_amts, code, layout)
+        extra = (blocked or {}).get(code)
+        left = add_money(left, extra)
+        if left is None:
+            continue
+        have = Decimal("0")
+        for val in (dept_amts.get(code) or {}).values():
+            if val is not None:
+                have += Decimal(str(val))
+        leftover = left - have
+        if abs(leftover) <= CHECK_TOL:
+            continue
+        bucket = dept_amts.setdefault(code, {})
+        bucket[letter] = add_money(bucket.get(letter), leftover)
+        hits.append(f"{code}->{rule.get('excel_dept')}")
+    if hits:
+        notes.append("收入残差=" + ",".join(hits))
+
+
+def _entity_nature_tree(entity_amts: dict, ent: str, code: str, layout: dict):
+    kids = direct_children(layout)
+    pair = (entity_amts.get(ent) or {}).get(code) or {}
+    amt = nature_amount(code, pair.get("debit"), pair.get("credit"), layout)
+    if amt is not None:
+        return amt
+    total = None
+    for child in kids.get(code) or []:
+        total = add_money(total, _entity_nature_tree(entity_amts, ent, child, layout))
+    return total
+
+
+def apply_jinan_service_leftover(
+    entity_amts: dict,
+    dept_amts: dict,
+    offline_records: list[dict],
+    layout: dict,
+    notes: list[str],
+) -> None:
+    """济南：服务费 = 代账管理费用 − 工资 − 社保。只加济南列，不覆盖总部人力。"""
+    mgmt = None
+    for rec in offline_records or []:
+        if rec.get("entity") != "济南子公司":
+            continue
+        raw = (rec.get("values") or {}).get("管理费用")
+        mgmt = money(raw) if raw is not None else None
+        break
+    if mgmt is None:
+        return
+    wage = _entity_nature_tree(entity_amts, "济南子公司", "540109", layout) or Decimal("0")
+    si = _entity_nature_tree(entity_amts, "济南子公司", "540111", layout) or Decimal("0")
+    leftover = Decimal(str(mgmt)) - Decimal(str(wage)) - Decimal(str(si))
+    if abs(leftover) <= CHECK_TOL:
+        return
+    letter = dept_col_letter(layout, "济南子公司", 1)
+    if not letter:
+        return
+    cell = entity_amts.setdefault("济南子公司", {}).setdefault("540123", {"debit": None, "credit": None})
+    cell["debit"] = add_money(cell.get("debit"), leftover)
+    bucket = dept_amts.setdefault("540123", {})
+    bucket[letter] = add_money(bucket.get(letter), leftover)
+    if wage == 0 and si == 0:
+        notes.append("济南服务费=无薪酬整笔进服务费")
+    else:
+        notes.append("济南服务费=管理费用-工资-社保")
 
 
 def rollup_entity_parents(entity_amts: dict, layout: dict) -> None:
@@ -704,6 +831,7 @@ def run(
     amount_labels = {row["label"] for row in layout["profit_rows"] if row.get("kind") == "amount" and row.get("label")}
     hq_from_api = False
     api_depts = []
+    rent_lines: list[dict] = []
     profit_cur = {e: {} for e in layout["entities"]}
 
     if not no_api:
@@ -761,6 +889,7 @@ def run(
                     api_depts.append({**row, "code": target})
                 mapped = hq.get("profit") or {}
                 profit_cur["甲骨易"].update({k: v for k, v in mapped.items() if k in amount_labels})
+                rent_lines = list(hq.get("rent_lines") or [])
                 if hq.get("accounts"):
                     hq_from_api = True
                 try:
@@ -779,9 +908,35 @@ def run(
         notes.append("skip-api")
         prev_map = {}
 
+    if not rent_lines:
+        journal_paths: list[Path] = []
+        if input_dir.is_dir():
+            journal_paths.extend(
+                p
+                for p in input_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in {".xlsx", ".xlsm"}
+            )
+        for item in inspected:
+            p = Path(item.get("path") or "")
+            if p.is_file():
+                journal_paths.append(p)
+        for raw in extra_files:
+            p = Path(raw).expanduser()
+            if p.is_file():
+                journal_paths.append(p)
+            elif p.is_dir():
+                journal_paths.extend(p.rglob("*.xlsx"))
+                journal_paths.extend(p.rglob("*.xlsm"))
+        rent_lines = collect_rent_from_dir(journal_paths)
+
     prefix_remap_by_ent: dict[str, dict[str, str]] = {}
+    file_hq_accounts = (parsed.get("accounts") or {}).get("甲骨易") or {}
+    use_file_hq_left = bool(file_hq_accounts)
+    if hq_from_api and use_file_hq_left:
+        entity_amts["甲骨易"] = {}
+        notes.append("总部左列改用科目余额表引出")
     for ent, codes in (parsed.get("accounts") or {}).items():
-        if hq_from_api and ent == "甲骨易":
+        if hq_from_api and ent == "甲骨易" and not use_file_hq_left:
             continue
         entity_amts.setdefault(ent, {})
         source_codes = set(codes)
@@ -891,7 +1046,9 @@ def run(
             notes.append("总部工资社保无部门辅助，右列未拆这些科目")
             break
     report_tmp: dict = {}
-    dept_amts = merge_dept_rows(dept_rows, layout, mapping, report_tmp, special_rules)
+    dept_amts = merge_dept_rows(
+        dept_rows, layout, mapping, report_tmp, special_rules, entity_amts
+    )
     payroll_covered: set[str] = set()
     payroll_codes: dict[str, set[str]] = {}
     if payroll_parsed.get("rows"):
@@ -928,7 +1085,13 @@ def run(
             notes.append("缺线下利润表=" + ",".join(missing_off))
     else:
         notes.append("线下利润表=跳过")
+    apply_jinan_service_leftover(entity_amts, dept_amts, offline_records, layout, notes)
     apply_residual_alloc(entity_amts, dept_amts, layout, notes)
+    apply_income_redirect(dept_amts, layout, notes)
+    apply_income_leftover(
+        entity_amts, dept_amts, layout, notes, report_tmp.get("income_blocked")
+    )
+    apply_rent_abstract_split(dept_amts, rent_lines, layout, notes)
     rollup_entity_parents(entity_amts, layout)
     if not any(profit_prev.get(e) for e in layout["entities"]):
         notes.append("无上月列")

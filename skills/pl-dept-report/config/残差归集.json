@@ -13,5 +13,30 @@
       "code_prefixes": ["5402", "5504"],
       "excel_dept": "财务中心"
     }
-  ]
+  ],
+  "income_dept_redirect": [
+    {
+      "prefixes": ["51"],
+      "from_dept": "济南分公司",
+      "excel_dept": "渠道开发中心"
+    }
+  ],
+  "income_leftover": [
+    {
+      "codes": ["5101"],
+      "excel_dept": "营销总监及助理"
+    },
+    {
+      "code_prefixes": ["5201"],
+      "excel_dept": "总经办"
+    }
+  ],
+  "rent_abstract": {
+    "code": "550212",
+    "from_dept": "运营保障中心",
+    "rules": [
+      {"contains": "深圳", "excel_dept": "广东分公司"},
+      {"contains": "长沙", "excel_dept": "湖南分公司"}
+    ]
+  }
 }

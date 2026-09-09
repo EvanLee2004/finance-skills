@@ -241,6 +241,21 @@ def dept_col_letter(layout: dict, excel_name: str, occurrence: int = 1) -> str |
     return None
 
 
+def _ben_gongsi_rule_matches(book: dict, code: str, name: str) -> bool:
+    for prefix in book.get("never_map_prefixes") or []:
+        if str(code).startswith(str(prefix)):
+            return False
+    for rule in book.get("rules") or []:
+        prefixes = [str(p) for p in (rule.get("prefixes") or [])]
+        needles = [str(n) for n in (rule.get("name_contains") or [])]
+        if prefixes and not any(str(code).startswith(p) for p in prefixes):
+            continue
+        if needles and not any(n in name for n in needles):
+            continue
+        return True
+    return False
+
+
 def load_ben_gongsi_rules() -> dict:
     return load_json("本公司规则.json")
 
@@ -290,13 +305,16 @@ def accounts_as_bengongsi(
     kids = direct_children(layout)
     names = layout_code_names(layout)
     have: set[tuple[str, str]] = set()
+    any_assist: set[tuple[str, str]] = set()
     for row in existing_dept_rows or []:
         ent = str(row.get("entity") or "")
         book = (special_rules.get("per_entity") or {}).get(ent) or {}
         source = str(book.get("source_dept") or "本公司")
+        code = str(row.get("code") or "").strip()
+        if code:
+            any_assist.add((ent, code))
         if str(row.get("dept") or "").strip() != source:
             continue
-        code = str(row.get("code") or "").strip()
         if code:
             have.add((ent, code))
     extra: list[dict] = []
@@ -315,6 +333,12 @@ def accounts_as_bengongsi(
                 continue
             if (ent, code) in have:
                 continue
+            if book.get("fill_skip_if_any_assist") and (ent, code) in any_assist:
+                continue
+            name = names.get(code) or ""
+            if book.get("fill_only_matching_rules") or book.get("fill_skip_if_any_assist"):
+                if not _ben_gongsi_rule_matches(book, code, name):
+                    continue
             extra.append(
                 {
                     "entity": ent,

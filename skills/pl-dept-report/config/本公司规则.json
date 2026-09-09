@@ -1,5 +1,5 @@
 {
-  "_comment": "文化和上海今年开不了部门辅助核算，核算项目只有本公司。禁止写进全局部门名映射。收入不进右列。规则按科目树+名称，不能整账塞视听/本地化。核算项目没有费用时，用科目余额当本公司再走下面规则。",
+  "_comment": "文化和上海今年开不了部门辅助核算，核算项目只有本公司。禁止写进全局部门名映射。收入不进视听/本地化；5101 本公司残差进营销总监及助理（残差归集.json）。规则按科目树+名称，不能整账塞视听/本地化。核算项目没有费用时，用科目余额当本公司再走下面规则。湖南分/子只补无辅助的办公费、房租，已有辅助不重复。",
   "per_entity": {
     "上海": {
       "source_dept": "本公司",
@@ -15,6 +15,11 @@
           "name_contains": ["差旅费", "招待费"],
           "excel_dept": "本地化",
           "occurrence": 1
+        },
+        {
+          "prefixes": ["5502"],
+          "name_contains": ["房租"],
+          "excel_dept": "运营保障中心"
         }
       ]
     },
@@ -43,8 +48,41 @@
         {
           "prefixes": ["5502"],
           "name_contains": ["工资", "社保", "社会保险", "住房公积金", "养老保险", "医疗保险", "失业保险", "工伤保险", "生育保险", "基本医疗保险"],
-          "excel_dept": "运营保障中心",
-          "occurrence": 1
+          "excel_dept": "运营保障中心"
+        },
+        {
+          "prefixes": ["5502"],
+          "name_contains": ["房租"],
+          "excel_dept": "运营保障中心"
+        },
+        {
+          "prefixes": ["5502"],
+          "name_contains": ["服务费"],
+          "excel_dept": "人力资源部"
+        }
+      ]
+    },
+    "湖南分公司": {
+      "source_dept": "本公司",
+      "fill_from_accounts_when_assist_lacks_code": true,
+      "fill_skip_if_any_assist": true,
+      "never_map_prefixes": ["51", "52", "53"],
+      "rules": [
+        {
+          "name_contains": ["办公费", "房租"],
+          "excel_dept": "湖南分公司"
+        }
+      ]
+    },
+    "湖南子公司": {
+      "source_dept": "本公司",
+      "fill_from_accounts_when_assist_lacks_code": true,
+      "fill_skip_if_any_assist": true,
+      "never_map_prefixes": ["51", "52", "53"],
+      "rules": [
+        {
+          "name_contains": ["办公费", "房租"],
+          "excel_dept": "湖南子公司"
         }
       ]
     }
