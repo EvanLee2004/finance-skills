@@ -21,7 +21,9 @@
     "xlsx",
     "docx",
     "pptx",
-    "pdf",
+    "pdf"
+  ],
+  "remove_retired": [
     "env-doctor"
   ],
   "protected_from_overwrite": [],

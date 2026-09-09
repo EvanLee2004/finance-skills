@@ -11,7 +11,7 @@ description: >-
 
 把她每月发的 Excel 序时账抄进金蝶官方「凭证引入」模板。金额、借贷、凭证号只由 `scripts/convert.py` 写。人过目后自己去金蝶点引入。
 
-湖南分公司抄作业走本技能，**不要**走 `kingdee-posting`（那是总部销项/付款/收款）。
+湖南分公司抄作业走本技能，**不要**走 `kingdee-posting`（那是总部销项/付款/收款）。本技能不登智云、不读 `kingdee.local.json` / `zhiyun.local.json` / `xingchen.local.json`。缺库当场清华镜像装，失败再阿里 / 中科大 / 默认源。
 
 ## 启动时说
 

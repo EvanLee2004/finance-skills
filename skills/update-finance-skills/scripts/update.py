@@ -65,9 +65,18 @@ def apply_update(src_skills: Path, dest_skills: Path, pack: dict[str, Any]) -> d
         "missing_in_source": [],
         "config_kept": [],
         "root_files": [],
+        "removed": [],
     }
     dest_skills.mkdir(parents=True, exist_ok=True)
     protected = set(pack.get("protected_from_overwrite") or [])
+    whitelist = set(pack["whitelist"])
+    for skill_id in pack.get("remove_retired") or []:
+        if not skill_id or skill_id in whitelist:
+            continue
+        dest_skill = dest_skills / skill_id
+        if dest_skill.is_dir():
+            shutil.rmtree(dest_skill)
+            report["removed"].append(skill_id)
 
     for skill_id in pack["whitelist"]:
         src_skill = src_skills / skill_id
@@ -153,6 +162,7 @@ def format_report(report: dict[str, list[str]], sha: str, remote: str, dest: Pat
         f"新装：{', '.join(report['installed']) or '无'}",
         f"跳过（保护名单）：{', '.join(report['skipped_protected']) or '无'}",
         f"本地 config 保留：{', '.join(report['config_kept']) or '无'}",
+        f"已下线并删除：{', '.join(report.get('removed') or []) or '无'}",
         "白名单外其他技能：未动",
         "请重启 opencode。",
     ]

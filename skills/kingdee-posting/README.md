@@ -113,8 +113,8 @@ flowchart TD
 | `config/职员挂靠.json` | 童睿智、赵贺斌 → 郑瑞 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
 | `config/业务规则.md` · `config/场景/` | 人话口径（数字以 json 为准） |
-| 本机 `~/.config/finance/kingdee.local.json` | 开放平台应用号；**不进 git、更新不覆盖** |
-| 本机 `~/.config/finance/zhiyun.local.json` | 智云账号；**不进 git、更新不覆盖** |
+| 本机 `~/.config/finance/kingdee.local.json` | 开放平台应用号；**三入口都用**；不进 git、更新不覆盖 |
+| 本机 `~/.config/finance/zhiyun.local.json` | 智云账号；**只有收款、且由 convert.py 读**；销项/付款禁止打开 |
 
 ## 8. 怎么跑
 
@@ -133,7 +133,7 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <目录> --scene 销�
 - 销项：不读下单号/合同号；科目抄余额表；组织架构优先；凭证号默认当月最大 + 1
 - 付款：按表头认三列表；专票拆进项、普票全额；一对多→9999
 - 收款：读中行收款或单独收款表；表上销售优先；海淀不并 0386；没智云仍出明细；记账日=表上收款日；部门可回退职员档案
-- 无金蝶应用号、档案失败或当月凭证号查不到时不得出引入表
+- 无金蝶应用号、档案失败或当月凭证号查不到时不得出引入表。智云失败不是停表理由
 
 ## 10. 数据红线与已知边界
 

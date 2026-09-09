@@ -87,13 +87,12 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 > **规划中（未建 skill）**：销售反馈汇总 等。  
 > **已下线 / 迁出**：`payroll-info-match`、`insurance-fund-merge`（不做）；`bank-income-extract` 已改独立 Windows exe（日记账挑收入），不再随本包维护。
 
-### 行为 / 环境 · 3 个
+### 行为 · 2 个
 
 | skill | 解决什么 | 状态 |
 |-------|----------|------|
 | [update-finance-skills](skills/update-finance-skills/) | **更新财务skills**：说「更新」从 **Gitee** 拉官方包；核销跟 main；也回答「该用哪个」 | ✅ 脚本 + 测 |
 | [task-clarifier](skills/task-clarifier/) | **理清需求**：需求含糊时先用带选项的选择题问清「要干啥 / 文件在哪 / 口径」，再动手——绝不猜 | ✅ 已入包（改编自 trailofbits/skills，CC BY-SA 4.0） |
-| [env-doctor](skills/env-doctor/) | **环境管家**：缺 Python 库 / LibreOffice·poppler·tesseract / Python 版本太老时，查《依赖与安装清单》按**国内镜像优先**装齐再重试。纯提示词、不碰业务数据 | ✅ 清单覆盖全包技能 · 清华镜像实装验证 · 已入包 |
 
 ### 通用基座（处理四类文档；改自 Anthropic 官方 office skills）· 4 个
 
@@ -104,11 +103,9 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 | [docx](skills/docx/) | **Word 文档**：创建/编辑/解析 .docx，批注修订、插图、提正文 | ✅ 已入库 · 已入包 |
 | [pptx](skills/pptx/) | **PPT 演示文稿**：做幻灯片、改模板、抽正文、合并拆分 deck | ✅ 已入库 · 已入包 |
 
-**合计：13 业务 + 3 行为/环境（含更新）+ 4 基座 = 20（更新白名单）。** `project-detail-to-ledger` 在仓内但不进白名单，直至另定。
+**合计：13 业务 + 2 行为（含更新）+ 4 基座 = 19（更新白名单）。** `env-doctor` 已下线。`project-detail-to-ledger` 在仓内但不进白名单，直至另定。
 
-> **环境依赖（部署到同事机器时注意）**：① 四类通用基座的"校验"脚本 `office/validate.py` 用了 `match` 语法，**需 Python ≥3.10**（3.9 会报 SyntaxError）——核心读写不受影响，仅可选校验步骤受限。② `xlsx/recalc.py`、`pptx/thumbnail.py`、`docx/accept_changes.py` 依赖 **LibreOffice（soffice）**重算/转图/接受修订；没装 LibreOffice 时这几个功能降级，openpyxl/python-docx/pypdf 的基本读写仍正常。  
-> **以上环境问题统一交给 `env-doctor` 处理**——任何技能缺库/缺工具，agent 查它的清单按国内镜像装齐再重试。  
-> 应收核销日清另依赖 **`xlrd`**（老式 `.xls` 日记账）；安装提示词见使用手册。
+> **环境依赖**：缺库在当前技能里装，顺序清华 → 阿里 → 中科大 → 默认源。清单见 `docs/依赖安装.md`。① office 可选校验需 Python ≥3.10。② LibreOffice 只影响重算/转图/接受修订。③ 核销日清另要 **`xlrd`**。
 
 ## 每个 skill 长什么样（标准）
 
@@ -182,7 +179,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 
 Agent 走 `update-finance-skills`：从 **Gitee** `main` 拉最新 → 只覆盖白名单 → 保留本机 `config/`（核销业务规则跟仓库） → **不动你自己做的其他 skill** → 汇报 SHA → 你重启 opencode。
 
-完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v21 第三节 B 段一致）。
+完整规则与长提示词见 **[SOURCE.md](./SOURCE.md) 第四节**（与手册 v22 第三节 B 段一致）。
 
 ### 开发机已 clone 时（可选手工）
 
@@ -212,7 +209,7 @@ git log -1 --oneline
 - 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、kingdee-gl-import、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、kingdee-gl-import、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf
 （另：把「财务技能包_来源与更新.md」放到 skills 目录根。）
 
 【装到哪】

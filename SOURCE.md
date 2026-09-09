@@ -50,8 +50,9 @@
 目录里每个官方 skill 一个夹（如 `labor-invoice-check`、`ar-hexiao-daily`）。  
 **更新只动财务包白名单夹**；同事自己装的其他 skill 不许删、不许改、不许挪。
 
-**财务包白名单（20）**  
-`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `qige-invoice-to-kingdee` · `kingdee-posting` · `kingdee-gl-import` · `pl-dept-report` · `update-finance-skills` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf` · `env-doctor`
+**财务包白名单（19）**  
+`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `qige-invoice-to-kingdee` · `kingdee-posting` · `kingdee-gl-import` · `pl-dept-report` · `update-finance-skills` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf`  
+已下线 `env-doctor`，更新时从本机删掉。
 
 **核销跟 main**：李尚最新已于 2026-08-17 合入 `main`。更新时覆盖 `ar-hexiao-daily`（含仓内 `config/` 业务规则）。凭据只留 `*.local.json`，不进仓。正本名单见 `skills/update-finance-skills/config/pack.json`。
 
@@ -104,7 +105,7 @@
 - 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
 
 【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、kingdee-gl-import、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf、env-doctor
+receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、kingdee-gl-import、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf
 （另：把「财务技能包_来源与更新.md」「财务技能_说什么用哪个.md」放到 skills 目录根。核销已合入 main，更新时覆盖。）
 
 【装到哪】

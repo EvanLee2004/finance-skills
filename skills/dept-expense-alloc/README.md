@@ -84,7 +84,7 @@ python3 scripts/allocate.py --input-dir <当月材料文件夹> --out <部门科
 python3 tests/test_robustness.py     # 回归
 ```
 
-依赖：`pip install openpyxl xlrd pandas`（跑不起来就说「配下环境」，交给 `env-doctor`）
+依赖：缺库当场 `python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple openpyxl xlrd pandas`（清华失败换阿里，再默认源）。不要另开环境管家。
 
 ## 9. 验收口径
 

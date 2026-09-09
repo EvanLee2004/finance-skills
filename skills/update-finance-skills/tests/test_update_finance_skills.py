@@ -60,7 +60,9 @@ def test_pack_json_lists_gitee_and_hexiao_on_main():
     assert "ar-hexiao-daily" in pack["whitelist"]
     assert "pl-dept-report" in pack["whitelist"]
     assert "kingdee-gl-import" in pack["whitelist"]
-    assert len(pack["whitelist"]) == 20
+    assert "env-doctor" not in pack["whitelist"]
+    assert pack.get("remove_retired") == ["env-doctor"]
+    assert len(pack["whitelist"]) == 19
 
 
 def test_updates_existing_hexiao_including_config(tmp_path: Path):
@@ -109,6 +111,19 @@ def test_does_not_touch_colleague_extra_skill(tmp_path: Path):
     assert (dest / "my-own-skill" / "SKILL.md").read_text(encoding="utf-8") == "keep-me\n"
 
 
+def test_removes_retired_env_doctor_only(tmp_path: Path):
+    src, pack, dest = _fake_pack(tmp_path)
+    pack["remove_retired"] = ["env-doctor"]
+    _write(dest / "env-doctor" / "SKILL.md", "old-doctor\n")
+    _write(dest / "my-own-skill" / "SKILL.md", "keep-me\n")
+
+    report = upd.apply_update(src, dest, pack)
+
+    assert "env-doctor" in report["removed"]
+    assert not (dest / "env-doctor").exists()
+    assert (dest / "my-own-skill" / "SKILL.md").read_text(encoding="utf-8") == "keep-me\n"
+
+
 def test_copies_router_files_to_skills_root(tmp_path: Path):
     src, pack, dest = _fake_pack(tmp_path)
 
@@ -134,3 +149,7 @@ def test_router_card_covers_spoken_jobs():
     card = (SKILL.parent / "财务技能_说什么用哪个.md").read_text(encoding="utf-8")
     for phrase in ("更新财务skills", "跑本周应收", "跑昨天的核销", "琪哥发票入金蝶", "九点下单"):
         assert phrase in card, phrase
+    assert "| env-doctor |" not in card
+    assert "转 env-doctor" not in card
+    assert "清华" in card
+    assert "kingdee.local.json" in card

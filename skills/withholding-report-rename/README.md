@@ -88,7 +88,7 @@ python3 scripts/rename.py --input <PDF文件夹>                    # copy 模�
 python3 tests/test_rename.py                                     # 回归
 ```
 
-依赖：`pdfplumber`（跑不起来说「配下环境」，交给 `env-doctor`）
+依赖：`pdfplumber`。缺了当场清华镜像装，失败再阿里 / 默认源。不要另开环境管家。
 
 ## 9. 验收口径
 

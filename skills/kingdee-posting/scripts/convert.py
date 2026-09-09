@@ -1255,6 +1255,8 @@ def main(argv=None) -> int:
         else:
             reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
             log(f"智云查找未核验（{reason}）；缺销售的行将待确认，其余仍出表。")
+    elif scene in ("销项发票", "付款"):
+        log("本模块不登录智云。")
     start_no = args.start_voucher_no
     if start_no is None:
         period = (args.date or date.today().isoformat())[:7]

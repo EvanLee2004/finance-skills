@@ -28,7 +28,7 @@ description: >-
 2. **凭据**（二选一，**勿把密码写进对话记录**）：
    - 本机 `config.local.json`（从 `config/config.local.example.json` 复制到 skill 根目录 `config.local.json`，填 username/password）
    - 环境变量 `ZHIYUN_USER` + `ZHIYUN_PASSWORD`
-3. 依赖：`playwright` + chromium、`requests`、`openpyxl`（缺了让 env-doctor 或 `pip install playwright requests openpyxl && playwright install chromium`）
+3. 依赖：`playwright` + chromium、`requests`、`openpyxl`。缺了当场清华镜像装，失败再阿里 / 中科大 / 默认源，再 `python3 -m playwright install chromium`。不要另开环境管家，不要读 `kingdee.local.json` / `xingchen.local.json`。
 
 ## 你（agent）该怎么干
 

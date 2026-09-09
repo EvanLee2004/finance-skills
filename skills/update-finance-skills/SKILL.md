@@ -49,8 +49,10 @@ Windows 同事的目录一般是 `%USERPROFILE%\.config\opencode\skills\`。找�
 | 跑昨天的核销 / 日清 / 重扫挂账 | `ar-hexiao-daily`（只跑，不覆盖她本机那份） |
 | 九点下单 / 跑下单汇总 | `order-daily-summary` |
 | 销项发票入金蝶 / 付款入金蝶 / 收款入金蝶 / 琪哥发票入金蝶 | `kingdee-posting`（旧触发仍可进销项） |
+| 序时账入金蝶 / 抄作业入金蝶 | `kingdee-gl-import` |
+| 月度损益表 / 科目余额表 | `pl-dept-report` |
 | 帮我理清需求 / 我不知道怎么说 | `task-clarifier` |
-| 配下环境 / 缺库跑不起来 | `env-doctor` |
+| 配下环境 / 缺库跑不起来 | **不是技能**。当场清华镜像装，失败再阿里 / 中科大 / 默认源。本机若还剩 `env-doctor` 夹，当废纸 |
 | 做 Excel / 改这张表（零散、不够独立技能） | `xlsx` |
 | 做 Word / 改这份 Word | `docx` |
 | 做 PPT | `pptx` |
