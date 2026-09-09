@@ -110,7 +110,7 @@ flowchart TD
 | `config/申请人部门.json` | 销项申请人 → 部门编码（组织架构没有时才用） |
 | `config/列名别名.json` | 表头换了加别名 |
 | `config/客户别名.json` | 三户书面映射 |
-| `config/职员挂靠.json` | 童睿智、赵贺斌 → 郑瑞 |
+| `config/职员挂靠.json` | 童睿智、赵贺斌 → 郑瑞；Cathy Wang → 王艳玲 |
 | `config/申请人科目.json` | 申请人/销售 → 应收后两位；只在余额表多条 1131 时拆腿 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
 | `config/业务规则.md` · `config/场景/` | 人话口径（数字以 json 为准） |

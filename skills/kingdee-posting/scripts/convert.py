@@ -631,6 +631,8 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             line.status, line.reason = "待确认", "缺申请人"
             lines.append(line)
             continue
+        applicant = names.hang_employee(applicant, hang)
+        line.extra["申请人"] = applicant
         dept = inspect_mod.dept_for_sales(
             applicant, org_map, box.applicant_dept, master.employee_dept_code(applicant, hang)
         )
@@ -970,6 +972,7 @@ def convert_receipt(
             line.status, line.reason = "待确认", swhy or "找不到销售"
             lines.append(line)
             continue
+        sales = names.hang_employee(sales, hang)
         ar, _rev, why = lookup_mod.pick_assist_account(
             cus_code, rec_day, rows, preferred_ar=preferred_ar_for(sales, hang)
         )

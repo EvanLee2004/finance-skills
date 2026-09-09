@@ -48,3 +48,5 @@ def test_person_and_police_flags():
     assert m.is_haidian_police("平度市公安局") is False
     assert m.hang_employee("童睿智", {"童睿智": "郑瑞"}) == "郑瑞"
     assert m.hang_employee("路人甲", {"童睿智": "郑瑞"}) == "路人甲"
+    assert m.hang_employee("Cathy Wang", {"Cathy Wang": "王艳玲"}) == "王艳玲"
+    assert m.hang_employee("CathyWang", {"Cathy Wang": "王艳玲"}) == "王艳玲"

@@ -1228,6 +1228,36 @@ def test_sales_hang_tong_zhao_to_zheng(tmp_path):
     kd.close()
 
 
+def test_receipt_hangs_cathy_wang_to_wangyanling(tmp_path):
+    _write_receipt(
+        tmp_path / "收款.xlsx",
+        [["2026-08-01", "甲科技有限公司", 10, "Cathy Wang", "", "113101"]],
+    )
+    result = _run(tmp_path, "收款")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    emps = [str(ws.cell(r, 25).value or "") for r in range(4, 6)]
+    depts = [str(ws.cell(r, 22).value or "") for r in range(4, 6)]
+    kd.close()
+    assert "王艳玲" in emps
+    assert "Cathy Wang" not in emps
+    assert "02" in depts
+
+
+def test_sales_hangs_cathy_wang_to_wangyanling(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(app="Cathy Wang")], with_org=False)
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    emps = [str(ws.cell(r, 25).value or "") for r in range(4, 7)]
+    depts = [str(ws.cell(r, 22).value or "") for r in range(4, 7)]
+    kd.close()
+    assert "王艳玲" in emps
+    assert "02" in depts
+
+
 def test_receipt_person_and_police(tmp_path):
     _write_receipt(
         tmp_path / "收款.xlsx",

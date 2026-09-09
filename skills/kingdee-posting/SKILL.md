@@ -89,7 +89,7 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene
 | `config/申请人部门.json` | 销项申请人 → 部门编码 | 销项 |
 | `config/列名别名.json` | 表头别名 | 三入口 |
 | `config/客户别名.json` | 三户书面映射 | 三入口 |
-| `config/职员挂靠.json` | 童睿智/赵贺斌→郑瑞 | 三入口 |
+| `config/职员挂靠.json` | 童睿智/赵贺斌→郑瑞；Cathy Wang→王艳玲 | 三入口 |
 | `config/申请人科目.json` | 申请人/销售 → 应收后两位（多条 1131 时拆腿） | 销项 / 收款 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 | 三入口 |
 | 本机 `kingdee.local.json` | 开放平台应用号；不进仓 | **三入口都要** |

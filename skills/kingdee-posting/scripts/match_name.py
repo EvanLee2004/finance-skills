@@ -49,7 +49,19 @@ def maps_to_police_ministry(name: str, applicant: str = "") -> bool:
 
 def hang_employee(name: str, mapping: dict[str, str]) -> str:
     raw = (name or "").strip()
-    return (mapping.get(raw) or mapping.get(norm_name(raw)) or raw).strip()
+    if not raw:
+        return raw
+    if raw in mapping:
+        return str(mapping[raw]).strip()
+    folded = norm_name(raw)
+    if folded in mapping:
+        return str(mapping[folded]).strip()
+    for key, dest in (mapping or {}).items():
+        if str(key).startswith("_") or not dest:
+            continue
+        if norm_name(str(key)) == folded:
+            return str(dest).strip()
+    return raw
 
 
 @dataclass
