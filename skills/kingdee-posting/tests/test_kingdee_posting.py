@@ -38,11 +38,16 @@ def _master():
             {"code": "011", "name": "陈霞"},
             {"code": "113", "name": "项目总监"},
             {"code": "205", "name": "郑瑞"},
+            {"code": "044", "name": "王艳玲"},
+            {"code": "099", "name": "高洋"},
+            {"code": "012", "name": "孙苗红"},
         ],
         "department": [
             {"code": "15", "name": "本地化事业部"},
             {"code": "0405", "name": "项目总监及助理"},
             {"code": "0308", "name": "商务中心"},
+            {"code": "0302", "name": "营销二部"},
+            {"code": "02", "name": "总经办"},
         ],
         "customer": [
             {"code": "1001", "name": "甲科技有限公司"},
@@ -52,6 +57,7 @@ def _master():
             {"code": "0582", "name": "个人"},
             {"code": "0386", "name": "公安部"},
             {"code": "1940", "name": "北京市公安局海淀分局"},
+            {"code": "3843", "name": "腾讯科技（深圳）有限公司"},
             {"code": "9001", "name": "乙科技有限公司乙科技有限公司"},
         ],
         "supplier": [{"code": "8001", "name": "北京某翻译店"}, {"code": "9999", "name": "其他供应商"}],
@@ -282,16 +288,16 @@ def test_sales_no_invoice_no_column(tmp_path):
     assert result["bookable_count"] == 1
 
 
-def test_sales_no_business_line_holds(tmp_path):
+def test_sales_no_assist_row_uses_applicant_ar_when_in_archive(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()])
     result = _run(tmp_path, "销项发票", lookups=_lookups(ar_balance=[]))
-    assert result["bookable_count"] == 0
-    assert result["hold_count"] == 1
-    detail = load_workbook(result["detail_path"])
-    reason = str(detail.active.cell(2, 2).value or "")
-    detail.close()
-    assert "是否新建" in reason
-    assert "无业务线" not in reason
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    kd.close()
+    assert "113103" in accounts
+    assert "510103" in accounts
 
 
 def test_sales_unknown_customer_holds(tmp_path):
@@ -899,8 +905,8 @@ def test_sales_applicant_not_in_dept_table_holds(tmp_path):
     assert result["hold_count"] == 1
 
 
-def test_sales_multi_line_uses_period_debit(tmp_path):
-    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+def test_sales_multi_line_unmapped_applicant_holds(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(app="高洋")], with_org=False)
     result = _run(
         tmp_path,
         "销项发票",
@@ -908,10 +914,6 @@ def test_sales_multi_line_uses_period_debit(tmp_path):
             ar_balance=[
                 {"customer_code": "1001", "account": "113103", "balance": "1"},
                 {"customer_code": "1001", "account": "113102", "balance": "1"},
-            ],
-            period_debit=[
-                {"customer_code": "1001", "account": "113103", "period": "2026-08", "debit": "90"},
-                {"customer_code": "1001", "account": "113102", "period": "2026-08", "debit": "10"},
             ],
         ),
     )
@@ -921,12 +923,79 @@ def test_sales_multi_line_uses_period_debit(tmp_path):
     reason = str(detail.active.cell(2, 2).value or "")
     detail.close()
     assert "多条" in reason
+
+
+def test_sales_multi_line_applicant_picks_mapped_leg(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    result = _run(
+        tmp_path,
+        "销项发票",
+        lookups=_lookups(
+            ar_balance=[
+                {"customer_code": "1001", "account": "113103", "balance": "1"},
+                {"customer_code": "1001", "account": "113102", "balance": "1"},
+            ],
+        ),
+    )
+    assert result["bookable_count"] == 1
     kd = load_workbook(result["kingdee_path"])
     ws = kd[convert.KINGDEE_SHEET]
     accounts = [ws.cell(r, 7).value for r in range(4, 7)]
     kd.close()
-    assert "113103" not in accounts
+    assert "113103" in accounts
     assert "113102" not in accounts
+
+
+def test_sales_tencent_wangyanling_books_113107(tmp_path):
+    _write_sales(
+        tmp_path / "发票.xlsx",
+        [_ok_sales(name="腾讯科技（深圳）有限公司", app="王艳玲")],
+        with_org=False,
+    )
+    result = _run(
+        tmp_path,
+        "销项发票",
+        lookups=_lookups(
+            assist_rows=[
+                {
+                    "period": "202608",
+                    "customer_code": "3843",
+                    "customer_name": "腾讯科技（深圳）有限公司",
+                    "account": "113101",
+                    "ending_debit": "10",
+                    "ytd_debit": "10",
+                },
+                {
+                    "period": "202608",
+                    "customer_code": "3843",
+                    "customer_name": "腾讯科技（深圳）有限公司",
+                    "account": "113103",
+                    "ending_debit": "20",
+                    "ytd_debit": "20",
+                },
+                {
+                    "period": "202608",
+                    "customer_code": "3843",
+                    "customer_name": "腾讯科技（深圳）有限公司",
+                    "account": "113107",
+                    "ending_debit": "80",
+                    "ytd_debit": "80",
+                },
+            ]
+        ),
+    )
+    assert result["bookable_count"] == 1
+    assert result["hold_count"] == 0
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    names = [ws.cell(r, 19).value for r in range(4, 7)]
+    kd.close()
+    assert "113107" in accounts
+    assert "510107" in accounts
+    assert "113101" not in accounts
+    assert "113103" not in accounts
+    assert "腾讯科技（深圳）有限公司" in names
 
 
 def test_receipt_uses_lookups_not_table_ar(tmp_path):
@@ -1260,17 +1329,16 @@ def test_sales_zero_balance_books_period_debit_account(tmp_path):
     assert "510103" in codes
 
 
-def test_sales_zero_balance_without_debit_holds_kingdee_ar(tmp_path):
+def test_sales_zero_balance_without_debit_uses_applicant_ar(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     lookups = _lookups(ar_balance=[], period_debit=[])
     result = _run(tmp_path, "销项发票", lookups=lookups)
-    assert result["bookable_count"] == 0
-    assert result["hold_count"] == 1
-    detail = load_workbook(result["detail_path"])
-    reason = str(detail.active.cell(2, 2).value or "")
-    detail.close()
-    assert "是否新建" in reason
-    assert "业务线" not in reason
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    kd.close()
+    assert "113103" in accounts
 
 
 def test_period_debit_fetch_is_called_when_injected_missing(tmp_path):
@@ -1294,11 +1362,12 @@ def test_period_debit_fetch_is_called_when_injected_missing(tmp_path):
         out_dir=tmp_path,
     )
     assert called.get("ok") is not True
-    assert result["bookable_count"] == 0
-    detail = load_workbook(result["detail_path"])
-    reason = str(detail.active.cell(2, 2).value or "")
-    detail.close()
-    assert "是否新建" in reason
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    kd.close()
+    assert "113103" in accounts
 
 
 def test_start_voucher_no_shifts_payment_batches(tmp_path, monkeypatch):
@@ -1464,3 +1533,120 @@ def test_sales_default_voucher_no_follows_month_max(tmp_path, monkeypatch):
     nums = [n for n in _voucher_nums(tmp_path / "凭证引入_结果.xlsx", 9) if n]
     assert min(nums) == 26
     assert 1 not in nums
+
+
+def test_next_customer_number_skips_specials_and_five_digit():
+    customers = [
+        {"code": "4956", "name": "甲"},
+        {"code": "0386", "name": "公安部"},
+        {"code": "0582", "name": "个人"},
+        {"code": "9999", "name": "其它"},
+        {"code": "46228", "name": "跳号"},
+        {"code": "LSKH01", "name": "零售"},
+    ]
+    assert kingdee_api.next_customer_number(customers) == "4957"
+    assert kingdee_api.next_customer_number([{"code": "5947", "name": "外"}]) == "5948"
+
+
+def test_sales_archive_without_assist_uses_applicant_ar(tmp_path):
+    title = "约翰芬雷工程技术（北京）有限公司"
+    master = _master()
+    master["customer"].append({"code": "4957", "name": title})
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name=title, app="陈霞")], with_org=False)
+    result = convert.run_dir(tmp_path, "销项发票", "2026-09-08", master, _lookups(), out_dir=tmp_path)
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    codes = [str(ws.cell(r, 18).value or "") for r in range(4, 7)]
+    kd.close()
+    assert "113103" in accounts
+    assert "510103" in accounts
+    assert "4957" in codes
+
+
+def test_cli_create_new_customers_then_books(tmp_path, monkeypatch):
+    title = "中交铁道设计研究总院有限公司"
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name=title, app="孙苗红")], with_org=False)
+    master = tmp_path / "master.json"
+    lookups = tmp_path / "lookups.json"
+    master.write_text(json.dumps(_master()), encoding="utf-8")
+    lookups.write_text(json.dumps(_lookups()), encoding="utf-8")
+    posted = []
+
+    def fake_create(name, number):
+        posted.append((name, number))
+        return {"ok": True, "number": number, "name": name}
+
+    monkeypatch.setattr(convert.kingdee_api, "try_create_customer", fake_create)
+    monkeypatch.setattr(convert.kingdee_api, "clear_master_cache", lambda: None)
+    assert (
+        convert.main(
+            [
+                "--input-dir",
+                str(tmp_path),
+                "--scene",
+                "销项发票",
+                "--master",
+                str(master),
+                "--lookups",
+                str(lookups),
+                "--date",
+                "2026-09-08",
+                "--start-voucher-no",
+                "1",
+                "--out-dir",
+                str(tmp_path),
+                "--create-new-customers",
+            ]
+        )
+        == 0
+    )
+    assert posted and posted[0][0] == title
+    assert posted[0][1] == kingdee_api.next_customer_number(_master()["customer"])
+    kd = load_workbook(tmp_path / "凭证引入_结果.xlsx")
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    codes = [str(ws.cell(r, 18).value or "") for r in range(4, 7)]
+    kd.close()
+    assert "113101" in accounts
+    assert posted[0][1] in codes
+
+
+def test_cli_without_create_flag_does_not_post(tmp_path, monkeypatch):
+    title = "中交铁道设计研究总院有限公司"
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales(name=title, app="孙苗红")], with_org=False)
+    master = tmp_path / "master.json"
+    lookups = tmp_path / "lookups.json"
+    master.write_text(json.dumps(_master()), encoding="utf-8")
+    lookups.write_text(json.dumps(_lookups()), encoding="utf-8")
+    monkeypatch.setattr(
+        convert.kingdee_api,
+        "try_create_customer",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("未点头不得建档")),
+    )
+    assert (
+        convert.main(
+            [
+                "--input-dir",
+                str(tmp_path),
+                "--scene",
+                "销项发票",
+                "--master",
+                str(master),
+                "--lookups",
+                str(lookups),
+                "--date",
+                "2026-09-08",
+                "--start-voucher-no",
+                "1",
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    detail = load_workbook(tmp_path / "发票_明细结果.xlsx")
+    reason = str(detail.active.cell(2, 2).value or "")
+    detail.close()
+    assert "是否新建" in reason

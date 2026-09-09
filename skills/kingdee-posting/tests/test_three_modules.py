@@ -230,7 +230,11 @@ def test_assist_xlsx_two_ending_holds(tmp_path):
             },
         ],
     )
-    _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "于占国", ""]])
+    _write_month_draft(
+        tmp_path / "稿.xlsx",
+        [["2026-09-01", "甲科技有限公司", 10, "高洋", ""]],
+        org=[("高洋", "0405")],
+    )
     result = convert.run_dir(
         tmp_path,
         "收款",
@@ -534,8 +538,15 @@ def test_sales_multi_assist_extra_lists_accounts(tmp_path):
         start_voucher_no=1,
         out_dir=tmp_path,
     )
-    assert result["hold_count"] == 1
+    assert result["bookable_count"] == 1
+    assert result["hold_count"] == 0
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
+    kd.close()
     detail = load_workbook(result["detail_path"])
     extra = json.loads(str(detail.active.cell(2, 7).value or "{}"))
     detail.close()
+    assert "113103" in accounts
+    assert "113107" not in accounts
     assert extra.get("候选1131") == ["113103", "113107"]

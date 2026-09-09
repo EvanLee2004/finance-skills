@@ -151,14 +151,25 @@ def _auth_headers(creds: dict, method: str, path: str, params: dict | None) -> d
     }
 
 
-def _request(method: str, url: str, creds: dict, path: str, params: dict | None = None, extra_headers: dict | None = None, timeout: int = 30):
+def _request(
+    method: str,
+    url: str,
+    creds: dict,
+    path: str,
+    params: dict | None = None,
+    extra_headers: dict | None = None,
+    timeout: int = 30,
+    json_body=None,
+):
     headers = _auth_headers(creds, method, path, params)
     if extra_headers:
         headers.update(extra_headers)
     last_err = None
     for attempt in range(4):
         try:
-            resp = requests.request(method, url, headers=headers, params=params, timeout=timeout)
+            resp = requests.request(
+                method, url, headers=headers, params=params, json=json_body, timeout=timeout
+            )
             return resp
         except (requests.ConnectionError, requests.Timeout) as e:
             last_err = e
@@ -356,6 +367,75 @@ def fetch_list(creds: dict, token: str, domain: str, path: str, page_size: int =
         page += 1
         time.sleep(0.12)
     return out
+
+
+CUSTOMER_SPECIAL_CODES = {386, 582, 999, 9999}
+
+
+def next_customer_number(customers: list) -> str:
+    """3～4 位纯数字编号的 max+1。排除公安部/个人/9999 和五位以上跳号。"""
+    best = 0
+    for item in customers or []:
+        if isinstance(item, dict):
+            raw = str(item.get("code") or item.get("number") or "").strip()
+        else:
+            raw = str(item or "").strip()
+        if not raw.isdigit():
+            continue
+        n = int(raw)
+        if n in CUSTOMER_SPECIAL_CODES or n >= 10000:
+            continue
+        if n > best:
+            best = n
+    return str(best + 1)
+
+
+def clear_master_cache() -> None:
+    path = cache_path()
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def try_create_customer(name: str, number: str) -> dict:
+    """POST 客户档案。只建名称+编码。失败不得假装建成。"""
+    title = str(name or "").strip()
+    code = str(number or "").strip()
+    if not title or not code:
+        return {"ok": False, "error": "缺名称或编码", "number": code, "name": title}
+    creds = load_local()
+    if not creds:
+        return {"ok": False, "missing_credentials": True, "error": "no credentials", "number": code, "name": title}
+    try:
+        token, _domain = get_app_token(creds)
+        resp = _request(
+            "POST",
+            API_HOST + "/jdy/v2/bd/customer",
+            creds,
+            "/jdy/v2/bd/customer",
+            extra_headers={"app-token": token},
+            json_body={"name": title, "number": code},
+        )
+        if resp.status_code != 200:
+            return {
+                "ok": False,
+                "error": f"customer save http {resp.status_code}",
+                "number": code,
+                "name": title,
+            }
+        try:
+            payload = resp.json()
+        except Exception:
+            return {"ok": False, "error": "customer save not json", "number": code, "name": title}
+        err = payload.get("errcode") if isinstance(payload, dict) else None
+        if err not in (None, 0, "0"):
+            msg = str(payload.get("description") or payload.get("msg") or payload.get("message") or err)
+            return {"ok": False, "error": msg[:200], "number": code, "name": title, "errcode": err}
+        return {"ok": True, "number": code, "name": title, "data": payload.get("data") if isinstance(payload, dict) else payload}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}", "number": code, "name": title}
 
 
 def try_load_master() -> dict:

@@ -163,6 +163,21 @@ def load_emp_hang() -> dict:
     return {k: str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
 
 
+def load_applicant_ar() -> dict:
+    raw = load_json(CONFIG / "申请人科目.json", {})
+    return {str(k).strip(): str(v).strip() for k, v in raw.items() if not str(k).startswith("_") and v}
+
+
+def preferred_ar_for(person: str, hang: dict | None = None) -> str:
+    table = load_applicant_ar()
+    raw = str(person or "").strip()
+    hung = names.hang_employee(raw, hang or {})
+    for key in (raw, names.norm_name(raw), hung, names.norm_name(hung)):
+        if key and key in table:
+            return lookup_mod.preferred_ar_code(table[key])
+    return ""
+
+
 def load_box(raw: dict | None):
     return lookup_mod.box_from_dict(raw, load_ar_accounts(), load_applicant_dept())
 
@@ -505,7 +520,15 @@ def sales_sheet(wb) -> str | None:
     return None
 
 
-def resolve_sales_party(unit: str, applicant: str, inv_day: str, alias_map: dict, master: Master, assist_rows) -> tuple:
+def resolve_sales_party(
+    unit: str,
+    applicant: str,
+    inv_day: str,
+    alias_map: dict,
+    master: Master,
+    assist_rows,
+    preferred_ar: str = "",
+) -> tuple:
     """特殊规则先走，再抄客户核算项目余额表。档案只核验编码存在。"""
     records = lookup_mod.assist_records(assist_rows)
     if names.maps_to_police_ministry(unit, applicant):
@@ -519,11 +542,19 @@ def resolve_sales_party(unit: str, applicant: str, inv_day: str, alias_map: dict
             got = names.match_records(unit, records)
         if got.status == "many":
             return None, "客户核算项目余额表名称不唯一，请斯佳确认", {}
-        if got.status != "ok" or not got.hit:
-            return None, lookup_mod.HOLD_ASSIST_MISSING, {}
-        cus_code = got.hit[0]
+        if got.status == "ok" and got.hit:
+            cus_code = got.hit[0]
+        else:
+            got = names.match_records(query, master.all_customers())
+            if got.status == "none" and query != unit:
+                got = names.match_records(unit, master.all_customers())
+            if got.status == "many":
+                return None, "客户档案名称不唯一，请斯佳确认", {}
+            if got.status != "ok" or not got.hit:
+                return None, lookup_mod.HOLD_ASSIST_MISSING, {}
+            cus_code = got.hit[0]
     extra = {"候选1131": lookup_mod.list_assist_accounts(cus_code, inv_day, assist_rows)}
-    ar, rev, why = lookup_mod.pick_assist_account(cus_code, inv_day, assist_rows)
+    ar, rev, why = lookup_mod.pick_assist_account(cus_code, inv_day, assist_rows, preferred_ar=preferred_ar)
     if not ar:
         return None, why or lookup_mod.HOLD_ASSIST_MISSING, extra
     verified = names.by_code(master.all_customers(), cus_code)
@@ -620,7 +651,9 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
             continue
         emp_code, emp_name = ehit
         rows = assist_rows if assist_rows is not None else list(getattr(box, "assist_rows", None) or [])
-        party, perr, meta = resolve_sales_party(unit, applicant, inv_day, alias_map, master, rows)
+        party, perr, meta = resolve_sales_party(
+            unit, applicant, inv_day, alias_map, master, rows, preferred_ar=preferred_ar_for(applicant, hang)
+        )
         if meta.get("候选1131"):
             line.extra["候选1131"] = meta["候选1131"]
         if not party:
@@ -924,11 +957,6 @@ def convert_receipt(
         ar_cands = lookup_mod.list_assist_accounts(cus_code, rec_day, rows)
         if ar_cands:
             line.extra["候选1131"] = ar_cands
-        ar, _rev, why = lookup_mod.pick_assist_account(cus_code, rec_day, rows)
-        if not ar:
-            line.status, line.reason = "待确认", why or lookup_mod.HOLD_ASSIST_MISSING
-            lines.append(line)
-            continue
         sales_cands: list[str] = []
         if table_sales:
             sales, swhy = table_sales, ""
@@ -940,6 +968,13 @@ def convert_receipt(
             line.extra["候选销售"] = sales_cands
         if not sales:
             line.status, line.reason = "待确认", swhy or "找不到销售"
+            lines.append(line)
+            continue
+        ar, _rev, why = lookup_mod.pick_assist_account(
+            cus_code, rec_day, rows, preferred_ar=preferred_ar_for(sales, hang)
+        )
+        if not ar:
+            line.status, line.reason = "待确认", why or lookup_mod.HOLD_ASSIST_MISSING
             lines.append(line)
             continue
         line.extra["销售"] = sales
@@ -1133,6 +1168,38 @@ def write_outputs(
     }
 
 
+def names_needing_create(lines) -> list[str]:
+    out: list[str] = []
+    for line in lines or []:
+        if "是否新建" not in str(getattr(line, "reason", "") or ""):
+            continue
+        extra = getattr(line, "extra", None) or {}
+        title = str(extra.get("单位名称") or extra.get("客户名称") or getattr(line, "key", "") or "").strip()
+        if title and title not in out:
+            out.append(title)
+    return out
+
+
+def create_confirmed_customers(to_create: list[str], customers: list) -> dict:
+    """斯佳点头后按现网 3～4 位编号 max+1 建档。失败整批停。"""
+    created: list[dict] = []
+    pool = list(customers or [])
+    recs = [(str(c.get("code") or ""), str(c.get("name") or "")) for c in pool]
+    for title in to_create:
+        already = names.match_records(title, recs)
+        if already.status == "ok" and already.hit:
+            created.append({"number": already.hit[0], "existed": True})
+            continue
+        number = kingdee_api.next_customer_number(pool)
+        got = kingdee_api.try_create_customer(title, number)
+        if not got.get("ok"):
+            return {"ok": False, "error": got.get("error") or "建档失败", "created": created}
+        pool.append({"code": number, "name": title})
+        recs.append((number, title))
+        created.append({"number": number, "existed": False})
+    return {"ok": True, "created": created, "customers": pool}
+
+
 def _assist_rows_for_run(input_dir: Path, box, required: bool) -> tuple[list, str]:
     if box.assist_supplied:
         return list(box.assist_rows or []), ""
@@ -1177,6 +1244,7 @@ def run_dir(
         src = Path(files["invoice"])
         assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True)
         extras.append("销项部门：组织架构优先，否则申请人部门.json，再职员档案唯一部门")
+        extras.append("多条1131：按申请人科目.json拆腿，对不上仍待确认")
         extras.append("记账日：跑批当天")
         lines = convert_sales(src, master, rules, aliases, box, day, assist_rows=assist_rows)
     elif scene == "付款":
@@ -1199,7 +1267,7 @@ def run_dir(
     shift_voucher_numbers(lines, start_voucher_no)
     prefix = SCENE_DESKTOP.get(scene, "金蝶入账")
     dest = Path(out_dir) if out_dir else default_desktop_dir(prefix)
-    return write_outputs(
+    result = write_outputs(
         dest,
         scene,
         lines,
@@ -1210,6 +1278,8 @@ def run_dir(
         assist_name=assist_name,
         extras=extras,
     )
+    result["new_customer_names"] = names_needing_create(lines)
+    return result
 
 
 def main(argv=None) -> int:
@@ -1223,6 +1293,11 @@ def main(argv=None) -> int:
     parser.add_argument("--no-api", action="store_true")
     parser.add_argument("--start-voucher-no", type=int, default=None)
     parser.add_argument("--out-dir", "--out", dest="out_dir")
+    parser.add_argument(
+        "--create-new-customers",
+        action="store_true",
+        help="仅当斯佳点头新增时：按现网编号 max+1 建客户档案后再出引入表",
+    )
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
     if args.inspect:
@@ -1267,6 +1342,7 @@ def main(argv=None) -> int:
             return 2
         start_no = int(fetched["next_number"])
 
+    out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
     try:
         result = run_dir(
             root,
@@ -1275,8 +1351,36 @@ def main(argv=None) -> int:
             master_data,
             lookups,
             start_voucher_no=start_no,
-            out_dir=Path(args.out_dir).expanduser() if args.out_dir else None,
+            out_dir=out_dir,
         )
+        if args.create_new_customers:
+            need = result.get("new_customer_names") or []
+            if need:
+                created = create_confirmed_customers(need, (master_data or {}).get("customer") or [])
+                if not created.get("ok"):
+                    log(f"客户档案未建成（{created.get('error')}）；未覆盖引入表。")
+                    return 2
+                master_data = dict(master_data or {})
+                if args.master:
+                    master_data["customer"] = created.get("customers") or []
+                else:
+                    kingdee_api.clear_master_cache()
+                    reloaded = kingdee_api.try_load_master()
+                    if reloaded.get("ok"):
+                        master_data = reloaded["data"]
+                    else:
+                        master_data["customer"] = created.get("customers") or []
+                nums = [str(x.get("number")) for x in created.get("created") or [] if x.get("number")]
+                log(f"已按顺序新建客户档案 {len(need)} 家，编码 {('、'.join(nums)) or '（已有）'}。")
+                result = run_dir(
+                    root,
+                    args.scene,
+                    args.date,
+                    master_data,
+                    lookups,
+                    start_voucher_no=start_no,
+                    out_dir=out_dir,
+                )
     except SystemExit as e:
         log(str(e))
         return 2

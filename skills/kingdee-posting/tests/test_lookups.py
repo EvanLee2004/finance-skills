@@ -228,10 +228,64 @@ def test_pick_assist_two_ending_holds_no_silent_max():
     assert lookups.list_assist_accounts("1", "2026-09-07", rows) == ["113103", "113102"]
 
 
+def test_pick_assist_preferred_tencent_uses_07():
+    rows = _assist(
+        {
+            "period": "202608",
+            "customer_code": "3843",
+            "customer_name": "腾讯科技（深圳）有限公司",
+            "account": "113101",
+            "ending_debit": "10",
+        },
+        {
+            "period": "202608",
+            "customer_code": "3843",
+            "customer_name": "腾讯科技（深圳）有限公司",
+            "account": "113103",
+            "ending_debit": "20",
+        },
+        {
+            "period": "202608",
+            "customer_code": "3843",
+            "customer_name": "腾讯科技（深圳）有限公司",
+            "account": "113107",
+            "ending_debit": "80",
+        },
+    )
+    ar, rev, why = lookups.pick_assist_account("3843", "2026-09-03", rows, preferred_ar="07")
+    assert (ar, rev, why) == ("113107", "510107", "")
+    ar2, _rev, why2 = lookups.pick_assist_account("3843", "2026-09-03", rows)
+    assert ar2 == ""
+    assert "多条" in why2
+
+
+def test_pick_assist_preferred_missing_from_table_still_holds():
+    rows = _assist(
+        {"period": "202608", "customer_code": "1", "account": "113103", "ending_debit": "1"},
+        {"period": "202608", "customer_code": "1", "account": "113101", "ending_debit": "1"},
+    )
+    ar, _rev, why = lookups.pick_assist_account("1", "2026-09-07", rows, preferred_ar="113107")
+    assert ar == ""
+    assert "多条" in why
+
+
+def test_pick_assist_unique_ignores_preferred():
+    rows = _assist(
+        {"period": "202608", "customer_code": "1", "account": "113103", "ending_debit": "1"},
+    )
+    ar, rev, why = lookups.pick_assist_account("1", "2026-09-07", rows, preferred_ar="07")
+    assert (ar, rev, why) == ("113103", "510103", "")
+
+
 def test_pick_assist_missing_asks_new():
     ar, _rev, why = lookups.pick_assist_account("1", "2026-09-07", [])
     assert ar == ""
-    assert "是否新建" in why
+    assert "申请人科目" in why
+
+
+def test_pick_assist_empty_uses_preferred_for_first_invoice():
+    ar, rev, why = lookups.pick_assist_account("4957", "2026-09-03", [], preferred_ar="03")
+    assert (ar, rev, why) == ("113103", "510103", "")
 
 
 def test_pick_assist_empty_ending_unique_ytd():

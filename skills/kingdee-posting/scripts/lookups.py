@@ -9,6 +9,7 @@ TWOPLACES = Decimal("0.01")
 
 HOLD_ASSIST_MISSING = "客户核算项目余额表没有此抬头，请斯佳确认是否新建"
 HOLD_ASSIST_MULTI = "客户核算项目余额表有多条应收，请斯佳确认记哪条"
+HOLD_NEW_NO_LINE = "新建客户没有申请人科目，请斯佳确认记哪条"
 
 
 def money(v):
@@ -157,21 +158,56 @@ def list_assist_accounts(customer_code: str, invoice_day: str, rows: list[Assist
     return list(group_assist_accounts(customer_code, invoice_day, rows))
 
 
-def pick_assist_account(customer_code: str, invoice_day: str, rows: list[AssistRow]) -> tuple[str, str, str]:
-    """返回 (应收, 收入, 失败原因)。销项科目只抄客户核算项目余额表。"""
+def preferred_ar_code(raw: str) -> str:
+    """07 / 113107 / 7 → 113107。空或不像应收则空串。"""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if s.startswith("1131") and len(digits) >= 6:
+        return "1131" + digits[4:6]
+    if len(digits) >= 2:
+        return "1131" + digits[-2:]
+    if len(digits) == 1:
+        return "1131" + digits.zfill(2)
+    return ""
+
+
+def pick_assist_account(
+    customer_code: str,
+    invoice_day: str,
+    rows: list[AssistRow],
+    preferred_ar: str = "",
+) -> tuple[str, str, str]:
+    """返回 (应收, 收入, 失败原因)。销项科目只抄客户核算项目余额表。
+
+    一条 1131 仍抄表。多条时若 preferred_ar 落在该客户已有科目上则用它（申请人/销售拆业务线），
+    否则仍待确认，禁止取最大。档案有、余额表没有时，第一笔可用申请人科目。
+    """
     code = str(customer_code or "").strip()
     if not code:
         return "", "", HOLD_ASSIST_MISSING
     by_acc = group_assist_accounts(code, invoice_day, rows)
     accounts = list(by_acc)
+    wanted = preferred_ar_code(preferred_ar)
     if not accounts:
-        return "", "", HOLD_ASSIST_MISSING
+        if wanted:
+            rev = income_of(wanted)
+            if not rev:
+                return "", "", "收入科目无法从应收推导"
+            return wanted, rev, ""
+        return "", "", HOLD_NEW_NO_LINE
     if len(accounts) == 1:
         ar = accounts[0]
         rev = income_of(ar)
         if not rev:
             return "", "", "收入科目无法从应收推导"
         return ar, rev, ""
+    if wanted and wanted in by_acc:
+        rev = income_of(wanted)
+        if not rev:
+            return "", "", "收入科目无法从应收推导"
+        return wanted, rev, ""
     with_end = [acc for acc in accounts if any(_has_amt(r.ending_debit, r.ending_credit) for r in by_acc[acc])]
     if len(with_end) >= 2:
         return "", "", HOLD_ASSIST_MULTI
