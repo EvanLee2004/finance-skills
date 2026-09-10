@@ -1,6 +1,6 @@
 {
-  "_comment": "职工薪酬台账→损益表工资/社保/公积金叶子。只拆右列；左列有金蝶/代账的不覆盖。证件号/手机号/单人超上限不当金额，脏 sheet 整张不吃。禁止猜外地/大系统/长沙。",
-  "file_name_hints": ["职工薪酬", "薪酬台账"],
+  "_comment": "职工薪酬台账→损益表工资/社保/公积金叶子。左列已有金蝶/代账的不覆盖；文化/上海无星辰引出时台账可补左列。证件号/超上限那一行跳过，能加的行继续加。禁止猜外地/大系统/长沙。",
+  "file_name_hints": ["职工薪酬", "薪酬台账", "取数"],
   "skip_file_contains": ["假数", "明昊测试", "掏空"],
   "skip_sheet_contains": ["打印模板", "部门维度"],
   "skip_title_contains": ["劳务派遣"],
@@ -113,7 +113,7 @@
     }
   },
   "never_fill_depts": ["广东分公司", "市场部", "项目总监及助理"],
-  "fill_left_entities": ["山东分公司", "四川分公司", "济南子公司", "湖南分公司", "湖南子公司"],
+  "fill_left_entities": ["山东分公司", "四川分公司", "济南子公司", "湖南分公司", "湖南子公司", "上海", "文化"],
   "sheet_entity": [
     {"contains": ["甲骨易工资"], "entity": "甲骨易", "kind": "wage"},
     {"contains": ["甲骨易社保"], "entity": "甲骨易", "kind": "si"},
@@ -122,6 +122,9 @@
     {"contains": ["文化社保"], "entity": "文化", "kind": "si"},
     {"contains": ["202608文化"], "entity": "文化", "kind": "si"},
     {"contains": ["文化公积金"], "entity": "文化", "kind": "hf"},
+    {"contains": ["上海工资"], "entity": "上海", "kind": "wage", "dept": "本地化", "prefix": "5501"},
+    {"contains": ["上海社保"], "entity": "上海", "kind": "si", "dept": "本地化", "prefix": "5501"},
+    {"contains": ["上海公积金"], "entity": "上海", "kind": "hf", "dept": "本地化", "prefix": "5501"},
     {"contains": ["202608上海"], "entity": "上海", "kind": "si", "dept": "本地化", "prefix": "5501"},
     {"contains": ["济南分"], "entity": "山东分公司", "kind": "agency_si", "dept": "济南分公司", "prefix": "5401"},
     {"contains": ["济南子"], "entity": "济南子公司", "kind": "agency_si", "dept": "济南子公司", "prefix": "5401"},

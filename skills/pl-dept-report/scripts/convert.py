@@ -1197,13 +1197,6 @@ def run(
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
         asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
-    dirty_pay = sorted({n.split("=", 1)[1] for n in notes if n.startswith("薪酬台账拒读=") and "=" in n})
-    if dirty_pay:
-        asks.append(
-            "薪酬台账「"
-            + "、".join(dirty_pay)
-            + "」金额列里有证件号或列错位，这几张 sheet 的绿行没吃。请删插行、证件号不要放金额列后再跑。不要改损益表凑平，也不要自己重映射列。"
-        )
     payload["ask"] = " ".join(asks)
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)

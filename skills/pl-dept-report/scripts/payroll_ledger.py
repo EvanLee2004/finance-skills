@@ -176,6 +176,26 @@ def _cell_money(ws, r: int, c: int | None) -> Decimal | None:
     return money(ws.cell(r, c).value)
 
 
+def _row_has_junk_amount(ws, r: int, cols: list[int], dirty: list[str] | None = None) -> bool:
+    """证件号/离谱金额出现在这一行的金额列 → 整行跳过。"""
+    hit = False
+    for c in cols:
+        if not c:
+            continue
+        val = ws.cell(r, c).value
+        if looks_like_id_or_phone(val):
+            if dirty is not None:
+                dirty.append("id_or_phone")
+            hit = True
+            continue
+        amt = money(val)
+        if amt is not None and abs(amt) > PAY_CELL_MAX:
+            if dirty is not None:
+                dirty.append("too_big")
+            hit = True
+    return hit
+
+
 def _cell_payroll(ws, r: int, c: int | None, dirty: list[str] | None = None) -> Decimal | None:
     if not c:
         return None
@@ -334,6 +354,8 @@ def parse_wage_sheet(
     forced_prefix = spec.get("prefix")
     rows: list[dict] = []
     for r, name in _iter_people(ws, start, name_pos[1] if name_pos else None):
+        if _row_has_junk_amount(ws, r, [wage_pos[1]], dirty):
+            continue
         amt = _cell_payroll(ws, r, wage_pos[1], dirty)
         if amt is None:
             continue
@@ -423,6 +445,8 @@ def parse_si_sheet(
             continue
         if dept in (rules.get("never_fill_depts") or []):
             continue
+        if _row_has_junk_amount(ws, r, [pos[1] for pos in cols.values()], dirty):
+            continue
         for item, pos in cols.items():
             amt = _cell_payroll(ws, r, pos[1], dirty)
             code = item_code(item, prefix, rules)
@@ -458,6 +482,9 @@ def parse_agency_si(ws, spec: dict, rules: dict, dirty: list[str] | None = None)
         if not seq.isdigit() and seq not in {"1", "2", "3"}:
             if not _text(ws.cell(r, 2).value):
                 continue
+        amount_cols = [pos[1] for pos in named.values()] if named else list(mapping)
+        if _row_has_junk_amount(ws, r, amount_cols, dirty):
+            continue
         if named:
             for item, pos in named.items():
                 amt = _cell_payroll(ws, r, pos[1], dirty)
@@ -558,6 +585,8 @@ def parse_hunan_si(
             continue
         if dept in (rules.get("never_fill_depts") or []):
             continue
+        if _row_has_junk_amount(ws, r, list(cols.values()), dirty):
+            continue
         for item, col in cols.items():
             amt = _cell_payroll(ws, r, col, dirty)
             code = item_code(item, prefix, rules)
@@ -643,13 +672,14 @@ def parse_payroll_file(path: Path, period: str) -> dict:
                 chunk = parse_hunan_zgs(ws, spec, rules, unmapped, dirty)
             else:
                 chunk = parse_si_sheet(ws, spec, org_map, rules, unmapped, dirty)
-            if dirty:
-                dirty_sheets.append(title)
-                notes.append(f"薪酬台账拒读={title}")
-                continue
+            if dirty and chunk:
+                notes.append(f"薪酬台账跳过脏行={title}")
             if chunk:
                 used.append(title)
                 rows.extend(chunk)
+            elif dirty:
+                dirty_sheets.append(title)
+                notes.append(f"薪酬台账无可用行={title}")
         return {
             "path": str(path),
             "rows": rows,

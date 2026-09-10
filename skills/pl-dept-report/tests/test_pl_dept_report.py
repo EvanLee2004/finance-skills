@@ -1522,12 +1522,7 @@ def test_looks_like_id_or_phone_rejects_digits_not_money():
     assert not looks_like_id_or_phone(None)
 
 
-def test_shanghai_payroll_id_in_amount_col_dropped_and_asks(tmp_path: Path):
-    _write_account(
-        tmp_path / "sh.xlsx",
-        "甲骨易智译（上海）科技有限公司",
-        [("5101", "主营业务收入", None, 1.0)],
-    )
+def test_shanghai_payroll_skips_id_row_keeps_money(tmp_path: Path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "202608上海"
@@ -1537,28 +1532,34 @@ def test_shanghai_payroll_id_in_amount_col_dropped_and_asks(tmp_path: Path):
     ws["A2"] = "甲"
     ws["B2"] = "111111111111111111"
     ws["C2"] = 12
-    wb.save(tmp_path / "202608_职工薪酬台账.xlsx")
+    ws["A3"] = "乙"
+    ws["B3"] = 8
+    ws["C3"] = 3
+    wb.save(tmp_path / "2026年8月损益表取数.xlsx")
     wb.close()
     out = tmp_path / "out.xlsx"
     r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
     assert out.is_file(), r.stdout + r.stderr
-    assert "ask=" in r.stdout
-    assert "202608上海" in r.stdout
-    assert "薪酬台账拒读" in (out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8"))
+    assert "ask=" not in r.stdout or "薪酬台账" not in (r.stdout.split("ask=")[-1] if "ask=" in r.stdout else "")
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "薪酬台账拒读" not in report
+    assert "薪酬台账跳过脏行=202608上海" in report
+    assert "上海" in r.stdout.split("缺源账套=")[0]
     ws = openpyxl.load_workbook(out)["损益表"]
     layout = load_layout()
-    row = account_row_map(layout)["55010301"]
+    row_map = account_row_map(layout)
     local = dept_col_letter(layout, "本地化", 1)
-    assert ws[f"{local}{row}"].value in (None, "")
+    assert ws[f"{local}{row_map['55010301']}"].value == 8
+    assert ws[f"{local}{row_map['55010302']}"].value == 3
 
 
-def test_skill_tells_agent_to_stop_on_payroll_ask():
+def test_skill_does_not_make_her_edit_payroll():
     text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    assert "薪酬台账拒读" in text
-    assert "禁止自己改列映射" in text or "不要自己改列映射" in text
-    assert "原样问她" in text
+    assert "不要停下来让她改 Excel" in text
+    assert "禁止打开台账" in text
     assert "核对非0其它" in text
     assert "假数" in text
+    assert "薪酬台账拒读" not in text
 
 
 def test_fake_payroll_filename_is_ignored(tmp_path: Path):
@@ -1582,12 +1583,7 @@ def test_fake_payroll_filename_is_ignored(tmp_path: Path):
     assert "薪酬台账=" not in report or "假数" not in report
 
 
-def test_insert_row_then_id_in_amount_col_drops_sheet(tmp_path: Path):
-    _write_account(
-        tmp_path / "sh.xlsx",
-        "甲骨易智译（上海）科技有限公司",
-        [("5101", "主营业务收入", None, 1.0)],
-    )
+def test_insert_row_then_id_skipped_keeps_next_money(tmp_path: Path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "202608上海"
@@ -1598,19 +1594,22 @@ def test_insert_row_then_id_in_amount_col_drops_sheet(tmp_path: Path):
     ws["A3"] = "甲"
     ws["B3"] = "111111111111111111"
     ws["C3"] = 12
+    ws["A4"] = "乙"
+    ws["B4"] = 9
+    ws["C4"] = 2
     wb.save(tmp_path / "202608_职工薪酬台账.xlsx")
     wb.close()
     out = tmp_path / "out.xlsx"
     r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
     assert out.is_file(), r.stdout + r.stderr
-    assert "ask=" in r.stdout
-    assert "202608上海" in r.stdout
     assert "核对非0其它=无" in r.stdout
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "薪酬台账拒读" not in report
     layout = load_layout()
     row = account_row_map(layout)["55010301"]
     local = dept_col_letter(layout, "本地化", 1)
     ws = openpyxl.load_workbook(out)["损益表"]
-    assert ws[f"{local}{row}"].value in (None, "")
+    assert ws[f"{local}{row}"].value == 9
 
 
 def test_mapped_office_expense_check_is_dash(tmp_path: Path):
