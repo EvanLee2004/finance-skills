@@ -14,6 +14,9 @@ from layout import dept_col_letter, direct_children, load_layout
 
 CONFIG_NAME = "薪酬台账.json"
 PAYROLL_NEEDLES = ("基本工资", "单位部分养老", "单位月缴存额", "组织架构1", "组织架构-1")
+PAY_CELL_MAX = Decimal("1000000")
+_ID_OR_PHONE = re.compile(r"^(\d{15}|\d{17}[\dXx]|1\d{10})$")
+_HEADER_SKIP = ("身份证", "证件号", "手机", "电话", "联系方式")
 
 
 def load_payroll_rules() -> dict:
@@ -53,6 +56,7 @@ def looks_like_payroll(path: Path) -> bool:
 def discover_payroll_files(homes: list[Path], period: str) -> list[Path]:
     found: list[Path] = []
     seen: set[str] = set()
+    rules = load_payroll_rules()
     for folder in homes:
         if not folder:
             continue
@@ -65,6 +69,9 @@ def discover_payroll_files(homes: list[Path], period: str) -> list[Path]:
             if not path.is_file() or path.name.startswith("~$"):
                 continue
             if "损益类部门科目余额表" in path.name or path.name.startswith("月度损益表_"):
+                continue
+            skip_names = rules.get("skip_file_contains") or ["假数", "明昊测试", "掏空"]
+            if any(n and n in path.name for n in skip_names):
                 continue
             key = str(path.resolve())
             if key in seen:
@@ -111,14 +118,25 @@ def _header_map(ws, max_row: int = 5, max_col: int = 40) -> dict[str, tuple[int,
     return found
 
 
-def _find_header(headers: dict[str, tuple[int, int]], aliases: list[str], prefer_unit: bool = False) -> tuple[int, int] | None:
+def _header_blocked(text: str) -> bool:
+    return any(n in (text or "") for n in _HEADER_SKIP)
+
+
+def _find_header(
+    headers: dict[str, tuple[int, int]],
+    aliases: list[str],
+    prefer_unit: bool = False,
+    skip_id_headers: bool = False,
+) -> tuple[int, int] | None:
     ranked: list[tuple[int, tuple[int, int]]] = []
     for alias in aliases:
         key = _norm(alias)
-        if key in headers:
+        if key in headers and not (skip_id_headers and _header_blocked(key)):
             ranked.append((len(key), headers[key]))
             continue
         for raw, pos in headers.items():
+            if skip_id_headers and _header_blocked(raw):
+                continue
             if key and key in raw:
                 if prefer_unit and "个人" in raw and "单位" not in raw:
                     continue
@@ -129,10 +147,51 @@ def _find_header(headers: dict[str, tuple[int, int]], aliases: list[str], prefer
     return ranked[0][1]
 
 
+def looks_like_id_or_phone(value) -> bool:
+    """证件号/手机号不当金额。不回显原值。"""
+    if value is None:
+        return False
+    raw = str(value).strip().replace(" ", "").replace("\u3000", "")
+    if raw.endswith(".0") and raw[:-2].isdigit():
+        raw = raw[:-2]
+    if _ID_OR_PHONE.match(raw):
+        return True
+    try:
+        num = Decimal(str(value).replace(",", ""))
+    except Exception:
+        return False
+    if num != num.to_integral_value():
+        return False
+    abs_n = abs(num)
+    if abs_n >= Decimal("100000000000000"):
+        return True
+    if Decimal("10000000000") <= abs_n <= Decimal("19999999999"):
+        return True
+    return False
+
+
 def _cell_money(ws, r: int, c: int | None) -> Decimal | None:
     if not c:
         return None
     return money(ws.cell(r, c).value)
+
+
+def _cell_payroll(ws, r: int, c: int | None, dirty: list[str] | None = None) -> Decimal | None:
+    if not c:
+        return None
+    val = ws.cell(r, c).value
+    if looks_like_id_or_phone(val):
+        if dirty is not None:
+            dirty.append("id_or_phone")
+        return None
+    amt = money(val)
+    if amt is None:
+        return None
+    if abs(amt) > PAY_CELL_MAX:
+        if dirty is not None:
+            dirty.append("too_big")
+        return None
+    return amt
 
 
 def _load_org_map(wb, rules: dict) -> dict[str, tuple[str, str]]:
@@ -255,10 +314,12 @@ def _iter_people(ws, start: int, name_c: int | None):
         yield r, name
 
 
-def parse_wage_sheet(ws, spec: dict, org_map: dict, rules: dict, unmapped: list[str]) -> list[dict]:
+def parse_wage_sheet(
+    ws, spec: dict, org_map: dict, rules: dict, unmapped: list[str], dirty: list[str] | None = None
+) -> list[dict]:
     headers = _header_map(ws)
     aliases = rules.get("header_aliases") or {}
-    wage_pos = _find_header(headers, aliases.get("wage") or ["基本工资"])
+    wage_pos = _find_header(headers, aliases.get("wage") or ["基本工资"], skip_id_headers=True)
     if not wage_pos:
         return []
     name_pos = _find_header(headers, aliases.get("name") or ["姓名"])
@@ -273,7 +334,7 @@ def parse_wage_sheet(ws, spec: dict, org_map: dict, rules: dict, unmapped: list[
     forced_prefix = spec.get("prefix")
     rows: list[dict] = []
     for r, name in _iter_people(ws, start, name_pos[1] if name_pos else None):
-        amt = _cell_money(ws, r, wage_pos[1])
+        amt = _cell_payroll(ws, r, wage_pos[1], dirty)
         if amt is None:
             continue
         o1 = _text(ws.cell(r, org1_pos[1]).value) if org1_pos else ""
@@ -314,13 +375,15 @@ def _si_columns(headers: dict, aliases: dict) -> dict[str, tuple[int, int]]:
         ("住房公积金", aliases.get("hf_unit") or ["单位月缴存额"], False),
     ]
     for item, al, unit in pairs:
-        pos = _find_header(headers, al, prefer_unit=unit)
+        pos = _find_header(headers, al, prefer_unit=unit, skip_id_headers=True)
         if pos:
             out[item] = pos
     return out
 
 
-def parse_si_sheet(ws, spec: dict, org_map: dict, rules: dict, unmapped: list[str]) -> list[dict]:
+def parse_si_sheet(
+    ws, spec: dict, org_map: dict, rules: dict, unmapped: list[str], dirty: list[str] | None = None
+) -> list[dict]:
     headers = _header_map(ws, 6, 30)
     aliases = rules.get("header_aliases") or {}
     cols = _si_columns(headers, aliases)
@@ -352,7 +415,7 @@ def parse_si_sheet(ws, spec: dict, org_map: dict, rules: dict, unmapped: list[st
             prefix = prefix or (rules.get("center_to_prefix") or {}).get(o1)
         prefix = forced_prefix or prefix
         if not dept or not prefix:
-            has_amt = any(_cell_money(ws, r, pos[1]) for pos in cols.values())
+            has_amt = any(_cell_payroll(ws, r, pos[1], dirty) for pos in cols.values())
             if has_amt:
                 tag = o2 or o1 or extra or name or f"R{r}"
                 if tag not in unmapped:
@@ -361,13 +424,13 @@ def parse_si_sheet(ws, spec: dict, org_map: dict, rules: dict, unmapped: list[st
         if dept in (rules.get("never_fill_depts") or []):
             continue
         for item, pos in cols.items():
-            amt = _cell_money(ws, r, pos[1])
+            amt = _cell_payroll(ws, r, pos[1], dirty)
             code = item_code(item, prefix, rules)
             _add_row(rows, entity, code or "", item, dept, occ, amt, fill_left)
     return rows
 
 
-def parse_agency_si(ws, spec: dict, rules: dict) -> list[dict]:
+def parse_agency_si(ws, spec: dict, rules: dict, dirty: list[str] | None = None) -> list[dict]:
     """济南分/济南子对账单：雇主栏按险种进成本树。"""
     entity = spec["entity"]
     dept = spec.get("dept") or ""
@@ -397,12 +460,12 @@ def parse_agency_si(ws, spec: dict, rules: dict) -> list[dict]:
                 continue
         if named:
             for item, pos in named.items():
-                amt = _cell_money(ws, r, pos[1])
+                amt = _cell_payroll(ws, r, pos[1], dirty)
                 code = item_code(item, prefix, rules)
                 _add_row(rows, entity, code or "", item, dept, 1, amt, True)
             continue
         for col, item in mapping.items():
-            amt = _cell_money(ws, r, col)
+            amt = _cell_payroll(ws, r, col, dirty)
             code = item_code(item, prefix, rules)
             _add_row(rows, entity, code or "", item, dept, 1, amt, True)
     return rows
@@ -465,6 +528,7 @@ def parse_hunan_si(
     rules: dict,
     unmapped: list[str],
     name_prefix: dict[str, tuple[str, str]] | None = None,
+    dirty: list[str] | None = None,
 ) -> list[dict]:
     cols = _hunan_unit_cols(ws)
     if not cols:
@@ -495,13 +559,15 @@ def parse_hunan_si(
         if dept in (rules.get("never_fill_depts") or []):
             continue
         for item, col in cols.items():
-            amt = _cell_money(ws, r, col)
+            amt = _cell_payroll(ws, r, col, dirty)
             code = item_code(item, prefix, rules)
             _add_row(rows, entity, code or "", item, dept, occ, amt, fill_left)
     return rows
 
 
-def parse_hunan_zgs(ws, spec: dict, rules: dict, unmapped: list[str]) -> list[dict]:
+def parse_hunan_zgs(
+    ws, spec: dict, rules: dict, unmapped: list[str], dirty: list[str] | None = None
+) -> list[dict]:
     """湖南子：上半五险一金 + 下半工资表。销售/成本靠地区。"""
     wage_header = None
     last_r = min(ws.max_row or 1, 30)
@@ -537,10 +603,10 @@ def parse_hunan_zgs(ws, spec: dict, rules: dict, unmapped: list[str]) -> list[di
                     unmapped.append(region or name)
                 continue
             name_prefix[name] = (dept, prefix)
-            amt = _cell_money(ws, r, wage_c)
+            amt = _cell_payroll(ws, r, wage_c, dirty)
             code = item_code("工资", prefix, rules)
             _add_row(wage_rows, entity, code or "", "工资", dept, occ, amt, fill_left)
-    si_rows = parse_hunan_si(ws, spec, rules, unmapped, name_prefix=name_prefix)
+    si_rows = parse_hunan_si(ws, spec, rules, unmapped, name_prefix=name_prefix, dirty=dirty)
     return si_rows + wage_rows
 
 
@@ -553,6 +619,7 @@ def parse_payroll_file(path: Path, period: str) -> dict:
         unmapped: list[str] = []
         notes: list[str] = []
         used: list[str] = []
+        dirty_sheets: list[str] = []
         for title in wb.sheetnames:
             if _skip_sheet(title, rules):
                 continue
@@ -564,17 +631,22 @@ def parse_payroll_file(path: Path, period: str) -> dict:
                 notes.append(f"薪酬sheet期间不符={title}:{per}")
                 continue
             ws = wb[title]
+            dirty: list[str] = []
             kind = spec.get("kind")
             if kind == "wage":
-                chunk = parse_wage_sheet(ws, spec, org_map, rules, unmapped)
+                chunk = parse_wage_sheet(ws, spec, org_map, rules, unmapped, dirty)
             elif kind == "agency_si":
-                chunk = parse_agency_si(ws, spec, rules)
+                chunk = parse_agency_si(ws, spec, rules, dirty)
             elif kind == "hunan_si":
-                chunk = parse_hunan_si(ws, spec, rules, unmapped)
+                chunk = parse_hunan_si(ws, spec, rules, unmapped, dirty=dirty)
             elif kind == "hunan_zgs":
-                chunk = parse_hunan_zgs(ws, spec, rules, unmapped)
+                chunk = parse_hunan_zgs(ws, spec, rules, unmapped, dirty)
             else:
-                chunk = parse_si_sheet(ws, spec, org_map, rules, unmapped)
+                chunk = parse_si_sheet(ws, spec, org_map, rules, unmapped, dirty)
+            if dirty:
+                dirty_sheets.append(title)
+                notes.append(f"薪酬台账拒读={title}")
+                continue
             if chunk:
                 used.append(title)
                 rows.extend(chunk)
@@ -584,6 +656,7 @@ def parse_payroll_file(path: Path, period: str) -> dict:
             "unmapped": unmapped,
             "notes": notes,
             "sheets": used,
+            "dirty_sheets": dirty_sheets,
             "entities": sorted({r["entity"] for r in rows}),
         }
     finally:

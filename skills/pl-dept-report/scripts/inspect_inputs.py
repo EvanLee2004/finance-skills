@@ -155,7 +155,7 @@ def inspect_file(path: Path) -> list[dict]:
     found = []
     if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"} or path.name.startswith("~$"):
         return found
-    if "损益类部门科目余额表" in path.name:
+    if "损益类部门科目余额表" in path.name or path.name.startswith("月度损益表_") or path.name.startswith("agent_月度损益表"):
         return found
     src = path
     if path.suffix.lower() == ".xls":

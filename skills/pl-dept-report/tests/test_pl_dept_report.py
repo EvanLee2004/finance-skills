@@ -340,9 +340,11 @@ def test_map_dakehu_to_ka_and_unmapped_stays_out(tmp_path: Path):
                 raise AssertionError(name)
     report = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
     assert "神秘事业部" in report
-    assert "50" not in r.stdout
-    assert "80" not in r.stdout
+    assert "80.0" not in r.stdout
     assert "30.00" not in r.stdout
+    assert "50.0" not in r.stdout
+    assert "核对非0未映射=550198" in r.stdout
+    assert "核对非0其它=无" in r.stdout
 
 
 def test_hq_chanpin_yingxiao_xiangmu_map_to_layout_cols(tmp_path: Path):
@@ -382,7 +384,7 @@ def test_hq_chanpin_yingxiao_xiangmu_map_to_layout_cols(tmp_path: Path):
     assert "产品部" not in report
     assert "营销二部" not in report
     assert "项目中心" not in report
-    assert "11" not in r.stdout
+    assert "11.0" not in r.stdout
 
 
 def test_wenhua_shanghai_accounts_fill_right_when_assist_has_no_expense(tmp_path: Path):
@@ -437,8 +439,8 @@ def test_wenhua_shanghai_accounts_fill_right_when_assist_has_no_expense(tmp_path
     director = dept_col_letter(layout, "营销总监及助理", 1)
     assert director
     assert ws[f"{director}{row['5101']}"].value == 12
-    assert "21" not in r.stdout
-    assert "19" not in r.stdout
+    assert "21.0" not in r.stdout
+    assert "19.0" not in r.stdout
 
 
 def test_pick_dept_rows_prefers_hq_assist_file_over_vouchers():
@@ -808,7 +810,7 @@ def test_same_code_different_name_does_not_write_layout_row(tmp_path: Path):
     assert ws[f"G{row['5501']}"].value == 50
     report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
     assert "同码不同名=540103->540112" in report
-    assert "350" not in r.stdout
+    assert "350.0" not in r.stdout
     assert "249313.21" not in r.stdout
 
 
@@ -1506,6 +1508,141 @@ def test_rent_abstract_from_journal_xlsx(tmp_path: Path):
     assert ws[f"{yun}{row['550212']}"].value == 15
     report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
     assert "房租摘要=" in report
+
+
+def test_looks_like_id_or_phone_rejects_digits_not_money():
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import looks_like_id_or_phone
+
+    assert looks_like_id_or_phone("111111111111111111")
+    assert looks_like_id_or_phone("13800138000")
+    assert looks_like_id_or_phone(111111111111111111)
+    assert not looks_like_id_or_phone(3520.15)
+    assert not looks_like_id_or_phone("880.50")
+    assert not looks_like_id_or_phone(None)
+
+
+def test_shanghai_payroll_id_in_amount_col_dropped_and_asks(tmp_path: Path):
+    _write_account(
+        tmp_path / "sh.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("5101", "主营业务收入", None, 1.0)],
+    )
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "202608上海"
+    ws["A1"] = "姓名"
+    ws["B1"] = "养老(16%)"
+    ws["C1"] = "医疗+生育(9%)"
+    ws["A2"] = "甲"
+    ws["B2"] = "111111111111111111"
+    ws["C2"] = 12
+    wb.save(tmp_path / "202608_职工薪酬台账.xlsx")
+    wb.close()
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "ask=" in r.stdout
+    assert "202608上海" in r.stdout
+    assert "薪酬台账拒读" in (out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8"))
+    ws = openpyxl.load_workbook(out)["损益表"]
+    layout = load_layout()
+    row = account_row_map(layout)["55010301"]
+    local = dept_col_letter(layout, "本地化", 1)
+    assert ws[f"{local}{row}"].value in (None, "")
+
+
+def test_skill_tells_agent_to_stop_on_payroll_ask():
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert "薪酬台账拒读" in text
+    assert "禁止自己改列映射" in text or "不要自己改列映射" in text
+    assert "原样问她" in text
+    assert "核对非0其它" in text
+    assert "假数" in text
+
+
+def test_fake_payroll_filename_is_ignored(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("550198", "活动团建费", 8.0, None)],
+    )
+    _write_assist(
+        tmp_path / "wh_d.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("550198", "活动团建费", "大客户", 8.0, None)],
+    )
+    _write_payroll(tmp_path / "202608_职工薪酬台账_假数.xlsx")
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "核对非0其它=无" in r.stdout
+    assert "薪酬台账=" not in r.stdout
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "薪酬台账=" not in report or "假数" not in report
+
+
+def test_insert_row_then_id_in_amount_col_drops_sheet(tmp_path: Path):
+    _write_account(
+        tmp_path / "sh.xlsx",
+        "甲骨易智译（上海）科技有限公司",
+        [("5101", "主营业务收入", None, 1.0)],
+    )
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "202608上海"
+    ws["A1"] = "说明"
+    ws["A2"] = "姓名"
+    ws["B2"] = "养老(16%)"
+    ws["C2"] = "医疗+生育(9%)"
+    ws["A3"] = "甲"
+    ws["B3"] = "111111111111111111"
+    ws["C3"] = 12
+    wb.save(tmp_path / "202608_职工薪酬台账.xlsx")
+    wb.close()
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "ask=" in r.stdout
+    assert "202608上海" in r.stdout
+    assert "核对非0其它=无" in r.stdout
+    layout = load_layout()
+    row = account_row_map(layout)["55010301"]
+    local = dept_col_letter(layout, "本地化", 1)
+    ws = openpyxl.load_workbook(out)["损益表"]
+    assert ws[f"{local}{row}"].value in (None, "")
+
+
+def test_mapped_office_expense_check_is_dash(tmp_path: Path):
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("550211", "办公费", 12.0, None)],
+    )
+    _write_assist(
+        tmp_path / "hq_d.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("550211", "办公费", "运营保障中心", 12.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "核对非0其它=无" in r.stdout
+    assert "核对非0绿行=无" in r.stdout
+    from convert import list_nonzero_check_codes
+
+    layout = load_layout()
+    rows = list_nonzero_check_codes(openpyxl.load_workbook(out, data_only=False), layout)
+    assert rows == []
+
+
+def test_inspect_skips_product_xlsx(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    from inspect_inputs import inspect_file
+
+    product = tmp_path / "月度损益表_202608.xlsx"
+    _write_account(product, "甲骨易（北京）语言科技股份有限公司", [("550211", "办公费", 1.0, None)])
+    assert inspect_file(product) == []
 
 
 def test_occurrence_uses_check_side_not_net():

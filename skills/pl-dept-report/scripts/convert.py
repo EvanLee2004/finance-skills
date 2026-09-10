@@ -163,6 +163,7 @@ def merge_dept_rows(
     amounts: dict[str, dict[str, Decimal]] = {}
     unmapped: list[str] = []
     seen_unmapped: set[str] = set()
+    unmapped_codes: set[str] = set()
     blocked: dict[str, Decimal] = {}
     special_rules = special_rules or {}
     entity_amts = entity_amts or {}
@@ -194,6 +195,8 @@ def merge_dept_rows(
             if tag and tag not in seen_unmapped and amt:
                 seen_unmapped.add(tag)
                 unmapped.append(tag)
+            if amt:
+                unmapped_codes.add(code)
             continue
         if kids.get(code):
             continue
@@ -202,6 +205,7 @@ def merge_dept_rows(
         bucket = amounts.setdefault(code, {})
         bucket[letter] = (bucket.get(letter) or Decimal("0")) + amt
     report["unmapped_depts"] = unmapped
+    report["unmapped_codes"] = sorted(unmapped_codes)
     report["income_blocked"] = blocked
     return amounts
 
@@ -712,23 +716,53 @@ def build_workbook(period: str, entity_amts, dept_amts, profit_cur, profit_prev,
     return wb
 
 
-def count_nonzero_checks(wb, layout) -> int:
+def is_sijia_payroll_row(code: str, name: str, layout: dict) -> bool:
+    """绿行：工资/社保/公积金叶子，以及她还没拍口径的互助/残保金等。父行不算。"""
+    kids = direct_children(layout)
+    if kids.get(code):
+        return False
+    if is_payroll_account_name(name):
+        return True
+    return any(n in (name or "") for n in PAY_ROW_EXTRA)
+
+
+def list_nonzero_check_codes(wb, layout, unmapped_codes: set[str] | None = None) -> list[tuple[str, str, str]]:
+    """核对非 0 的科目。只回编码/名称/分类，不回金额。"""
     book, _ = eval_workbook(wb)
     row_of = account_row_map(layout)
-    n = 0
-    av = 48  # AV
-    for code, r in row_of.items():
+    names = layout_code_names(layout)
+    kids = direct_children(layout)
+    blocked = {str(c) for c in (unmapped_codes or set())}
+    av = 48
+    out: list[tuple[str, str, str]] = []
+    for acc in layout["accounts"]:
+        code = str(acc.get("code") or "")
+        r = row_of.get(code)
+        if not r:
+            continue
         val = book.cell_value("损益表", r, av)
         if val is None or val == "":
             continue
         try:
-            from decimal import Decimal
-
-            if abs(Decimal(str(val))) > CHECK_TOL:
-                n += 1
+            if abs(Decimal(str(val))) <= CHECK_TOL:
+                continue
         except Exception:
-            n += 1
-    return n
+            pass
+        name = str(acc.get("name") or names.get(code) or "")
+        if is_sijia_payroll_row(code, name, layout):
+            kind = "sijia"
+        elif code in blocked:
+            kind = "unmapped"
+        elif kids.get(code):
+            kind = "parent"
+        else:
+            kind = "other"
+        out.append((code, name, kind))
+    return out
+
+
+def count_nonzero_checks(wb, layout) -> int:
+    return len(list_nonzero_check_codes(wb, layout))
 
 
 def write_report(path: Path, payload: dict) -> None:
@@ -738,6 +772,10 @@ def write_report(path: Path, payload: dict) -> None:
         f"缺源账套={','.join(payload['missing']) or '无'}",
         f"未映射部门个数={payload['unmapped_count']}",
         f"核对非0科目编码个数={payload['nonzero_checks']}",
+        f"核对非0绿行={','.join(payload.get('nonzero_sijia') or []) or '无'}",
+        f"核对非0父行={','.join(payload.get('nonzero_parent') or []) or '无'}",
+        f"核对非0未映射={','.join(payload.get('nonzero_unmapped') or []) or '无'}",
+        f"核对非0其它={','.join(payload.get('nonzero_other') or []) or '无'}",
         f"产物={payload['out']}",
         f"status={payload['status']}",
     ]
@@ -1051,7 +1089,7 @@ def run(
     )
     payroll_covered: set[str] = set()
     payroll_codes: dict[str, set[str]] = {}
-    if payroll_parsed.get("rows"):
+    if payroll_parsed.get("rows") or payroll_parsed.get("dirty_sheets"):
         payroll_covered, payroll_codes = apply_payroll(
             entity_amts, dept_amts, payroll_parsed, layout, notes, report_tmp
         )
@@ -1119,7 +1157,16 @@ def run(
     wb = build_workbook(period, entity_amts, dept_amts, profit_cur, profit_prev, layout)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
-    nonzero = count_nonzero_checks(load_workbook(out, data_only=False), layout)
+    classified = list_nonzero_check_codes(
+        load_workbook(out, data_only=False),
+        layout,
+        set(report_tmp.get("unmapped_codes") or []),
+    )
+    nonzero = len(classified)
+    sijia_codes = [c for c, _n, k in classified if k == "sijia"]
+    parent_codes = [c for c, _n, k in classified if k == "parent"]
+    unmapped_check = [c for c, _n, k in classified if k == "unmapped"]
+    other_codes = [c for c, _n, k in classified if k == "other"]
     incomplete = [h for h in xingchen if h not in has_source]
     status = "ok" if not incomplete else "incomplete"
     payload = {
@@ -1129,6 +1176,10 @@ def run(
         "unmapped_count": len(report_tmp.get("unmapped_depts") or []),
         "unmapped_names": report_tmp.get("unmapped_depts") or [],
         "nonzero_checks": nonzero,
+        "nonzero_sijia": sijia_codes,
+        "nonzero_parent": parent_codes,
+        "nonzero_unmapped": unmapped_check,
+        "nonzero_other": other_codes,
         "out": str(out.resolve()),
         "status": status,
         "notes": notes,
@@ -1146,6 +1197,13 @@ def run(
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
         asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
+    dirty_pay = sorted({n.split("=", 1)[1] for n in notes if n.startswith("薪酬台账拒读=") and "=" in n})
+    if dirty_pay:
+        asks.append(
+            "薪酬台账「"
+            + "、".join(dirty_pay)
+            + "」金额列里有证件号或列错位，这几张 sheet 的绿行没吃。请删插行、证件号不要放金额列后再跑。不要改损益表凑平，也不要自己重映射列。"
+        )
     payload["ask"] = " ".join(asks)
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)
@@ -1155,6 +1213,10 @@ def run(
         f"缺源账套={','.join(missing) or '无'}\n"
         f"未映射部门个数={payload['unmapped_count']}\n"
         f"核对非0科目编码个数={nonzero}\n"
+        f"核对非0绿行={','.join(sijia_codes) or '无'}\n"
+        f"核对非0父行={','.join(parent_codes) or '无'}\n"
+        f"核对非0未映射={','.join(unmapped_check) or '无'}\n"
+        f"核对非0其它={','.join(other_codes) or '无'}\n"
         f"产物={out.resolve()}\n"
         f"status={status}\n"
     )
@@ -1165,14 +1227,16 @@ def run(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--period", default="")
-    parser.add_argument("--input-dir", default="")
-    parser.add_argument("--out", default="")
-    parser.add_argument("--no-api", action="store_true")
-    parser.add_argument("--offline-xlsx", action="append", default=[])
-    parser.add_argument("--payroll-xlsx", action="append", default=[])
-    parser.add_argument("--skip-offline", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="拼斯佳损益表+利润表。stdout 只有期间/有源/缺源/核对编码/ask=，不含金额。"
+    )
+    parser.add_argument("--period", default="", help="YYYYMM，默认上一个已过完的公历月")
+    parser.add_argument("--input-dir", default="", help="她亲口给的材料夹才加；不要指向桌面成品")
+    parser.add_argument("--out", default="", help="xlsx 路径；默认桌面 月度损益表_当天/")
+    parser.add_argument("--no-api", action="store_true", help="测试用。同事跑不要加")
+    parser.add_argument("--offline-xlsx", action="append", default=[], help="山东/四川/济南代账利润表")
+    parser.add_argument("--payroll-xlsx", action="append", default=[], help="职工薪酬台账；假数/明昊测试文件名不会吃")
+    parser.add_argument("--skip-offline", action="store_true", help="她说这三家先不处理")
     args = parser.parse_args(argv)
     period = parse_period(args.period)
     input_dir = discover_input_dir(args.input_dir)
