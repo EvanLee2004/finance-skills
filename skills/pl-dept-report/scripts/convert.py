@@ -770,6 +770,7 @@ def write_report(path: Path, payload: dict) -> None:
         f"期间={payload['period']}",
         f"有源账套={','.join(payload['has_source']) or '无'}",
         f"缺源账套={','.join(payload['missing']) or '无'}",
+        f"利润表缺源={','.join(payload.get('profit_missing') or []) or '无'}",
         f"未映射部门个数={payload['unmapped_count']}",
         f"核对非0科目编码个数={payload['nonzero_checks']}",
         f"核对非0绿行={','.join(payload.get('nonzero_sijia') or []) or '无'}",
@@ -831,6 +832,136 @@ def collect_offline_records(inspected: list[dict], extra_files: list[str], perio
     return list(by_ent.values())
 
 
+WEB_EXPORT = None
+
+
+def cwd_sidecar_files(already: list[str], input_dir: Path | None = None) -> list[str]:
+    """工作目录里的代账/取数，避免只扫到技能家引出就把眼前的表丢掉。同名不叠两份。"""
+    cwd = Path.cwd()
+    parts = {p.lower() for p in cwd.parts}
+    if "finance-skills" in parts and "skills" in parts:
+        return []
+    if cwd.name.startswith(("pytest-", "tmp")):
+        return []
+    seen = {str(Path(p).expanduser().resolve()) for p in already if p}
+    names = {Path(p).name for p in already if p}
+    if input_dir and Path(input_dir).is_dir():
+        for path in Path(input_dir).iterdir():
+            names.add(path.name)
+    out: list[str] = []
+    for path in cwd.iterdir():
+        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            continue
+        if path.name.startswith("~$") or path.name.startswith("月度损益表_"):
+            continue
+        key = str(path.resolve())
+        if key in seen or path.name in names:
+            continue
+        out.append(str(path))
+    return out
+
+
+def xingchen_web_gaps(inspected: list[dict], period: str) -> dict[str, list[str]]:
+    web = [a for a in (load_books().get("xingchen_accounts") or []) if not a.get("api_ready_default")]
+    have: dict[str, set[str]] = {str(a.get("excel_header") or ""): set() for a in web}
+    for item in inspected:
+        ent = str(item.get("entity") or "")
+        if ent not in have:
+            continue
+        kind = item.get("kind")
+        if kind == "profit":
+            if item.get("period") == period:
+                have[ent].add("profit")
+        elif kind in {"account", "assist"}:
+            per = item.get("period")
+            if per and per != period:
+                continue
+            have[ent].add(str(kind))
+    gaps: dict[str, list[str]] = {}
+    for acc in web:
+        header = str(acc.get("excel_header") or "")
+        missing = [k for k in ("account", "assist", "profit") if k not in have.get(header, set())]
+        if missing:
+            gaps[str(acc.get("key") or header)] = missing
+    return gaps
+
+
+def drop_other_period_balances(inspected: list[dict], period: str, notes: list[str]) -> list[dict]:
+    """9 期科目/核算不当 8 月源，避免和当期叠两份。没有期间头的旧夹仍收。"""
+    out = []
+    for item in inspected:
+        kind = item.get("kind")
+        per = item.get("period")
+        if kind in {"account", "assist"} and per and per != period:
+            who = item.get("entity") or Path(item.get("path") or "").name
+            notes.append(f"过期{kind}跳过={who}:{per}")
+            continue
+        out.append(item)
+    return out
+
+
+def gather_inspected(input_dir: Path, extra_files: list[str], notes: list[str]) -> list[dict]:
+    inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
+    have_hq_assist = any(item.get("kind") == "assist" and item.get("entity") == "甲骨易" for item in inspected)
+    if not have_hq_assist:
+        extra = inspect_downloads_dept_assist()
+        hq_extra = [item for item in extra if item.get("entity") == "甲骨易"]
+        if hq_extra:
+            inspected.extend(hq_extra)
+            if "Downloads核算项目余额表=甲骨易" not in notes:
+                notes.append("Downloads核算项目余额表=甲骨易")
+    for raw in extra_files:
+        p = Path(raw).expanduser()
+        if p.is_file():
+            inspected.extend(inspect_file(p))
+        elif p.is_dir():
+            inspected.extend(inspect_dir(p))
+    return inspected
+
+
+def ensure_xingchen_current(
+    period: str,
+    input_dir: Path,
+    inspected: list[dict],
+    extra_files: list[str],
+    no_api: bool,
+    notes: list[str],
+) -> list[dict]:
+    gaps = xingchen_web_gaps(inspected, period)
+    if not gaps:
+        return inspected
+    if no_api or os.environ.get("PL_DEPT_SKIP_WEB_EXPORT") == "1":
+        return inspected
+    hook = WEB_EXPORT
+    if hook is not None:
+        hook(period, input_dir, list(gaps), gaps)
+        return gather_inspected(input_dir, extra_files, notes)
+    try:
+        from xingchen_login import load_creds, state_path
+    except Exception:
+        notes.append("缺网页账密")
+        return inspected
+    if not load_creds() and not state_path().is_file():
+        notes.append("缺网页账密")
+        return inspected
+    try:
+        from xingchen_export import export_missing
+
+        result = export_missing(period, input_dir, list(gaps), gaps)
+    except SystemExit as e:
+        notes.append(f"网页引出失败={e}")
+        return inspected
+    except Exception as e:
+        notes.append(f"网页引出失败={type(e).__name__}")
+        return inspected
+    for header in result.get("denied") or []:
+        notes.append(f"利润表无查询权限={header}")
+    for err in result.get("errors") or []:
+        if "denied" in str(err) or "wrong_period" in str(err) or "no_query_page" in str(err):
+            notes.append(f"网页引出失败={err}")
+    return gather_inspected(input_dir, extra_files, notes)
+
+
 def run(
     period: str,
     input_dir: Path,
@@ -845,25 +976,15 @@ def run(
     notes = []
     secrets: list[str] = []
     synonyms = load_name_synonyms()
-    inspected = inspect_dir(input_dir) if input_dir.is_dir() else []
-    have_hq_assist = any(item.get("kind") == "assist" and item.get("entity") == "甲骨易" for item in inspected)
-    if not have_hq_assist:
-        extra = inspect_downloads_dept_assist()
-        hq_extra = [item for item in extra if item.get("entity") == "甲骨易"]
-        if hq_extra:
-            inspected.extend(hq_extra)
-            notes.append("Downloads核算项目余额表=甲骨易")
     extra_files: list[str] = []
     if isinstance(offline_xlsx, (list, tuple)):
         extra_files = [str(x) for x in offline_xlsx if x]
     elif offline_xlsx:
         extra_files = [str(offline_xlsx)]
-    for raw in extra_files:
-        p = Path(raw).expanduser()
-        if p.is_file():
-            inspected.extend(inspect_file(p))
-        elif p.is_dir():
-            inspected.extend(inspect_dir(p))
+    extra_files = list(extra_files) + cwd_sidecar_files(extra_files, input_dir)
+    inspected = gather_inspected(input_dir, extra_files, notes)
+    inspected = ensure_xingchen_current(period, input_dir, inspected, extra_files, no_api, notes)
+    inspected = drop_other_period_balances(inspected, period, notes)
     parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
     entity_amts: dict = {e: {} for e in layout["entities"]}
     amount_labels = {row["label"] for row in layout["profit_rows"] if row.get("kind") == "amount" and row.get("label")}
@@ -1093,7 +1214,7 @@ def run(
         payroll_covered, payroll_codes = apply_payroll(
             entity_amts, dept_amts, payroll_parsed, layout, notes, report_tmp
         )
-        if payroll_covered:
+        if "甲骨易" in payroll_covered:
             notes[:] = [n for n in notes if "总部工资社保无部门辅助" not in n]
 
     prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
@@ -1153,6 +1274,11 @@ def run(
             notes.append(f"已取但无损益科目={header}")
         if header in has_source and header != "甲骨易" and not profit_cur.get(header):
             notes.append(f"利润表无本月源={header}")
+    profit_missing = [
+        n.split("=", 1)[1]
+        for n in notes
+        if n.startswith("利润表无本月源=")
+    ]
 
     wb = build_workbook(period, entity_amts, dept_amts, profit_cur, profit_prev, layout)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1184,6 +1310,7 @@ def run(
         "status": status,
         "notes": notes,
         "ask": "",
+        "profit_missing": profit_missing,
     }
     asks: list[str] = []
     miss_note = next((n for n in notes if n.startswith("缺线下利润表=")), "")
@@ -1192,11 +1319,28 @@ def run(
         asks.append(
             f"缺{names}的代账利润表（小企业利润表，有本月金额）。损益表成品不能当源。请把表放到文件夹或告诉我路径；若先不处理这几家，说一声我留空。"
         )
-    if any("总部工资社保无部门辅助" in n for n in notes) and not payroll_covered:
+    if any("总部工资社保无部门辅助" in n for n in notes) and "甲骨易" not in payroll_covered:
         asks.append("总部核算项目余额表和凭证都没有把工资/社保挂到部门。这些格子请给拆分表或手填，不要拿做好的损益表倒填。")
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
         asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
+    if profit_missing:
+        asks.append(
+            "利润表无本月源="
+            + ",".join(profit_missing)
+            + "。请打开财务报表→利润表（不要走个别报表列表），会计期间选当期，点查询看本月金额再引出。不要点新增/生成。把表放到文件夹。"
+        )
+    denied = [n.split("=", 1)[1] for n in notes if n.startswith("利润表无查询权限=")]
+    if denied:
+        asks.append(
+            "当前金蝶号打不开"
+            + "/".join(denied)
+            + "的利润表查询页（无个别报表权限）。请换有权限的号，或把当期利润表引出放到文件夹。不要点生成。"
+        )
+    if any("缺网页账密" in n for n in notes):
+        asks.append(
+            "本机没有金蝶网页账密。请写进 ~/.config/finance/xingchen.local.json，或把当期引出放到文件夹。"
+        )
     payload["ask"] = " ".join(asks)
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)
@@ -1204,6 +1348,7 @@ def run(
         f"期间={period}\n"
         f"有源账套={','.join(has_source) or '无'}\n"
         f"缺源账套={','.join(missing) or '无'}\n"
+        f"利润表缺源={','.join(profit_missing) or '无'}\n"
         f"未映射部门个数={payload['unmapped_count']}\n"
         f"核对非0科目编码个数={nonzero}\n"
         f"核对非0绿行={','.join(sijia_codes) or '无'}\n"

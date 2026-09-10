@@ -68,12 +68,32 @@ def detect_period_text(text: str) -> str | None:
         month = int(m5.group(2))
         if 1 <= month <= 12:
             return f"{m5.group(1)}{month:02d}"
+    m6 = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", blob)
+    if m6:
+        return f"{m6.group(1)}{m6.group(2)}"
     return None
+
+
+def _folder_has_source(folder: Path) -> bool:
+    if not folder.is_dir():
+        return False
+    for path in folder.iterdir():
+        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            continue
+        if path.name.startswith("~$") or path.name.startswith("月度损益表_"):
+            continue
+        return True
+    return False
 
 
 def discover_input_dir(explicit: str = "") -> Path:
     if explicit:
         return Path(explicit).expanduser()
+    cwd = Path.cwd()
+    parts = {p.lower() for p in cwd.parts}
+    in_skill_tree = "finance-skills" in parts and "skills" in parts
+    if not in_skill_tree and not cwd.name.startswith(("pytest-", "tmp")) and _folder_has_source(cwd):
+        return cwd
     root = SKILL
     homes: list[Path] = []
     for _ in range(6):
@@ -86,22 +106,11 @@ def discover_input_dir(explicit: str = "") -> Path:
     if desktop.is_dir():
         homes.extend(sorted(desktop.glob("月度损益表_*"), reverse=True))
         homes.append(desktop)
-    homes.append(Path.cwd())
-
-    def _has_source(folder: Path) -> bool:
-        if not folder.is_dir():
-            return False
-        for path in folder.glob("*.xlsx"):
-            name = path.name
-            if name.startswith("~$") or name.startswith("月度损益表_"):
-                continue
-            return True
-        return False
-
+    homes.append(cwd)
     for folder in homes:
-        if _has_source(folder):
+        if _folder_has_source(folder):
             return folder
-    return Path.cwd()
+    return cwd
 
 
 def parse_period(raw: str | None) -> str:

@@ -70,12 +70,22 @@ def looks_like_agency_profit(blob: str, title: str) -> bool:
         return False
     if title.strip() in {"损益表", "确认情况"} or "确认情况" in title:
         return False
-    if "公司名称：" in text:
+    if match_offline_entity(text, title, rules):
+        return True
+    if any(
+        k in text
+        for k in (
+            "文化传媒",
+            "智译（上海）",
+            "智译(上海)",
+            "湖南分公司",
+            "湖南）科技",
+            "会企02表",
+        )
+    ):
         return False
     hints = rules.get("sheet_hints") or []
     if any(h in text for h in hints):
-        return True
-    if "本年累计" in text and match_offline_entity(text, "", rules):
         return True
     return False
 
