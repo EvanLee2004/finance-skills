@@ -71,7 +71,7 @@ CI：`.github/workflows/pytest.yml` 在 push/PR 到 `main` 时跑同一套 `pyte
 |-------|----------|------|
 | [receivables-merge](skills/receivables-merge/) | **应收账款合并**：合并分年表、算账龄、按上一版回填标注、按维护表做销售归属、删已回款行、结转老坏账、出透视汇总 | ✅ 真实数据验证 · 回归通过 · 已入包 |
 | [split-by-sales](skills/split-by-sales/) | **按销售拆分**：把应收 all 按销售人员拆成一人一份带下拉框 Excel（账龄降序、坏账桶忽略、GM 单独 sheet、对账）——接在合并之后 | ✅ 回归通过 · 链路通 · 已入包 |
-| [labor-invoice-check](skills/labor-invoice-check/) | **劳务发票核对**：待支付清单(国内个人)×发票台账，按身份证号求和多张发票、实习生/外国人豁免、≤800 放行、>800 缺票/未开票标黄催票 → 主核对表+不付名单+可付名单 | ✅ 真实数据验证 · 回归通过 · 已入包 |
+| [labor-invoice-check](skills/labor-invoice-check/) | **劳务发票做账**：应发明细×发票汇总，按姓名加总，拆有票/800以下/无票；当月没有的待人工 | ✅ 合成测试绿 · 8月 258/191/待人工17 · 本机 opencode 已跑 |
 | [withholding-report-rename](skills/withholding-report-rename/) | **代扣代缴申报表重命名**：一批「代扣代缴、代收代缴税款报告表」PDF 批量改名成 `{纳税人名称}{金额合计}.pdf`；默认 copy 不动原件、出对照表，抽不到的进待人工 | ✅ 回归 5/5 · opencode 实测 · 已入包 |
 | [compliance-spot-check](skills/compliance-spot-check/) | **合规文件抽查**：吃应收 all（+可选抽查历史）→ 本周建议名单（营销人员｜客户｜交付月份）；未反馈优先、已反馈月份跳过、覆盖在职；只推荐不自动发邮件 | ✅ 合成回归通过 · 已入包 · 待真实 all 试用 |
 | [dreame-ar-progress-diff](skills/dreame-ar-progress-diff/) | **追觅应收进度对比**：多版追觅 list「应收进度」按人名对齐、期间并集，出值/底色/列结构 diff（预计付款忽略公式）+ 结论摘要 | ✅ 回归 47/47 · 真实金标 · **已入包 v1.0.15+** |

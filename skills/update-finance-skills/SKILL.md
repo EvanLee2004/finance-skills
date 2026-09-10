@@ -41,7 +41,7 @@ Windows 同事的目录一般是 `%USERPROFILE%\.config\opencode\skills\`。找�
 | 更新 / 更新财务skills / 安装财务skills | **本技能** |
 | 跑本周应收 / 应收合并 / 做应收all | `receivables-merge` |
 | 把 all 拆给各销售 / 按销售拆分 | `split-by-sales` |
-| 核对劳务发票 / 谁没开票不能付 | `labor-invoice-check` |
+| 做这个月劳务发票统计 / 劳务发票核对 | `labor-invoice-check` |
 | 申报表重命名 / 代扣代缴 PDF 改名 | `withholding-report-rename` |
 | 本周抽谁 / 合规抽查 | `compliance-spot-check` |
 | 对比追觅进度 / 追觅这两版 | `dreame-ar-progress-diff` |
