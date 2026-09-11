@@ -768,6 +768,7 @@ def count_nonzero_checks(wb, layout) -> int:
 def write_report(path: Path, payload: dict) -> None:
     lines = [
         f"期间={payload['period']}",
+        f"材料夹={payload.get('input_name') or '无'}",
         f"有源账套={','.join(payload['has_source']) or '无'}",
         f"缺源账套={','.join(payload['missing']) or '无'}",
         f"利润表缺源={','.join(payload.get('profit_missing') or []) or '无'}",
@@ -846,12 +847,14 @@ def abort_for_login(out: Path, period: str, notes: list[str], ask: str, secrets:
         "ask": ask,
         "profit_missing": [],
         "prev_offline_missing": [],
+        "input_name": "",
     }
     report_path = out.with_name(out.stem + "_运行报告.txt")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     write_report(report_path, payload)
     text = (
         f"期间={period}\n"
+        f"材料夹=无\n"
         f"有源账套=无\n"
         f"缺源账套=无\n"
         f"利润表缺源=无\n"
@@ -870,7 +873,40 @@ def abort_for_login(out: Path, period: str, notes: list[str], ask: str, secrets:
     return 2
 
 
-def collect_offline_records(inspected: list[dict], extra_files: list[str], period: str, notes: list[str]) -> list[dict]:
+def note_ignored_finished_pl(input_dir: Path, extra_files: list[str], notes: list[str]) -> None:
+    """金标/成品文件名 inspect 会直接丢掉，这里补一行说明，避免以为没扫到。"""
+    seen: set[str] = set()
+    roots: list[Path] = []
+    if input_dir.is_dir():
+        roots.append(input_dir)
+    for raw in extra_files:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            roots.append(p)
+        elif p.is_file():
+            roots.append(p.parent)
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.name
+            if "损益类部门科目余额表" not in name and not name.startswith("月度损益表_") and not name.startswith("agent_月度损益表"):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            notes.append("忽略损益表成品=" + name)
+
+
+def collect_offline_records(
+    inspected: list[dict],
+    extra_files: list[str],
+    period: str,
+    notes: list[str],
+    sibling_period: str = "",
+) -> list[dict]:
     paths: list[Path] = []
     seen: set[str] = set()
     for item in inspected:
@@ -906,6 +942,8 @@ def collect_offline_records(inspected: list[dict], extra_files: list[str], perio
             continue
         per = rec.get("period") or period
         if per != period:
+            if sibling_period and per == sibling_period:
+                continue
             notes.append(f"线下利润表期间不符={ent}:{per}")
             continue
         by_ent[ent] = rec
@@ -1098,7 +1136,14 @@ def ensure_xingchen_current(
     prev = prev_period(period)
     prev_gaps = xingchen_prev_profit_gaps(inspected, period)
     if prev_gaps:
-        notes.append("补拉上月利润表=" + ",".join(sorted(prev_gaps)))
+        try:
+            from xingchen_login import load_creds, state_path
+
+            can_web = bool(load_creds() or state_path().is_file() or WEB_EXPORT is not None)
+        except Exception:
+            can_web = WEB_EXPORT is not None
+        if can_web:
+            notes.append("补拉上月利润表=" + ",".join(sorted(prev_gaps)))
         inspected = _export_xingchen_gaps(prev, input_dir, extra_files, notes, inspected, prev_gaps)
     return inspected
 
@@ -1131,6 +1176,7 @@ def run(
 
         dump_prev_profit_if_needed(period, Path(input_dir) / "API", notes)
     inspected = gather_inspected(input_dir, extra_files, notes)
+    note_ignored_finished_pl(input_dir, extra_files, notes)
     inspected = ensure_xingchen_current(period, input_dir, inspected, extra_files, no_api, notes)
     inspected = drop_other_period_balances(inspected, period, notes)
     parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
@@ -1382,7 +1428,9 @@ def run(
         profit_prev.setdefault("甲骨易", {}).update(prev_map)
     offline_records = []
     if not skip_offline:
-        offline_records = collect_offline_records(inspected, extra_files, period, notes)
+        offline_records = collect_offline_records(
+            inspected, extra_files, period, notes, sibling_period=prev_period(period)
+        )
         apply_offline_profit(
             entity_amts,
             dept_amts,
@@ -1398,7 +1446,9 @@ def run(
         missing_off = [e for e in needed if e not in have]
         if missing_off:
             notes.append("缺线下利润表=" + ",".join(missing_off))
-        prev_offline = collect_offline_records(inspected, extra_files, prev_period(period), notes)
+        prev_offline = collect_offline_records(
+            inspected, extra_files, prev_period(period), notes, sibling_period=period
+        )
         for rec in prev_offline:
             ent = rec.get("entity")
             if not ent:
@@ -1483,6 +1533,7 @@ def run(
             for n in notes
             if n.startswith("缺上月线下利润表=")
         ],
+        "input_name": input_dir.name,
     }
     asks: list[str] = []
     miss_note = next((n for n in notes if n.startswith("缺线下利润表=")), "")
@@ -1507,6 +1558,7 @@ def run(
     write_report(report_path, payload)
     text = (
         f"期间={period}\n"
+        f"材料夹={input_dir.name}\n"
         f"有源账套={','.join(has_source) or '无'}\n"
         f"缺源账套={','.join(missing) or '无'}\n"
         f"利润表缺源={','.join(profit_missing) or '无'}\n"

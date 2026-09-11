@@ -1080,7 +1080,8 @@ def test_result_workbook_is_not_a_source(tmp_path: Path):
     row = account_row_map(layout)
     assert ws[f"I{row['540109']}"].value in (None, "")
     report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
-    assert "忽略损益表成品" in report or "缺线下利润表" in report or "山东分公司" in (report.split("缺源账套=")[1].split("\n")[0] if "缺源账套=" in report else "")
+    assert "忽略损益表成品=" in report
+    assert "缺线下利润表=" in report
 
 
 def test_agency_profit_fills_shandong_sichuan_jinan(tmp_path: Path):
@@ -1147,6 +1148,7 @@ def test_agency_profit_fills_shandong_sichuan_jinan(tmp_path: Path):
     assert "线下利润表=山东分公司" in report
     assert "线下利润表=四川分公司" in report
     assert "线下利润表=济南子公司" in report
+    assert "线下利润表期间不符=" not in report
 
 
 def test_cwd_sidecar_agency_is_used_without_offline_flag(tmp_path: Path, monkeypatch):
