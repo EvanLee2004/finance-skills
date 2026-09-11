@@ -36,14 +36,16 @@
       "excel_header": "湖南分公司",
       "legal_name": "甲骨易（北京）语言科技股份有限公司湖南分公司",
       "has_xingchen": true,
-      "api_ready_default": false
+      "api_ready_default": false,
+      "skip_web_assist": true
     },
     {
       "key": "hunan_zgs",
       "excel_header": "湖南子公司",
       "legal_name": "甲骨易（湖南）科技有限公司",
       "has_xingchen": true,
-      "api_ready_default": false
+      "api_ready_default": false,
+      "skip_web_assist": true
     }
   ],
   "offline_profit_entities": ["山东分公司", "四川分公司", "济南子公司"],

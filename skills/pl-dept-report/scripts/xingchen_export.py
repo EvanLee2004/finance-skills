@@ -47,6 +47,7 @@ FORBIDDEN_CLICKS = frozenset(
     }
 )
 BOOK_SEARCH = {
+    "jiagu": "语言科技",
     "wenhua": "文化传媒",
     "shanghai": "智译",
     "hunan_fgs": "湖南分公司",
@@ -79,18 +80,27 @@ def assist_dest_name(out_dir: Path, header: str, period: str) -> Path:
     return Path(out_dir) / f"{header}_核算项目余额表_{period}.xlsx"
 
 
-def _export_books() -> list[tuple[str, str, str]]:
-    data = load_books()
+def book_rows(keys: list[str] | None = None) -> list[tuple[str, str, str]]:
+    """keys=None：只出要网页引出的四本。点名 jiagu 才能拉总部。"""
+    wanted = set(keys) if keys is not None else None
     out = []
-    for acc in data.get("xingchen_accounts") or []:
-        if acc.get("api_ready_default"):
-            continue
+    for acc in load_books().get("xingchen_accounts") or []:
         key = str(acc.get("key") or "")
         legal = str(acc.get("legal_name") or "")
         header = str(acc.get("excel_header") or key)
-        if key and legal:
-            out.append((key, legal, header))
+        if not key or not legal:
+            continue
+        if wanted is None:
+            if acc.get("api_ready_default"):
+                continue
+        elif key not in wanted:
+            continue
+        out.append((key, legal, header))
     return out
+
+
+def _export_books() -> list[tuple[str, str, str]]:
+    return book_rows()
 
 
 def _form_id(url: str) -> str:
@@ -141,31 +151,141 @@ async def _click_text(page, label: str) -> bool:
     )
 
 
-async def _switch_book(page, legal_name: str, token: str = "") -> bool:
+async def _wait_workbench(page) -> None:
     await _dismiss_overlays(page)
-    await page.goto(XINGCHEN_HOME, wait_until="domcontentloaded")
-    await page.wait_for_timeout(1600)
+    enter = page.get_by_text("进入使用")
+    if await enter.count():
+        await enter.first.click()
+        await page.wait_for_timeout(2000)
     await _dismiss_overlays(page)
-    current = await page.locator("body").inner_text()
-    if legal_name in current[:5000] and "输入账套名称" not in current:
-        return True
-    handle = page.locator("span").filter(has_text=re.compile("甲骨易|文化传媒|智译|湖南"))
-    if await handle.count():
-        await handle.last.click(force=True)
-        await page.wait_for_timeout(700)
+
+
+async def _switcher_open(page) -> bool:
     box = page.get_by_placeholder("输入账套名称或搜索空间")
-    needle = token or legal_name[:8]
-    if await box.count():
-        await box.first.fill(needle)
-        await page.wait_for_timeout(500)
-    target = page.get_by_text(legal_name, exact=True)
-    if not await target.count():
-        target = page.get_by_text(legal_name, exact=False)
-    if not await target.count():
+    if not await box.count():
         return False
-    await target.last.click(force=True)
-    await page.wait_for_timeout(2500)
-    return legal_name in await page.locator("body").inner_text()
+    try:
+        return bool(await box.first.is_visible())
+    except Exception:
+        return False
+
+
+async def _header_text(page) -> str:
+    return str(
+        await page.evaluate(
+            """() => {
+              const re = /甲骨易|文化传媒|智译|湖南/;
+              const bits = [];
+              for (const el of document.querySelectorAll('span,div,a')) {
+                const r = el.getBoundingClientRect();
+                if (r.y < 20 || r.y > 90 || r.height > 50) continue;
+                const t = (el.innerText || '').replace(/\\s+/g, '');
+                if (t && t.length <= 40 && re.test(t)) bits.push(t);
+              }
+              return bits.join('|');
+            }"""
+        )
+        or ""
+    )
+
+
+def _header_matches(header: str, legal_name: str) -> bool:
+    name = legal_name.replace(" ", "")
+    compact = header.replace(" ", "")
+    if name and name in compact:
+        if "湖南分公司" not in name and "湖南分公司" in compact:
+            return False
+        return True
+    return False
+
+
+async def _page_has_book(page, legal_name: str) -> bool:
+    if await _switcher_open(page):
+        return False
+    return _header_matches(await _header_text(page), legal_name)
+
+
+async def _open_book_switcher(page) -> bool:
+    if await _switcher_open(page):
+        return True
+    clicked = await page.evaluate(
+        """() => {
+          const re = /甲骨易|文化传媒|智译/;
+          const cands = [];
+          for (const el of document.querySelectorAll('span,div,a')) {
+            const r = el.getBoundingClientRect();
+            if (r.y < 20 || r.y > 80 || r.height > 40) continue;
+            const t = (el.innerText || '').trim();
+            if (re.test(t) && t.length <= 40) cands.push(el);
+          }
+          if (!cands.length) return false;
+          cands.sort((a, b) => b.getBoundingClientRect().x - a.getBoundingClientRect().x);
+          cands[0].click();
+          return true;
+        }"""
+    )
+    if clicked:
+        await page.wait_for_timeout(800)
+        try:
+            await page.get_by_placeholder("输入账套名称或搜索空间").first.wait_for(state="visible", timeout=4000)
+            return True
+        except Exception:
+            pass
+    return await _switcher_open(page)
+
+
+async def _click_visible(target) -> bool:
+    n = await target.count()
+    for i in range(n - 1, -1, -1):
+        loc = target.nth(i)
+        try:
+            if await loc.is_visible():
+                await loc.click(force=True)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _switch_book(page, legal_name: str, token: str = "") -> bool:
+    needle = token or legal_name[:8]
+    for attempt in range(3):
+        try:
+            await page.goto(XINGCHEN_HOME, wait_until="domcontentloaded")
+            await page.wait_for_selector("text=账务处理", timeout=15000)
+        except Exception:
+            await page.wait_for_timeout(1800 + attempt * 700)
+        try:
+            await _wait_workbench(page)
+        except Exception:
+            pass
+        if await _page_has_book(page, legal_name):
+            return True
+        await _open_book_switcher(page)
+        if await _switcher_open(page):
+            box = page.get_by_placeholder("输入账套名称或搜索空间")
+            await box.first.click()
+            await box.first.fill("")
+            await box.first.fill(needle)
+            await page.wait_for_timeout(800)
+        target = page.get_by_text(legal_name, exact=True)
+        if not await target.count():
+            target = page.get_by_text(legal_name, exact=False)
+        if not await target.count():
+            continue
+        if not await _click_visible(target):
+            continue
+        for _ in range(12):
+            await page.wait_for_timeout(250)
+            if not await _switcher_open(page):
+                break
+        else:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(400)
+        await _dismiss_overlays(page)
+        if await _page_has_book(page, legal_name):
+            return True
+    return False
 
 
 async def _visible_period(page) -> str:
@@ -393,8 +513,10 @@ async def _set_filter_check(page, label: str, want: bool) -> None:
 
 async def _set_acct_filters(page, period: str) -> None:
     if not await _set_period(page, period):
-        shown = ",".join(await _period_input_values(page) or [await _visible_period(page) or "-"])
-        raise RuntimeError(f"period_not_set:{shown}")
+        await page.wait_for_timeout(800)
+        if not await _set_period(page, period):
+            shown = ",".join(await _period_input_values(page) or [await _visible_period(page) or "-"])
+            raise RuntimeError(f"period_not_set:{shown}")
     await _click_text(page, "展开过滤")
     await page.wait_for_timeout(400)
     await _set_filter_check(page, "展开所有级次", True)
@@ -403,13 +525,15 @@ async def _set_acct_filters(page, period: str) -> None:
     await _set_filter_check(page, "余额为0不显示", False)
     await _set_filter_check(page, "无发生额不显示", False)
     await _click_text(page, "查询")
-    await page.wait_for_timeout(2500)
+    await page.wait_for_timeout(4000)
 
 
 async def _set_assist_dept(page, period: str) -> None:
     if not await _set_period(page, period):
-        shown = ",".join(await _period_input_values(page) or [await _visible_period(page) or "-"])
-        raise RuntimeError(f"period_not_set:{shown}")
+        await page.wait_for_timeout(800)
+        if not await _set_period(page, period):
+            shown = ",".join(await _period_input_values(page) or [await _visible_period(page) or "-"])
+            raise RuntimeError(f"period_not_set:{shown}")
     box = page.locator(".kd-table-cell-basedata-container").first
     if await box.count():
         await box.click()
@@ -428,7 +552,7 @@ def _newest_xlsx(folder: Path, after: float) -> Path | None:
     newest_mtime = after
     if not folder.is_dir():
         return None
-    for path in folder.glob("*.xlsx"):
+    for path in list(folder.glob("*.xlsx")) + list(folder.glob("*.xls")):
         if path.name.startswith("~$"):
             continue
         try:
@@ -452,11 +576,11 @@ async def _export_current(page, dest: Path) -> bool:
             await _click_text(page, "引出")
         await page.wait_for_timeout(500)
         if await page.get_by_text("到引出结果界面下载").count():
-            async with page.expect_download(timeout=15000) as dl_info:
+            async with page.expect_download(timeout=60000) as dl_info:
                 await page.get_by_text("到引出结果界面下载").first.click()
             download = await dl_info.value
         else:
-            async with page.expect_download(timeout=15000) as dl_info:
+            async with page.expect_download(timeout=60000) as dl_info:
                 confirm = page.get_by_text("引出", exact=True)
                 if await confirm.count() >= 2:
                     await confirm.last.click()
@@ -483,6 +607,11 @@ async def _open_profit_query(page) -> str:
     await page.goto(PROFIT_FORM, wait_until="domcontentloaded")
     await page.wait_for_timeout(2200)
     await _dismiss_overlays(page)
+    for _ in range(8):
+        body = await page.locator("body").inner_text()
+        if "本月金额" in body or "本月数" in body or ("无" in body and "权限" in body):
+            break
+        await page.wait_for_timeout(700)
     return page.url
 
 
@@ -526,7 +655,11 @@ async def _export_profit_query(page, dest: Path, period: str) -> tuple[bool, str
         return False, "denied"
     if "本月金额" not in body and "本月数" not in body:
         return False, f"no_query_page:{_form_id(url) or '-'}"
-    if not await _set_period(page, period):
+    set_ok = await _set_period(page, period)
+    if not set_ok:
+        await page.wait_for_timeout(800)
+        set_ok = await _set_period(page, period)
+    if not set_ok:
         return False, f"period_not_set:{await _visible_period(page) or '-'}"
     await _click_text(page, "查询")
     await _click_text(page, "刷新")
@@ -581,10 +714,6 @@ async def export_book(
             if not await _all_period_inputs_match(page, period):
                 shown = ",".join(await _period_input_values(page) or [await _visible_period(page) or "-"])
                 raise RuntimeError(f"period_not_set:{shown}")
-            body = await page.locator("body").inner_text()
-            if "暂无数据" in body:
-                note.setdefault("empty", []).append(kind)
-                continue
             if await _export_current(page, path):
                 got = _xlsx_period(path)
                 if got and got != period:
@@ -634,7 +763,7 @@ async def export_missing_async(
     out_dir.mkdir(parents=True, exist_ok=True)
     STATE.parent.mkdir(parents=True, exist_ok=True)
     wanted = set(keys)
-    catalog = [(k, legal, header) for k, legal, header in _export_books() if k in wanted]
+    catalog = book_rows(list(wanted))
     summary = {"ok": [], "denied": [], "errors": [], "books": []}
     from playwright.async_api import async_playwright
 
@@ -646,6 +775,9 @@ async def export_missing_async(
         for key, legal, header in catalog:
             book_kinds = (kinds or {}).get(key) or ["account", "assist", "profit"]
             result = await export_book(page, key, legal, header, period, out_dir, book_kinds)
+            if result.get("reason") == "switch_failed":
+                await page.wait_for_timeout(1200)
+                result = await export_book(page, key, legal, header, period, out_dir, book_kinds)
             summary["books"].append(result)
             if result.get("ok"):
                 summary["ok"].append(key)

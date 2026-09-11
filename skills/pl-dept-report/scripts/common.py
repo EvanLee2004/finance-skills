@@ -97,7 +97,11 @@ def discover_input_dir(explicit: str = "") -> Path:
     root = SKILL
     homes: list[Path] = []
     for _ in range(6):
-        cand = root / "技能" / "金蝶" / "损益表利润表" / "工作区" / "引出"
+        workspace = root / "技能" / "金蝶" / "损益表利润表" / "工作区"
+        packed = workspace / "全源_202608"
+        if packed.is_dir():
+            homes.append(packed)
+        cand = workspace / "引出"
         if cand.is_dir():
             homes.append(cand)
             break
@@ -110,7 +114,7 @@ def discover_input_dir(explicit: str = "") -> Path:
     for folder in homes:
         if _folder_has_source(folder):
             return folder
-    return cwd
+    return default_desktop_dir("月度损益表")
 
 
 def parse_period(raw: str | None) -> str:

@@ -771,6 +771,7 @@ def write_report(path: Path, payload: dict) -> None:
         f"有源账套={','.join(payload['has_source']) or '无'}",
         f"缺源账套={','.join(payload['missing']) or '无'}",
         f"利润表缺源={','.join(payload.get('profit_missing') or []) or '无'}",
+        f"利润表上月缺线下={','.join(payload.get('prev_offline_missing') or []) or '无'}",
         f"未映射部门个数={payload['unmapped_count']}",
         f"核对非0科目编码个数={payload['nonzero_checks']}",
         f"核对非0绿行={','.join(payload.get('nonzero_sijia') or []) or '无'}",
@@ -788,6 +789,85 @@ def write_report(path: Path, payload: dict) -> None:
     if ask:
         lines.append("ask=" + ask)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def hq_file_source(inspected: list[dict]) -> bool:
+    return any(
+        item.get("entity") == "甲骨易" and item.get("kind") in {"account", "assist", "profit"}
+        for item in inspected
+    )
+
+
+def collect_login_blocks(notes: list[str], *, no_api: bool, hq_has_source: bool) -> str:
+    """API 或金蝶账号登不上：停下来问人，不出表。--no-api 测试不挡。"""
+    if no_api:
+        return ""
+    asks: list[str] = []
+    if any(str(n).startswith("api=") for n in notes):
+        asks.append(
+            "总部金蝶开放平台 API 取数失败。请检查本机应用号和只读权限后重试，或把当期引出放到文件夹。不要当做出表成功。"
+        )
+    if any(n == "无密钥" for n in notes) and not hq_has_source:
+        asks.append(
+            "本机没有金蝶开放平台应用号，总部 API 取不到。请检查 ~/.config/finance/kingdee.local.json，或把当期引出放到文件夹。"
+        )
+    if any("缺网页账密" in str(n) for n in notes):
+        asks.append(
+            "本机没有金蝶网页账密，登不上星辰。请写进 ~/.config/finance/xingchen.local.json，或把当期引出放到文件夹。"
+        )
+    denied = [str(n).split("=", 1)[1] for n in notes if str(n).startswith("利润表无查询权限=")]
+    if denied:
+        asks.append(
+            "当前金蝶号打不开"
+            + "/".join(denied)
+            + "的利润表查询页。请换能登录的号，或把当期利润表引出放到文件夹。不要点生成，不要当做出表成功。"
+        )
+    if any(str(n).startswith("网页引出失败=") for n in notes):
+        asks.append(
+            "金蝶网页登录或引出失败。请先确认本机能登录星辰，或把当期引出放到文件夹。不要当做出表成功。"
+        )
+    return " ".join(asks)
+
+
+def abort_for_login(out: Path, period: str, notes: list[str], ask: str, secrets: list[str]) -> int:
+    payload = {
+        "period": period,
+        "has_source": [],
+        "missing": [],
+        "unmapped_count": 0,
+        "nonzero_checks": 0,
+        "nonzero_sijia": [],
+        "nonzero_parent": [],
+        "nonzero_unmapped": [],
+        "nonzero_other": [],
+        "out": "未生成",
+        "status": "login_blocked",
+        "notes": notes,
+        "ask": ask,
+        "profit_missing": [],
+        "prev_offline_missing": [],
+    }
+    report_path = out.with_name(out.stem + "_运行报告.txt")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    write_report(report_path, payload)
+    text = (
+        f"期间={period}\n"
+        f"有源账套=无\n"
+        f"缺源账套=无\n"
+        f"利润表缺源=无\n"
+        f"利润表上月缺线下=无\n"
+        f"未映射部门个数=0\n"
+        f"核对非0科目编码个数=0\n"
+        f"核对非0绿行=无\n"
+        f"核对非0父行=无\n"
+        f"核对非0未映射=无\n"
+        f"核对非0其它=无\n"
+        f"产物=未生成\n"
+        f"status=login_blocked\n"
+        f"ask={ask}\n"
+    )
+    print(stdout_safe(text, secrets), end="", flush=True)
+    return 2
 
 
 def collect_offline_records(inspected: list[dict], extra_files: list[str], period: str, notes: list[str]) -> list[dict]:
@@ -880,9 +960,50 @@ def xingchen_web_gaps(inspected: list[dict], period: str) -> dict[str, list[str]
     gaps: dict[str, list[str]] = {}
     for acc in web:
         header = str(acc.get("excel_header") or "")
-        missing = [k for k in ("account", "assist", "profit") if k not in have.get(header, set())]
+        needed = ["account", "profit"]
+        if not acc.get("skip_web_assist"):
+            needed.insert(1, "assist")
+        missing = [k for k in needed if k not in have.get(header, set())]
         if missing:
             gaps[str(acc.get("key") or header)] = missing
+    hq_have: set[str] = set()
+    for item in inspected:
+        if item.get("entity") != "甲骨易":
+            continue
+        kind = item.get("kind")
+        if kind == "profit" and item.get("period") == period:
+            hq_have.add("profit")
+        elif kind in {"account", "assist"}:
+            per = item.get("period")
+            if per and per != period:
+                continue
+            hq_have.add(str(kind))
+    hq_missing = [k for k in ("account", "assist") if k not in hq_have]
+    if hq_missing:
+        gaps["jiagu"] = hq_missing
+    return gaps
+
+
+def xingchen_prev_profit_gaps(inspected: list[dict], period: str) -> dict[str, list[str]]:
+    """上月利润表：星辰账自己拉，不问她。有文件就不再拉。"""
+    from dump_api_excel import is_api_source
+
+    prev = prev_period(period)
+    books = [a for a in (load_books().get("xingchen_accounts") or []) if a.get("key")]
+    have: set[str] = set()
+    for item in inspected:
+        if item.get("kind") != "profit" or item.get("period") != prev:
+            continue
+        if is_api_source(item) and item.get("entity") != "甲骨易":
+            continue
+        ent = str(item.get("entity") or "")
+        if ent:
+            have.add(ent)
+    gaps: dict[str, list[str]] = {}
+    for acc in books:
+        header = str(acc.get("excel_header") or "")
+        if header and header not in have:
+            gaps[str(acc.get("key") or header)] = ["profit"]
     return gaps
 
 
@@ -916,21 +1037,20 @@ def gather_inspected(input_dir: Path, extra_files: list[str], notes: list[str]) 
             inspected.extend(inspect_file(p))
         elif p.is_dir():
             inspected.extend(inspect_dir(p))
-    return inspected
+    from dump_api_excel import prefer_web_over_api
+
+    return prefer_web_over_api(inspected)
 
 
-def ensure_xingchen_current(
+def _export_xingchen_gaps(
     period: str,
     input_dir: Path,
-    inspected: list[dict],
     extra_files: list[str],
-    no_api: bool,
     notes: list[str],
+    inspected: list[dict],
+    gaps: dict[str, list[str]],
 ) -> list[dict]:
-    gaps = xingchen_web_gaps(inspected, period)
     if not gaps:
-        return inspected
-    if no_api or os.environ.get("PL_DEPT_SKIP_WEB_EXPORT") == "1":
         return inspected
     hook = WEB_EXPORT
     if hook is not None:
@@ -962,6 +1082,27 @@ def ensure_xingchen_current(
     return gather_inspected(input_dir, extra_files, notes)
 
 
+def ensure_xingchen_current(
+    period: str,
+    input_dir: Path,
+    inspected: list[dict],
+    extra_files: list[str],
+    no_api: bool,
+    notes: list[str],
+) -> list[dict]:
+    if no_api or os.environ.get("PL_DEPT_SKIP_WEB_EXPORT") == "1":
+        return inspected
+    inspected = _export_xingchen_gaps(
+        period, input_dir, extra_files, notes, inspected, xingchen_web_gaps(inspected, period)
+    )
+    prev = prev_period(period)
+    prev_gaps = xingchen_prev_profit_gaps(inspected, period)
+    if prev_gaps:
+        notes.append("补拉上月利润表=" + ",".join(sorted(prev_gaps)))
+        inspected = _export_xingchen_gaps(prev, input_dir, extra_files, notes, inspected, prev_gaps)
+    return inspected
+
+
 def run(
     period: str,
     input_dir: Path,
@@ -982,6 +1123,13 @@ def run(
     elif offline_xlsx:
         extra_files = [str(offline_xlsx)]
     extra_files = list(extra_files) + cwd_sidecar_files(extra_files, input_dir)
+    if not no_api:
+        from dump_api_excel import dump_if_needed
+
+        dump_if_needed(period, Path(input_dir) / "API", notes)
+        from dump_api_excel import dump_prev_profit_if_needed
+
+        dump_prev_profit_if_needed(period, Path(input_dir) / "API", notes)
     inspected = gather_inspected(input_dir, extra_files, notes)
     inspected = ensure_xingchen_current(period, input_dir, inspected, extra_files, no_api, notes)
     inspected = drop_other_period_balances(inspected, period, notes)
@@ -1066,6 +1214,14 @@ def run(
     else:
         notes.append("skip-api")
         prev_map = {}
+
+    blocked = collect_login_blocks(
+        notes,
+        no_api=no_api,
+        hq_has_source=hq_from_api or hq_file_source(inspected),
+    )
+    if blocked:
+        return abort_for_login(out, period, notes, blocked, secrets)
 
     if not rent_lines:
         journal_paths: list[Path] = []
@@ -1242,6 +1398,17 @@ def run(
         missing_off = [e for e in needed if e not in have]
         if missing_off:
             notes.append("缺线下利润表=" + ",".join(missing_off))
+        prev_offline = collect_offline_records(inspected, extra_files, prev_period(period), notes)
+        for rec in prev_offline:
+            ent = rec.get("entity")
+            if not ent:
+                continue
+            profit_prev.setdefault(ent, {}).update(rec.get("values") or {})
+            notes.append(f"上月线下利润表={ent}")
+        prev_off_have = {r.get("entity") for r in prev_offline}
+        prev_off_missing = [e for e in needed if e not in prev_off_have]
+        if prev_off_missing:
+            notes.append("缺上月线下利润表=" + ",".join(prev_off_missing))
     else:
         notes.append("线下利润表=跳过")
     apply_jinan_service_leftover(entity_amts, dept_amts, offline_records, layout, notes)
@@ -1311,6 +1478,11 @@ def run(
         "notes": notes,
         "ask": "",
         "profit_missing": profit_missing,
+        "prev_offline_missing": [
+            n.split("=", 1)[1]
+            for n in notes
+            if n.startswith("缺上月线下利润表=")
+        ],
     }
     asks: list[str] = []
     miss_note = next((n for n in notes if n.startswith("缺线下利润表=")), "")
@@ -1330,17 +1502,6 @@ def run(
             + ",".join(profit_missing)
             + "。请打开财务报表→利润表（不要走个别报表列表），会计期间选当期，点查询看本月金额再引出。不要点新增/生成。把表放到文件夹。"
         )
-    denied = [n.split("=", 1)[1] for n in notes if n.startswith("利润表无查询权限=")]
-    if denied:
-        asks.append(
-            "当前金蝶号打不开"
-            + "/".join(denied)
-            + "的利润表查询页（无个别报表权限）。请换有权限的号，或把当期利润表引出放到文件夹。不要点生成。"
-        )
-    if any("缺网页账密" in n for n in notes):
-        asks.append(
-            "本机没有金蝶网页账密。请写进 ~/.config/finance/xingchen.local.json，或把当期引出放到文件夹。"
-        )
     payload["ask"] = " ".join(asks)
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)
@@ -1349,6 +1510,7 @@ def run(
         f"有源账套={','.join(has_source) or '无'}\n"
         f"缺源账套={','.join(missing) or '无'}\n"
         f"利润表缺源={','.join(profit_missing) or '无'}\n"
+        f"利润表上月缺线下={','.join(payload['prev_offline_missing']) or '无'}\n"
         f"未映射部门个数={payload['unmapped_count']}\n"
         f"核对非0科目编码个数={nonzero}\n"
         f"核对非0绿行={','.join(sijia_codes) or '无'}\n"

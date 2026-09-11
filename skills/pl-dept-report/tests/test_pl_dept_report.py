@@ -26,6 +26,8 @@ _PL_MODS = (
     "formula_eval",
     "convert",
     "offline_profit",
+    "dump_api_excel",
+    "fetch_reports",
     "xingchen_export",
     "xingchen_login",
     "rent_abstract",
@@ -1115,6 +1117,7 @@ def test_agency_profit_fills_shandong_sichuan_jinan(tmp_path: Path):
     )
     assert out.is_file(), r.stdout + r.stderr
     assert "ask=" not in r.stdout
+    assert "利润表上月缺线下=" in r.stdout
     wb = openpyxl.load_workbook(out)
     ws = wb["损益表"]
     pf = wb["利润表"]
@@ -1969,17 +1972,19 @@ def test_stale_profit_file_still_triggers_web_export(tmp_path: Path, monkeypatch
 
     monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(HERE / "_missing_kingdee.json"))
     monkeypatch.setenv("KINGDEE_PL_LOCAL_JSON", str(HERE / "_missing_pl.json"))
-    called = {}
+    called = {"runs": []}
 
     def fake(period, out_dir, books, kinds):
+        called["runs"].append({"period": period, "books": list(books), "kinds": kinds})
         called["period"] = period
         called["books"] = list(books)
         called["kinds"] = kinds
-        _write_profit(
-            Path(out_dir) / "文化_利润表_202608.xlsx",
-            "北京甲骨易文化传媒有限公司",
-            [("一、营业收入", 12.0)],
-        )
+        if period == "202608":
+            _write_profit(
+                Path(out_dir) / "文化_利润表_202608.xlsx",
+                "北京甲骨易文化传媒有限公司",
+                [("一、营业收入", 12.0)],
+            )
         return {"ok": ["wenhua"]}
 
     monkeypatch.setattr(convert, "WEB_EXPORT", fake)
@@ -1999,10 +2004,16 @@ def test_stale_profit_file_still_triggers_web_export(tmp_path: Path, monkeypatch
         "北京甲骨易文化传媒有限公司",
         [("5101", "主营业务收入", None, 10.0)],
     )
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5101", "主营业务收入", None, 1.0)],
+    )
     convert.run("202608", tmp_path, tmp_path / "out.xlsx", no_api=False)
-    assert called.get("period") == "202608"
-    assert "wenhua" in (called.get("books") or [])
-    kinds = called.get("kinds") or {}
+    assert any(c.get("period") == "202608" for c in (called.get("runs") or [called]))
+    first = next((c for c in (called.get("runs") or [called]) if c.get("period") == "202608"), called)
+    assert "wenhua" in (first.get("books") or [])
+    kinds = first.get("kinds") or {}
     assert "profit" in (kinds.get("wenhua") or [])
     labels = [row["label"] for row in load_layout()["profit_rows"]]
     row = 2 + labels.index("收入")
@@ -2032,6 +2043,19 @@ def test_period_label_and_export_never_clicks_generate():
     assert not period_inputs_match(["2026年08期", "2026年09期"], "202608")
     assert not period_inputs_match(["2026年09期"], "202608")
     assert profit_dest_name(Path("/tmp"), "文化", "202608") == Path("/tmp") / "文化_利润表_202608.xlsx"
+    from xingchen_export import book_rows
+
+    keys = [row[0] for row in book_rows()]
+    assert "wenhua" in keys and "jiagu" not in keys
+    hq = book_rows(["jiagu"])
+    assert hq and hq[0][0] == "jiagu"
+    from xingchen_export import _header_matches
+
+    hq_name = "甲骨易（北京）语言科技股份有限公司"
+    assert _header_matches(hq_name, hq_name)
+    assert not _header_matches(hq_name + "湖南分公司", hq_name)
+    assert _header_matches("甲骨易（湖南）科技有限公司", "甲骨易（湖南）科技有限公司")
+    assert _header_matches("北京甲骨易文化传媒有限公司", "北京甲骨易文化传媒有限公司")
     assert account_dest_name(Path("/tmp"), "湖南分公司", "202608") == Path("/tmp") / "湖南分公司_科目余额表_202608.xlsx"
     assert "gl_profitsheet1" in text
     assert "cs_ifs_reportdata_list" not in text
@@ -2048,6 +2072,8 @@ def test_skill_uses_profit_query_page():
     assert "查询页" in text
     assert "8 期利润表没有就留空" not in text
     assert "禁止点新增" in text or "禁止点生成" in text
+    assert "不出表" in text
+    assert "login_blocked" in text
 
 
 def test_wrong_period_account_does_not_fill_current(tmp_path: Path):
@@ -2086,18 +2112,20 @@ def test_stale_account_still_triggers_web_export(tmp_path: Path, monkeypatch):
 
     monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(HERE / "_missing_kingdee.json"))
     monkeypatch.setenv("KINGDEE_PL_LOCAL_JSON", str(HERE / "_missing_pl.json"))
-    called = {}
+    called = {"runs": []}
 
     def fake(period, out_dir, books, kinds):
+        called["runs"].append({"period": period, "books": list(books), "kinds": kinds})
         called["period"] = period
         called["books"] = list(books)
         called["kinds"] = kinds
-        _write_account(
-            Path(out_dir) / "文化_科目余额表_202608.xlsx",
-            "北京甲骨易文化传媒有限公司",
-            [("5101", "主营业务收入", None, 10.0)],
-            period="202608",
-        )
+        if period == "202608":
+            _write_account(
+                Path(out_dir) / "文化_科目余额表_202608.xlsx",
+                "北京甲骨易文化传媒有限公司",
+                [("5101", "主营业务收入", None, 10.0)],
+                period="202608",
+            )
         return {"ok": ["wenhua"]}
 
     monkeypatch.setattr(convert, "WEB_EXPORT", fake)
@@ -2107,10 +2135,223 @@ def test_stale_account_still_triggers_web_export(tmp_path: Path, monkeypatch):
         [("5101", "主营业务收入", None, 40.0)],
         period="202609",
     )
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5101", "主营业务收入", None, 1.0)],
+    )
     convert.run("202608", tmp_path, tmp_path / "out.xlsx", no_api=False)
-    assert called.get("period") == "202608"
-    assert "wenhua" in (called.get("books") or [])
-    kinds = called.get("kinds") or {}
+    first = next((c for c in called.get("runs") or [called] if c.get("period") == "202608"), called)
+    assert first.get("period") == "202608"
+    assert "wenhua" in (first.get("books") or [])
+    kinds = first.get("kinds") or {}
     assert "account" in (kinds.get("wenhua") or [])
     report = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
     assert "过期account跳过=文化:202609" in report
+
+
+def test_collect_login_blocks_stops_api_and_account():
+    sys.path.insert(0, str(SCRIPTS))
+    from convert import collect_login_blocks
+
+    assert collect_login_blocks(["api=RuntimeError"], no_api=False, hq_has_source=True)
+    assert collect_login_blocks(["无密钥"], no_api=False, hq_has_source=False)
+    assert not collect_login_blocks(["无密钥"], no_api=False, hq_has_source=True)
+    assert not collect_login_blocks(["api=RuntimeError"], no_api=True, hq_has_source=False)
+    assert "网页账密" in collect_login_blocks(["缺网页账密"], no_api=False, hq_has_source=True)
+    assert "登录或引出失败" in collect_login_blocks(["网页引出失败=timeout"], no_api=False, hq_has_source=True)
+    assert "打不开文化" in collect_login_blocks(["利润表无查询权限=文化"], no_api=False, hq_has_source=True)
+
+
+def test_missing_web_login_stops_without_xlsx(tmp_path: Path, monkeypatch):
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+
+    monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(HERE / "_missing_kingdee.json"))
+    monkeypatch.setenv("KINGDEE_PL_LOCAL_JSON", str(HERE / "_missing_pl.json"))
+    monkeypatch.setenv("XINGCHEN_LOCAL_JSON", str(tmp_path / "missing-xingchen.json"))
+    monkeypatch.setenv("XINGCHEN_STATE_JSON", str(tmp_path / "missing-state.json"))
+    monkeypatch.delenv("XINGCHEN_USER", raising=False)
+    monkeypatch.delenv("XINGCHEN_PASSWORD", raising=False)
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5101", "主营业务收入", None, 1.0)],
+    )
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 10.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    rc = convert.run("202608", tmp_path, out, no_api=False)
+    assert rc == 2
+    assert not out.is_file()
+    text = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
+    assert "ask=" in text
+    assert "网页账密" in text
+    assert "产物=未生成" in text
+    assert "login_blocked" in text
+
+
+def test_missing_api_key_without_hq_stops_without_xlsx(tmp_path: Path, monkeypatch):
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+
+    monkeypatch.setenv("KINGDEE_LOCAL_JSON", str(HERE / "_missing_kingdee.json"))
+    monkeypatch.setenv("KINGDEE_PL_LOCAL_JSON", str(HERE / "_missing_pl.json"))
+    monkeypatch.setattr(convert, "WEB_EXPORT", lambda *a, **k: {"ok": []})
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 10.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    rc = convert.run("202608", tmp_path, out, no_api=False)
+    assert rc == 2
+    assert not out.is_file()
+    text = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
+    assert "ask=" in text
+    assert "应用号" in text
+    assert "产物=未生成" in text
+
+
+def test_api_exception_stops_without_xlsx(tmp_path: Path, monkeypatch):
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+    import types
+
+    creds = {
+        "client_id": "id",
+        "client_secret": "secret",
+        "app_key": "key",
+        "app_secret": "app",
+    }
+    fake_client = types.SimpleNamespace(load_client=lambda: creds)
+    monkeypatch.setitem(sys.modules, "kingdee_client", fake_client)
+    fake_fetch = types.ModuleType("fetch_reports")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    fake_fetch.fetch_hq = boom
+    monkeypatch.setitem(sys.modules, "fetch_reports", fake_fetch)
+    monkeypatch.setattr(convert, "WEB_EXPORT", lambda *a, **k: {"ok": []})
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5101", "主营业务收入", None, 1.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    rc = convert.run("202608", tmp_path, out, no_api=False)
+    assert rc == 2
+    assert not out.is_file()
+    text = (tmp_path / "out_运行报告.txt").read_text(encoding="utf-8")
+    assert "API 取数失败" in text
+    assert "产物=未生成" in text
+
+
+def test_dump_hq_excel_is_inspectable(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    from dump_api_excel import dump_hq_to_dir, prefer_web_over_api
+    from inspect_inputs import inspect_file, inspect_dir
+
+    hq = {
+        "accounts": {"5101": {"debit": None, "credit": 10, "name": "主营业务收入"}},
+        "depts": [{"code": "5101", "name": "主营业务收入", "dept": "营销总监及助理", "debit": None, "credit": 10}],
+        "profit": {"收入": 10},
+    }
+    written = dump_hq_to_dir("202608", tmp_path / "API", {}, hq=hq)
+    assert len(written) == 3
+    items = inspect_dir(tmp_path / "API")
+    kinds = {item["kind"] for item in items}
+    assert kinds == {"account", "assist", "profit"}
+    assert all(item.get("entity") == "甲骨易" for item in items)
+    assert all(item.get("period") == "202608" for item in items)
+
+    _write_account(
+        tmp_path / "甲骨易_科目余额表_202608.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5101", "主营业务收入", None, 8.0)],
+        period="202608",
+    )
+    mixed = inspect_dir(tmp_path)
+    kept = prefer_web_over_api(mixed)
+    acct = [i for i in kept if i.get("kind") == "account" and i.get("entity") == "甲骨易"]
+    assert len(acct) == 1
+    assert "API" not in Path(acct[0]["path"]).parts
+
+
+def test_prev_profit_gaps_skip_when_file_exists(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+    from inspect_inputs import inspect_dir
+
+    path = tmp_path / "文化_利润表_202607.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "利润表"
+    ws["A1"] = "2026年7期利润表（月报）"
+    ws["A2"] = "公司名称：北京甲骨易文化传媒有限公司"
+    ws["A3"] = "项目"
+    ws["B3"] = "本月金额"
+    ws["A4"] = "一、营业收入"
+    ws["B4"] = 3.0
+    wb.save(path)
+    items = inspect_dir(tmp_path)
+    gaps = convert.xingchen_prev_profit_gaps(items, "202608")
+    assert "wenhua" not in gaps
+    assert "shanghai" in gaps
+    assert gaps["shanghai"] == ["profit"]
+
+
+def test_xingchen_web_gaps_asks_hq_when_no_hq_file():
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+
+    gaps = convert.xingchen_web_gaps([], "202608")
+    assert "account" in (gaps.get("jiagu") or [])
+    assert "assist" in (gaps.get("jiagu") or [])
+    assert "assist" not in (gaps.get("hunan_fgs") or [])
+    assert "account" in (gaps.get("hunan_fgs") or [])
+    assert "profit" in (gaps.get("hunan_fgs") or [])
+    assert "assist" not in (gaps.get("hunan_zgs") or [])
+
+
+def test_xingchen_web_gaps_skips_hq_when_api_already_has_it(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+    from dump_api_excel import dump_hq_to_dir
+    from inspect_inputs import inspect_dir
+
+    dump_hq_to_dir(
+        "202608",
+        tmp_path / "API",
+        {},
+        hq={
+            "accounts": {"5101": {"debit": None, "credit": 1, "name": "主营业务收入"}},
+            "depts": [{"code": "5101", "name": "主营业务收入", "dept": "营销总监及助理", "debit": None, "credit": 1}],
+            "profit": {"收入": 1},
+        },
+    )
+    items = inspect_dir(tmp_path)
+    gaps = convert.xingchen_web_gaps(items, "202608")
+    assert "jiagu" not in gaps
+
+
+def test_xingchen_web_gaps_asks_hq_assist_if_api_only_has_account(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    import convert
+    from dump_api_excel import dump_hq_to_dir
+    from inspect_inputs import inspect_dir
+
+    dump_hq_to_dir(
+        "202608",
+        tmp_path / "API",
+        {},
+        hq={"accounts": {"5101": {"debit": None, "credit": 1, "name": "主营业务收入"}}, "depts": [], "profit": {}},
+    )
+    items = inspect_dir(tmp_path)
+    gaps = convert.xingchen_web_gaps(items, "202608")
+    assert "account" not in (gaps.get("jiagu") or [])
+    assert "assist" in (gaps.get("jiagu") or [])
