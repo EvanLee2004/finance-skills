@@ -12,7 +12,7 @@
 | 收款入金蝶 `016` | `~/.grok/worktrees/skills-finance-skills/kingdee-receipt-016` | 可删 | 018 已覆盖收款主路径并进 main |
 | 三模块合一 `017` 后续 | `~/.grok/worktrees/skills-finance-skills/kingdee-posting-unify` detached `9ddbb67` | 可删 | 拆腿/点头新建已并入 main `c7a03c5` |
 | 收款少问能跑完 `018` | `/Users/evanlee/.grok/worktrees/skills-finance-skills/kingdee-receipt-018` · `kingdee-receipt-018` @ `207f5b2` | 可删 | 已进 GitHub `main` |
-| 月度损益表 `pl-dept-report` `013` | 正式 clone · `main` | 使用中 | 已双端 `1a4eb84`：查询页当期利润表+科目余额选期 |
+| 月度损益表 `pl-dept-report` `013` | 正式 clone · `main` | 使用中 | 已双端 `40008ff`：先源再核算 + 材料夹/期间不符修补 |
 | 序时账入金蝶 `kingdee-gl-import` `014` | 同上正式 clone · `main` | 使用中 | 湖南分抄作业 |
 
 `git worktree list` 本仓三间 fork：`kingdee-posting-unify`、`kingdee-receipt-016`、`kingdee-receipt-018`。
