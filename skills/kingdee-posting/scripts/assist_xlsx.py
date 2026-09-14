@@ -92,6 +92,44 @@ def find_assist_xlsx(extra_dirs: list[Path] | None = None) -> Path | None:
     return None
 
 
+MANUAL_EXPORT_STEPS = (
+    "手动引出步骤：星辰 → 进入使用 → 切到总部账套「甲骨易（北京）语言科技股份有限公司」→ 账务处理 → 核算项目余额表；"
+    "过滤：辅助核算类别=客户、科目=1131 应收账款（总部是小企业准则，1131 就是应收账款；企业准则那套 1131 是应收股利，说明账套切错了）、"
+    "期间=本年；「余额为 0 不显示」不要勾、「显示最明细科目」勾上 → 引出 → 引出结果查询下载 → xlsx 放进材料夹或 Downloads。"
+)
+
+
+def assist_xlsx_company(path: Path) -> str:
+    """表头「公司名称：xxx」。没有就返回空串。"""
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        ws = wb[wb.sheetnames[0]]
+        for row in ws.iter_rows(min_row=1, max_row=4, values_only=True):
+            for v in row:
+                t = str(v or "").strip()
+                if t.startswith("公司名称"):
+                    return t.split("：", 1)[-1].split(":", 1)[-1].strip()
+    finally:
+        wb.close()
+    return ""
+
+
+def parse_assist_xlsx_checked(path: Path) -> list[lookup_mod.AssistRow]:
+    """解析并把「表不对」说清楚：不是总部账套 / 没有 1131 明细，都停下来问，不要拿空表把每笔都 hold。"""
+    rows = parse_assist_xlsx(path)
+    company = assist_xlsx_company(path)
+    if company and HQ_NAME not in company and company not in HQ_NAME:
+        raise SystemExit(
+            f"客户核算项目余额表 {path.name} 是「{company}」的，不是总部账套。销项/收款只记总部。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+        )
+    if not rows:
+        raise SystemExit(
+            f"客户核算项目余额表 {path.name} 里没有 1131 明细行。多半是过滤没设对（科目没选 1131 应收账款 / 辅助核算类别没选客户），"
+            f"或引出时不在总部账套。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+        )
+    return rows
+
+
 def parse_assist_xlsx(path: Path) -> list[lookup_mod.AssistRow]:
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
@@ -383,7 +421,15 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             try:
                 if not await _ensure_xingchen(page):
-                    return {"ok": False, "error": "星辰未登录，请先在本机 Chrome 登录总部后再引出客户核算项目余额表", "path": None, "mode": mode}
+                    return {
+                        "ok": False,
+                        "error": (
+                            "星辰登录了但没切到总部账套（可能账号在别处登着被挤下线，金蝶是单点登录；"
+                            "脚本登录也会把你浏览器里的金蝶挤掉）。自动引出不稳时请手动引出。" + MANUAL_EXPORT_STEPS
+                        ),
+                        "path": None,
+                        "mode": mode,
+                    }
                 await _dismiss_overlays(page)
                 await page.goto(ASSIST_FORM, wait_until="domcontentloaded")
                 await page.wait_for_timeout(2000)
@@ -428,6 +474,7 @@ def ensure_assist_xlsx(extra_dirs: list[Path] | None = None) -> Path:
     reason = got.get("error") or "没有客户核算项目余额表"
     raise SystemExit(
         f"{reason}。这张表 OpenAPI 没有，销项/收款的应收科目都靠它。"
-        "两条路任选：① 把星辰引出的「客户核算项目余额表」（客户 + 1131 + 本年）xlsx 放到文件夹或 Downloads；"
-        "② 把金蝶网页账密写进 ~/.config/finance/xingchen.local.json，我自己登录引出。未生成引入表。"
+        "最稳的一条路：自己从星辰引出「客户核算项目余额表」放到文件夹或 Downloads，一个月引一次就够。"
+        + MANUAL_EXPORT_STEPS
+        + " 备选：把金蝶网页账密写进 ~/.config/finance/xingchen.local.json 让我登录引出（会把你浏览器里的金蝶挤下线）。未生成引入表。"
     )

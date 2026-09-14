@@ -1289,13 +1289,13 @@ def _assist_rows_for_run(input_dir: Path, box, required: bool) -> tuple[list, st
         return list(box.assist_rows or []), ""
     found = assist_mod.find_assist_xlsx([input_dir])
     if found:
-        return assist_mod.parse_assist_xlsx(found), found.name
+        return assist_mod.parse_assist_xlsx_checked(found), found.name
     if required:
         path = assist_mod.ensure_assist_xlsx([input_dir])
-        return assist_mod.parse_assist_xlsx(path), path.name
+        return assist_mod.parse_assist_xlsx_checked(path), path.name
     try:
         path = assist_mod.ensure_assist_xlsx([input_dir])
-        return assist_mod.parse_assist_xlsx(path), path.name
+        return assist_mod.parse_assist_xlsx_checked(path), path.name
     except SystemExit as e:
         log(str(e))
         return lookup_mod.rows_from_balance_box(box), ""
@@ -1339,7 +1339,7 @@ def run_dir(
     else:
         src = Path(files["receipt"])
         if ar_xlsx:
-            assist_rows = assist_mod.parse_assist_xlsx(Path(ar_xlsx))
+            assist_rows = assist_mod.parse_assist_xlsx_checked(Path(ar_xlsx))
             assist_name = Path(ar_xlsx).name
         else:
             assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=False)

@@ -474,3 +474,47 @@ def test_ensure_assist_xlsx_ask_gives_two_ways(monkeypatch, tmp_path):
     else:
         raise AssertionError("should stop")
     assert "xingchen.local.json" in msg and "放到文件夹" in msg and "未生成引入表" in msg
+
+
+def _assist_book(path: Path, company: str, rows):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["核算项目余额表"])
+    ws.append([f"公司名称：{company}"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "期初", "期初", "本期", "本期", "本年累计", "本年累计", "期末", "期末"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "借方", "贷方", "借方", "贷方", "借方", "贷方", "借方", "贷方"])
+    for r in rows:
+        ws.append(r)
+    wb.save(path)
+    wb.close()
+
+
+def test_assist_checked_rejects_non_hq_book(tmp_path):
+    p = tmp_path / "核算项目余额表_客户.xlsx"
+    _assist_book(p, "北京甲骨易文化传媒有限公司", [["2026-08", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None]])
+    try:
+        assist_xlsx.parse_assist_xlsx_checked(p)
+    except SystemExit as e:
+        assert "不是总部账套" in str(e) and "1131 应收账款" in str(e)
+    else:
+        raise AssertionError("should stop")
+
+
+def test_assist_checked_rejects_empty_1131(tmp_path):
+    p = tmp_path / "核算项目余额表_客户.xlsx"
+    _assist_book(p, "甲骨易（北京）语言科技股份有限公司", [["2026-08", "0001", "甲", "1122", "应收账款", None, None, None, None, 1, None, 1, None]])
+    try:
+        assist_xlsx.parse_assist_xlsx_checked(p)
+    except SystemExit as e:
+        assert "没有 1131 明细行" in str(e) and "应收股利" in str(e)
+    else:
+        raise AssertionError("should stop")
+
+
+def test_assist_checked_accepts_hq(tmp_path):
+    p = tmp_path / "核算项目余额表_客户.xlsx"
+    _assist_book(p, "甲骨易（北京）语言科技股份有限公司", [["2026-08", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None]])
+    rows = assist_xlsx.parse_assist_xlsx_checked(p)
+    assert len(rows) == 1 and rows[0].account == "113101"
