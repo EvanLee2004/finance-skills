@@ -1234,11 +1234,14 @@ def write_outputs(
         extras=extras,
     )
     src_amt, debit, credit = tieout_amounts(lines)
+    voucher_nos = {int(x.voucher_no) for x in lines if x.status == "可入账" and x.voucher_no is not None}
     return {
         "scene": scene,
         "source_count": len(lines),
         "bookable_count": bookable,
         "hold_count": hold,
+        "voucher_count": len(voucher_nos),
+        "last_voucher_no": max(voucher_nos) if voucher_nos else None,
         "kingdee_path": str(kingdee),
         "detail_path": str(detail),
         "note_path": str(note),
@@ -1366,11 +1369,61 @@ def run_dir(
     return result
 
 
+SCENE_ORDER = ("销项发票", "付款", "收款")
+SCENE_SUBDIR = {"销项发票": "销项", "付款": "付款", "收款": "收款"}
+
+
+def _lookups_for(scene: str, args) -> dict:
+    if args.lookups:
+        return json.loads(Path(args.lookups).read_text(encoding="utf-8"))
+    if scene == "收款":
+        loaded_zy = zhiyun_api.try_load_lookups()
+        if loaded_zy.get("ok"):
+            return loaded_zy.get("data") or {}
+        reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
+        log(f"智云查找未核验（{reason}）；缺销售的行将待确认，其余仍出表。")
+        return {}
+    log("本模块不登录智云。")
+    return {}
+
+
+def _run_scene(root: Path, scene: str, args, master_data: dict | None, start_no: int, out_dir: Path | None) -> dict:
+    """跑一个模块；斯佳点头新增客户时先建档再重跑。SystemExit 由调用方翻成 ask=。"""
+    lookups = _lookups_for(scene, args)
+    result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir)
+    if args.create_new_customers:
+        need = result.get("new_customer_names") or []
+        if need:
+            created = create_confirmed_customers(need, (master_data or {}).get("customer") or [])
+            if not created.get("ok"):
+                raise SystemExit(f"客户档案未建成（{created.get('error')}）；未覆盖引入表。")
+            master_data = dict(master_data or {})
+            if args.master:
+                master_data["customer"] = created.get("customers") or []
+            else:
+                kingdee_api.clear_master_cache()
+                reloaded = kingdee_api.try_load_master()
+                master_data = reloaded["data"] if reloaded.get("ok") else {**master_data, "customer": created.get("customers") or []}
+            nums = [str(x.get("number")) for x in created.get("created") or [] if x.get("number")]
+            log(f"已按顺序新建客户档案 {len(need)} 家，编码 {('、'.join(nums)) or '（已有）'}。")
+            result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir)
+    return result
+
+
+def _detected_scenes(root: Path) -> list[str]:
+    aliases = load_aliases()
+    found: set[str] = set()
+    for p in sorted(root.iterdir()):
+        if p.suffix.lower() in {".xlsx", ".xlsm"} and not p.name.startswith("~$"):
+            found.update(inspect_mod.classify_xlsx_kinds(p, aliases))
+    return [s for s in SCENE_ORDER if s in found]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="金蝶入账")
     parser.add_argument("--inspect", action="store_true")
     parser.add_argument("--input-dir", required=True)
-    parser.add_argument("--scene", choices=["销项发票", "付款", "收款"])
+    parser.add_argument("--scene", choices=["销项发票", "付款", "收款", "全部"], help="不给=文件夹里认出几种就跑几种")
     parser.add_argument("--date")
     parser.add_argument("--master")
     parser.add_argument("--lookups")
@@ -1385,7 +1438,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
     if args.inspect:
-        return inspect_mod.main(["--input-dir", str(root)] + (["--scene", args.scene] if args.scene else []))
+        return inspect_mod.main(["--input-dir", str(root)] + (["--scene", args.scene] if args.scene and args.scene != "全部" else []))
     master_data = None
     if args.master:
         master_data = json.loads(Path(args.master).read_text(encoding="utf-8"))
@@ -1398,22 +1451,15 @@ def main(argv=None) -> int:
         else:
             reason = "本机没有金蝶应用号" if loaded.get("missing_credentials") else loaded.get("error") or "读取失败"
             return ask_and_stop(f"总部档案未核验（{reason}）。未生成引入表。请检查本机应用号和只读权限后重试。")
-    lookups = {}
-    scene = args.scene
-    if not scene:
-        inspected = inspect_mod.inspect_dir(root, None)
-        scene = inspected.get("scene") if inspected.get("ready") else None
-    if args.lookups:
-        lookups = json.loads(Path(args.lookups).read_text(encoding="utf-8"))
-    elif scene == "收款":
-        loaded_zy = zhiyun_api.try_load_lookups()
-        if loaded_zy.get("ok"):
-            lookups = loaded_zy.get("data") or {}
-        else:
-            reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
-            log(f"智云查找未核验（{reason}）；缺销售的行将待确认，其余仍出表。")
-    elif scene in ("销项发票", "付款"):
-        log("本模块不登录智云。")
+
+    if args.scene and args.scene != "全部":
+        scenes = [args.scene]
+    else:
+        scenes = _detected_scenes(root) if root.is_dir() else []
+        if not scenes:
+            return ask_and_stop("这个文件夹里我还没认出销项发票、付款或收款表。请放好对应 Excel，或直接说要跑哪一句。未生成引入表。")
+    multi = len(scenes) > 1 or args.scene == "全部"
+
     start_no = args.start_voucher_no
     if start_no is None:
         period = (args.date or date.today().isoformat())[:7]
@@ -1423,53 +1469,35 @@ def main(argv=None) -> int:
             return ask_and_stop(f"当前月凭证号未核验（{reason}）。未生成引入表。请检查本机应用号后重试。")
         start_no = int(fetched["next_number"])
 
-    out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
-    try:
-        result = run_dir(
-            root,
-            args.scene,
-            args.date,
-            master_data,
-            lookups,
-            start_voucher_no=start_no,
-            out_dir=out_dir,
+    base = Path(args.out_dir).expanduser() if args.out_dir else None
+    if multi and base is None:
+        base = default_desktop_dir("金蝶入账")
+    results: list[dict] = []
+    asks: list[str] = []
+    next_no = start_no
+    for scene in scenes:
+        out_dir = (base / SCENE_SUBDIR[scene]) if multi else base
+        try:
+            result = _run_scene(root, scene, args, master_data, next_no, out_dir)
+        except SystemExit as e:
+            asks.append(f"{scene}：{str(e) if str(e) else '材料不齐，未生成引入表。'}")
+            continue
+        results.append(result)
+        log(
+            f"{scene} 这批 {result['source_count']}：可入账 {result['bookable_count']}，待确认 {result['hold_count']}，"
+            f"凭证号 {result['start_voucher_no']}–{result.get('last_voucher_no') or result['start_voucher_no']}。"
+            f"填好的金蝶表在 {result['kingdee_path']}。请您看待确认，再自己去金蝶引入。我没有点引入。"
         )
-        if args.create_new_customers:
-            need = result.get("new_customer_names") or []
-            if need:
-                created = create_confirmed_customers(need, (master_data or {}).get("customer") or [])
-                if not created.get("ok"):
-                    log(f"客户档案未建成（{created.get('error')}）；未覆盖引入表。")
-                    return 2
-                master_data = dict(master_data or {})
-                if args.master:
-                    master_data["customer"] = created.get("customers") or []
-                else:
-                    kingdee_api.clear_master_cache()
-                    reloaded = kingdee_api.try_load_master()
-                    if reloaded.get("ok"):
-                        master_data = reloaded["data"]
-                    else:
-                        master_data["customer"] = created.get("customers") or []
-                nums = [str(x.get("number")) for x in created.get("created") or [] if x.get("number")]
-                log(f"已按顺序新建客户档案 {len(need)} 家，编码 {('、'.join(nums)) or '（已有）'}。")
-                result = run_dir(
-                    root,
-                    args.scene,
-                    args.date,
-                    master_data,
-                    lookups,
-                    start_voucher_no=start_no,
-                    out_dir=out_dir,
-                )
-    except SystemExit as e:
-        return ask_and_stop(str(e) if str(e) else "材料不齐，未生成引入表。")
-    log(
-        f"这批 {result['source_count']}：可入账 {result['bookable_count']}，待确认 {result['hold_count']}。"
-        f"填好的金蝶表在 {result['kingdee_path']}。请您看待确认，再自己去金蝶引入。我没有点引入。"
-    )
-    print(json.dumps({k: result[k] for k in result if k != "lines"}, ensure_ascii=False, indent=2))
-    return 0
+        # 同一天跑多个模块，凭证号接着编，免得两张引入表撞号
+        if result.get("last_voucher_no"):
+            next_no = int(result["last_voucher_no"]) + 1
+    if asks:
+        print("ask=" + " ".join(asks), flush=True)
+    if not results:
+        return 2
+    payload = results[0] if not multi else {"out_dir": str(base), "scenes": results}
+    print(json.dumps({k: v for k, v in payload.items() if k != "lines"}, ensure_ascii=False, indent=2))
+    return 0 if not asks else 2
 
 
 if __name__ == "__main__":

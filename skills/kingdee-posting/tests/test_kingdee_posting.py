@@ -1763,3 +1763,62 @@ def test_default_desktop_dir_finds_onedrive_desktop(tmp_path):
     od.mkdir(parents=True)
     got = convert.default_desktop_dir("金蝶入账", today=date(2026, 9, 14), home=tmp_path)
     assert got == od / "金蝶入账_20260914"
+
+
+def test_cli_mixed_folder_runs_every_module_with_consecutive_voucher_numbers(tmp_path, monkeypatch):
+    """斯佳一份 记账.xlsx 里有 开票 + 收款 两个 sheet：一次跑完，两个子夹，凭证号接着编。"""
+    src = tmp_path / "in"
+    src.mkdir()
+    _write_sales(src / "记账.xlsx", [_ok_sales(), _ok_sales()], with_org=False)
+    wb = load_workbook(src / "记账.xlsx")
+    ws = wb.create_sheet("收款")
+    ws.append(["日期", "客户名称", "借方（增加）", "销售", "类型", "凭证号"])
+    ws.append(["2026-08-01", "甲科技有限公司", 10, "于占国", None, None])
+    wb.save(src / "记账.xlsx")
+    wb.close()
+    master = tmp_path / "master.json"
+    master.write_text(json.dumps(_master(), ensure_ascii=False), encoding="utf-8")
+    lookups = tmp_path / "lookups.json"
+    lookups.write_text(json.dumps(_lookups(), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(convert.zhiyun_api, "try_load_lookups", lambda: {"ok": False, "missing_credentials": True})
+    out = tmp_path / "金蝶入账_20260827"
+    rc = convert.main(
+        [
+            "--input-dir", str(src),
+            "--master", str(master),
+            "--lookups", str(lookups),
+            "--date", "2026-08-27",
+            "--start-voucher-no", "45",
+            "--out-dir", str(out),
+        ]
+    )
+    assert rc == 0
+    assert (out / "销项" / "凭证引入_结果.xlsx").exists()
+    assert (out / "收款" / "凭证引入_结果.xlsx").exists()
+    assert not (out / "付款").exists()
+    def _nos(path):
+        ws = load_workbook(path)[convert.KINGDEE_SHEET]
+        col = convert.col_by_label(ws, "凭证号 #")
+        return {int(ws.cell(r, col).value) for r in range(4, ws.max_row + 1) if ws.cell(r, col).value not in (None, "")}
+
+    sales_nos = _nos(out / "销项" / "凭证引入_结果.xlsx")
+    rec_nos = _nos(out / "收款" / "凭证引入_结果.xlsx")
+    assert sales_nos and rec_nos
+    assert min(sales_nos) == 45
+    assert min(rec_nos) == max(sales_nos) + 1
+    assert not (sales_nos & rec_nos)
+
+
+def test_cli_single_module_folder_keeps_flat_output(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    master = tmp_path / "master.json"
+    master.write_text(json.dumps(_master(), ensure_ascii=False), encoding="utf-8")
+    lookups = tmp_path / "lookups.json"
+    lookups.write_text(json.dumps(_lookups(), ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    rc = convert.main(
+        ["--input-dir", str(tmp_path), "--master", str(master), "--lookups", str(lookups), "--date", "2026-08-27", "--start-voucher-no", "1", "--out-dir", str(out)]
+    )
+    assert rc == 0
+    assert (out / "凭证引入_结果.xlsx").exists()
+    assert not (out / "销项").exists()
