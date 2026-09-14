@@ -67,6 +67,8 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录>
 
 她说「凭证号从 11 开始 / 从记-11 开始」时加上 `--start-voucher-no 11`。没说就用当前月金蝶已有最大号 + 1。
 
+斯佳说「这两笔是投标保证金 / 保证金退回」时，每家加一个 `--deposit-customer 客户名`（或让她在收款表「类型」列写「保证金」）：借银行 / 贷 113312，客户 + 运营保障中心，不找销售。
+
 斯佳点头「这两家新增」时加上 `--create-new-customers`：按现网 3～4 位客户编号 max+1 建档，第一笔用申请人科目。未点头不要加。
 
 没给输出目录时：多种表 → 桌面 `金蝶入账_YYYYMMDD/` 下分子夹；只一种 → 桌面 `金蝶入账_销项_YYYYMMDD/`、`金蝶入账_付款_YYYYMMDD/`、`金蝶入账_收款_YYYYMMDD/`（桌面在 `OneDrive/Desktop` 也认）。付款 PDF 靠 `pdfplumber`：本机没装时脚本会 `ask=` 停下，按提示装了再跑，不要交空表。系统 `python3` 没有 requests 也没关系：脚本会切到仓内 `.venv`。没有 `.venv` 就按清华镜像装 `requests`（失败再阿里 / 中科大 / 默认源）。不要另开环境管家。**不要**对 macOS 系统 Python 乱装一堆无关库。

@@ -960,6 +960,47 @@ def match_receipt_customer(master: Master, name: str, alias_map: dict, assist_ro
     return None, cerr
 
 
+def is_deposit_refund(cust: str, cus_name: str, table_type: str, cfg: dict, deposit_names: set[str]) -> bool:
+    """投标保证金退回：表上「类型」含关键词，或跑批时点名的客户。"""
+    if not cfg:
+        return False
+    kws = [k for k in (cfg.get("type_keywords") or []) if k]
+    if table_type and any(k in table_type for k in kws):
+        return True
+    if deposit_names:
+        for cand in (cust, cus_name):
+            n = names.norm_name(cand)
+            if n and (n in deposit_names or any(d in n or n in d for d in deposit_names if len(d) >= 4)):
+                return True
+    return False
+
+
+def deposit_entries(line: VoucherLine, cust: str, cus_code: str, cus_name: str, amt, bank: str, cfg: dict, master: "Master"):
+    """借银行 / 贷 113312 投标保证金（客户 + 部门 08 运营保障中心，无职员）——照亮晶现网记法。"""
+    account = str(cfg.get("account") or "113312")
+    dhit, derr = master.department(str(cfg.get("dept_code") or "08"))
+    if not dhit:
+        line.status, line.reason = "待确认", f"保证金部门档案未核验（{derr}）"
+        return None
+    dep_code, dep_name = dhit
+    line.expl = str(cfg.get("summary") or "收：投标保证金退回-{客户}").replace("{客户}", cust)
+    line.extra["保证金"] = account
+    return [
+        {"account": bank, "debit": amt},
+        {
+            "account": account,
+            "credit": amt,
+            "aux": True,
+            "cus_code": cus_code,
+            "cus_name": cus_name,
+            "dep_code": dep_code,
+            "dep_name": dep_name,
+            "emp_code": "",
+            "emp_name": "",
+        },
+    ]
+
+
 def convert_receipt(
     path: Path,
     master: Master,
@@ -969,8 +1010,11 @@ def convert_receipt(
     booking: str,
     period_fetch=None,
     assist_rows=None,
+    deposit_customers: list[str] | None = None,
 ) -> list[VoucherLine]:
     cfg = rules.get("receipt") or {}
+    deposit_cfg = cfg.get("deposit") or {}
+    deposit_names = {names.norm_name(x) for x in (deposit_customers or []) if str(x).strip()}
     alias_map = load_customer_alias()
     hang = load_emp_hang()
     applicant_dept = load_applicant_dept()
@@ -1007,6 +1051,7 @@ def convert_receipt(
         rec_day = as_day(cell_at(row_v, idx, "日期") or cell_at(row_f, idx, "日期"), booking)
         table_dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码")) if "部门编码" in idx else ""
         table_sales = str(cell_at(row_f, idx, "销售") or "").strip() if "销售" in idx else ""
+        table_type = str(cell_at(row_f, idx, "类型") or "").strip() if "类型" in idx else ""
         line = VoucherLine(
             status="可入账",
             source_row=r,
@@ -1030,6 +1075,12 @@ def convert_receipt(
             lines.append(line)
             continue
         cus_code, cus_name = chit
+        if is_deposit_refund(cust, cus_name, table_type, deposit_cfg, deposit_names):
+            dep = deposit_entries(line, cust, cus_code, cus_name, amt, bank, deposit_cfg, master)
+            if dep is not None:
+                line.entries = dep
+            lines.append(line)
+            continue
         ar_cands = lookup_mod.list_assist_accounts(cus_code, rec_day, rows)
         if ar_cands:
             line.extra["候选1131"] = ar_cands
@@ -1317,6 +1368,7 @@ def run_dir(
     start_voucher_no: int = 1,
     out_dir: Path | None = None,
     ar_xlsx: Path | None = None,
+    deposit_customers: list[str] | None = None,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
@@ -1352,7 +1404,15 @@ def run_dir(
         extras.append("记账日：表上收款日")
         extras.append("表上销售有则用，空则智云回款（名称或到账日+金额）→下单；部门可回退职员档案")
         lines = convert_receipt(
-            src, master, rules, aliases, box, day, period_fetch=period_fetch, assist_rows=assist_rows
+            src,
+            master,
+            rules,
+            aliases,
+            box,
+            day,
+            period_fetch=period_fetch,
+            assist_rows=assist_rows,
+            deposit_customers=deposit_customers,
         )
     shift_voucher_numbers(lines, start_voucher_no)
     prefix = SCENE_DESKTOP.get(scene, "金蝶入账")
@@ -1389,7 +1449,8 @@ def _lookups_for(scene: str, args) -> dict:
 def _run_scene(root: Path, scene: str, args, master_data: dict | None, start_no: int, out_dir: Path | None) -> dict:
     """跑一个模块；斯佳点头新增客户时先建档再重跑。SystemExit 由调用方翻成 ask=。"""
     lookups = _lookups_for(scene, args)
-    result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir)
+    deposits = list(getattr(args, "deposit_customer", None) or [])
+    result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir, deposit_customers=deposits)
     if args.create_new_customers:
         need = result.get("new_customer_names") or []
         if need:
@@ -1405,7 +1466,7 @@ def _run_scene(root: Path, scene: str, args, master_data: dict | None, start_no:
                 master_data = reloaded["data"] if reloaded.get("ok") else {**master_data, "customer": created.get("customers") or []}
             nums = [str(x.get("number")) for x in created.get("created") or [] if x.get("number")]
             log(f"已按顺序新建客户档案 {len(need)} 家，编码 {('、'.join(nums)) or '（已有）'}。")
-            result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir)
+            result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir, deposit_customers=deposits)
     return result
 
 
@@ -1429,6 +1490,12 @@ def main(argv=None) -> int:
     parser.add_argument("--no-api", action="store_true")
     parser.add_argument("--start-voucher-no", type=int, default=None)
     parser.add_argument("--out-dir", "--out", dest="out_dir")
+    parser.add_argument(
+        "--deposit-customer",
+        action="append",
+        default=[],
+        help="斯佳点名：这家这笔是投标保证金退回（借银行/贷113312）。表上「类型」列写保证金也行",
+    )
     parser.add_argument(
         "--create-new-customers",
         action="store_true",

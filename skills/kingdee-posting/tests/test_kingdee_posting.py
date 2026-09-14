@@ -48,6 +48,7 @@ def _master():
             {"code": "0308", "name": "商务中心"},
             {"code": "0302", "name": "营销二部"},
             {"code": "02", "name": "总经办"},
+            {"code": "08", "name": "运营保障中心"},
         ],
         "customer": [
             {"code": "1001", "name": "甲科技有限公司"},
@@ -1822,3 +1823,66 @@ def test_cli_single_module_folder_keeps_flat_output(tmp_path):
     assert rc == 0
     assert (out / "凭证引入_销项_结果.xlsx").exists()
     assert not (out / "销项").exists()
+
+
+# ---- 投标保证金退回（斯佳 2026-09-14；亮晶现网：借银行 / 贷 113312，客户 + 部门 08，无职员）----
+
+
+def _write_receipt_typed(path: Path, rows):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "收款"
+    ws.append(["日期", "客户名称", "借方（增加）", "销售", "类型", "凭证号"])
+    for r in rows:
+        ws.append(r)
+    wb.save(path)
+    wb.close()
+
+
+def _credit_line(result, account):
+    ws = load_workbook(result["kingdee_path"])[convert.KINGDEE_SHEET]
+    acc_col = convert.col_by_label(ws, "*科目.编码")
+    for r in range(4, ws.max_row + 1):
+        if str(ws.cell(r, acc_col).value) == account:
+            return {
+                "cus_code": ws.cell(r, convert.col_by_label(ws, "辅助核算.客户.编码")).value,
+                "dep_code": ws.cell(r, convert.col_by_label(ws, "辅助核算.部门.编码")).value,
+                "dep_name": ws.cell(r, convert.col_by_label(ws, "辅助核算.部门.名称")).value,
+                "emp_code": ws.cell(r, convert.col_by_label(ws, "辅助核算.职员.编码")).value,
+            }
+    return None
+
+
+def test_receipt_type_column_deposit_goes_to_113312(tmp_path):
+    _write_receipt_typed(tmp_path / "收款.xlsx", [["2026-09-07", "甲科技有限公司", 5000, None, "投标保证金", None]])
+    result = _run(tmp_path, "收款", lookups=_lookups(receipt_sales={}, order_sales={}))
+    assert result["bookable_count"] == 1 and result["hold_count"] == 0
+    row = _credit_line(result, "113312")
+    assert row is not None
+    assert str(row["cus_code"]) == "1001"
+    assert str(row["dep_code"]) == "08" and row["dep_name"] == "运营保障中心"
+    assert row["emp_code"] in (None, "")
+    ws = load_workbook(result["kingdee_path"])[convert.KINGDEE_SHEET]
+    accounts = {str(ws.cell(r, convert.col_by_label(ws, "*科目.编码")).value) for r in range(4, ws.max_row + 1)}
+    assert accounts == {"100201", "113312"}
+    detail = load_workbook(result["detail_path"]).active
+    text = " ".join(str(c.value) for row_ in detail.iter_rows() for c in row_ if c.value)
+    assert "收：投标保证金退回-甲科技有限公司" in text
+
+
+def test_receipt_deposit_customer_flag_without_type_column(tmp_path):
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-09-07", "甲科技有限公司", 5000, None, None, None]])
+    master = _master()
+    result = convert.run_dir(
+        tmp_path, "收款", "2026-09-14", master, _lookups(receipt_sales={}, order_sales={}),
+        start_voucher_no=1, out_dir=tmp_path, deposit_customers=["甲科技有限公司"],
+    )
+    assert result["bookable_count"] == 1
+    assert _credit_line(result, "113312") is not None
+
+
+def test_receipt_without_deposit_hint_still_needs_sales(tmp_path):
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-09-07", "甲科技有限公司", 5000, None, None, None]])
+    result = _run(tmp_path, "收款", lookups=_lookups(receipt_sales={}, order_sales={}))
+    assert result["hold_count"] == 1
+    assert _credit_line(result, "113312") is None

@@ -4,7 +4,10 @@
   "currency_name": "人民币",
   "exchange_rate": 1,
   "tax_rate_divisor": "1.06",
-  "fallback_supplier": { "code": "9999", "name": "其他供应商" },
+  "fallback_supplier": {
+    "code": "9999",
+    "name": "其他供应商"
+  },
   "account_names": {
     "21710105": "销项税额",
     "21710101": "进项税额",
@@ -28,7 +31,24 @@
   "receipt": {
     "bank_account": "100201",
     "pack_size": 10,
-    "pack_keep_consecutive": true
+    "pack_keep_consecutive": true,
+    "deposit": {
+      "_comment": "2026-09-14 斯佳：投标保证金退回 = 借银行 / 贷 113312 投标保证金。亮晶现网 2026 年 122 张同类分录：辅助核算 客户 + 部门 08 运营保障中心，无职员，摘要「收：投标保证金退回-客户」。触发：收款表「类型」列含关键词，或跑批时 --deposit-customer 点名。",
+      "account": "113312",
+      "dept_code": "08",
+      "type_keywords": [
+        "保证金",
+        "投标保证金",
+        "履约保证金"
+      ],
+      "summary": "收：投标保证金退回-{客户}"
+    }
   },
-  "ar_accounts": ["113101", "113102", "113103", "113105", "113107"]
+  "ar_accounts": [
+    "113101",
+    "113102",
+    "113103",
+    "113105",
+    "113107"
+  ]
 }
