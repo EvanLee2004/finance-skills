@@ -77,6 +77,15 @@ def _run(args: list[str], env: dict | None = None) -> subprocess.CompletedProces
     )
 
 
+def _left_value(out: Path, letter: str, row: int):
+    """父行左列现在是公式（斯佳 2026-09-14），用 formula_eval 算出来再比。"""
+    from openpyxl.utils import column_index_from_string
+
+    book, _ = eval_workbook(openpyxl.load_workbook(out, data_only=False))
+    v = book.cell_value("损益表", row, column_index_from_string(letter))
+    return None if v in (None, "") else float(v)
+
+
 def _write_account(
     path: Path,
     company: str,
@@ -916,10 +925,14 @@ def test_same_code_different_name_does_not_write_layout_row(tmp_path: Path):
     assert ws[f"E{row['550101']}"].value == 100
     assert ws[f"E{row['550204']}"].value in (None, "")
     assert ws[f"E{row['550212']}"].value == 200
-    assert ws[f"E{row['5503']}"].value in (None, "")
-    assert ws[f"E{row['5504']}"].value == 10
-    assert ws[f"G{row['5504']}"].value in (None, "")
-    assert ws[f"G{row['5501']}"].value == 50
+    assert _left_value(out, "E", row["5503"]) in (None, 0.0)
+    # 斯佳 2026-09-14：非总部父行左列=子行 SUM 公式。金蝶只给父级整笔、没叶子 → 父行算出来是空，运行报告要点名
+    assert _left_value(out, "E", row["5504"]) in (None, 0.0)
+    assert _left_value(out, "G", row["5504"]) in (None, 0.0)
+    assert _left_value(out, "G", row["5501"]) in (None, 0.0)
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "父行发生额未落叶子=" in report and "文化:5504" in report and "上海:5501" in report
+    assert "ask=" in r.stdout and "没有落到叶子" in r.stdout
     report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
     assert "同码不同名=540103->540112" in report
     assert "350.0" not in r.stdout
@@ -1124,11 +1137,11 @@ def test_agency_profit_fills_shandong_sichuan_jinan(tmp_path: Path):
     pf = wb["利润表"]
     layout = load_layout()
     row = account_row_map(layout)
-    assert ws[f"I{row['5401']}"].value == 88
-    assert ws[f"I{row['540111']}"].value == 88
-    assert ws[f"O{row['5502']}"].value == 22
+    assert _left_value(out, "I", row["5401"]) == 88
+    assert _left_value(out, "I", row["540111"]) == 88
+    assert _left_value(out, "O", row["5502"]) == 22
     assert ws[f"O{row['550201']}"].value == 22
-    assert ws[f"Q{row['5401']}"].value == 55
+    assert _left_value(out, "Q", row["5401"]) == 55
     assert ws[f"Q{row['540109']}"].value in (None, "")
     assert ws[f"Q{row['540123']}"].value == 55
     jinan_dept = dept_col_letter(layout, "济南分公司", 1)
@@ -1198,7 +1211,7 @@ def test_missing_agency_profit_asks_and_leaves_empty(tmp_path: Path):
     ws = openpyxl.load_workbook(out)["损益表"]
     layout = load_layout()
     row = account_row_map(layout)
-    assert ws[f"I{row['5401']}"].value in (None, "")
+    assert _left_value(out, "I", row["5401"]) in (None, 0.0)
     skip = _run(
         ["--period", "202608", "--input-dir", str(tmp_path), "--out", str(tmp_path / "skip.xlsx"), "--no-api", "--skip-offline"]
     )
@@ -1370,7 +1383,7 @@ def test_payroll_maps_rd_localization_sichuan_and_skips_double_count(tmp_path: P
     assert ws[f"{jinan_z}{row['54011101']}"].value == 3
     assert ws[f"{jinan_z}{row['540123']}"].value == 52
     assert ws[f"Q{row['540123']}"].value == 52
-    assert ws[f"Q{row['5401']}"].value == 55
+    assert _left_value(out, "Q", row["5401"]) == 55
     pf = openpyxl.load_workbook(out)["利润表"]
     assert pf["E1"].value == "山东26年 8月"
     assert pf["H1"].value == "四川26年 8月"
@@ -2519,3 +2532,95 @@ def test_split_table_round_trip_and_consumed_by_convert(tmp_path: Path):
     sheet = openpyxl.load_workbook(out)["损益表"]
     assert sheet[f"{hn}{row['550201']}"].value == 100
     assert sheet[f"{hn}{row['540109']}"].value == 100
+
+
+# ---- 斯佳 2026-09-14 拍的两条 ----
+
+
+def _hunan_books(src: Path, wage: float) -> None:
+    _write_account(
+        src / "hn.xlsx",
+        "甲骨易（北京）语言科技股份有限公司湖南分公司",
+        [
+            ("5602", "管理费用", wage + 289.0 + 55.0, None),
+            ("560201", "工资", wage, None),
+            ("560215", "社保", 289.0, None),
+            ("560214", "住房公积金", 55.0, None),
+        ],
+    )
+
+
+def test_hunan_left_resplit_by_payroll_when_totals_tie(tmp_path: Path):
+    src = tmp_path / "in"
+    _hunan_books(src, 200.0)
+    pay = tmp_path / "202608_职工薪酬台账.xlsx"
+    _write_hunan_payroll(pay, wage_amount=100)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(src), "--out", str(out), "--no-api", "--payroll-xlsx", str(pay)])
+    assert out.is_file(), r.stdout + r.stderr
+    layout = load_layout()
+    row = account_row_map(layout)
+    ws = openpyxl.load_workbook(out)["损益表"]
+    hn = dept_col_letter(layout, "湖南分公司", 1)
+    # 左列按台账拆到两棵树，右列同样
+    assert ws[f"K{row['550201']}"].value == 100
+    assert ws[f"K{row['540109']}"].value == 100
+    assert ws[f"{hn}{row['550201']}"].value == 100
+    assert ws[f"{hn}{row['540109']}"].value == 100
+    assert ws[f"K{row['550203']}"].value == 50
+    assert ws[f"K{row['540112']}"].value == 5
+    assert ws[f"K{row['55020201']}"].value == 160
+    assert ws[f"K{row['54011101']}"].value == 16
+    # 父行左列是公式，算出来等于叶子和
+    assert str(ws[f"K{row['550202']}"].value).startswith("=")
+    assert _left_value(out, "K", row["550202"]) == 263
+    assert _left_value(out, "K", row["540111"]) == 26
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "薪酬左列重分=湖南分公司:工资" in report
+    assert "薪酬左列重分=湖南分公司:社保" in report
+    assert "薪酬左列重分=湖南分公司:住房公积金" in report
+    assert "父行发生额未落叶子" not in report
+    assert "核对非0科目编码个数=0" in r.stdout
+
+
+def test_hunan_left_kept_when_payroll_total_differs(tmp_path: Path):
+    src = tmp_path / "in"
+    _hunan_books(src, 300.0)
+    pay = tmp_path / "202608_职工薪酬台账.xlsx"
+    _write_hunan_payroll(pay, wage_amount=100)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(src), "--out", str(out), "--no-api", "--payroll-xlsx", str(pay)])
+    assert out.is_file(), r.stdout + r.stderr
+    layout = load_layout()
+    row = account_row_map(layout)
+    ws = openpyxl.load_workbook(out)["损益表"]
+    assert ws[f"K{row['550201']}"].value == 300  # 金蝶不动
+    assert ws[f"K{row['540109']}"].value == 100  # 成本树左列靠台账补
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "薪酬左列未重分=湖南分公司:工资(台账≠金蝶)" in report
+    assert "550201" in r.stdout.split("核对非0绿行=")[1].split("\n")[0]
+
+
+def test_parent_left_formula_except_hq(tmp_path: Path):
+    _write_account(
+        tmp_path / "hq.xlsx",
+        "甲骨易（北京）语言科技股份有限公司",
+        [("5502", "管理费用", 999.0, None), ("550201", "工资", 100.0, None)],
+    )
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5502", "管理费用", 999.0, None), ("550201", "工资", 100.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    layout = load_layout()
+    row = account_row_map(layout)
+    ws = openpyxl.load_workbook(out)["损益表"]
+    assert ws[f"C{row['5502']}"].value == 999  # 总部抄金蝶
+    assert str(ws[f"E{row['5502']}"].value).startswith("=E")  # 文化=子行公式
+    assert _left_value(out, "E", row["5502"]) == 100
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "父行发生额未落叶子=文化:5502" in report
+    assert "甲骨易:5502" not in report

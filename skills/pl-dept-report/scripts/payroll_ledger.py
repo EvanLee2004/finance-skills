@@ -864,6 +864,72 @@ def write_split_table(parsed: dict, out: Path) -> Path:
     return out
 
 
+def _left_debit(entity_amts: dict, ent: str, code: str) -> Decimal | None:
+    return ((entity_amts.get(ent) or {}).get(code) or {}).get("debit")
+
+
+def _ancestors(code: str, kids: dict[str, list[str]]) -> list[str]:
+    out: list[str] = []
+    cur = code
+    while True:
+        parent = next((p for p, children in kids.items() if cur in children), None)
+        if not parent:
+            return out
+        out.append(parent)
+        cur = parent
+
+
+def resplit_left_by_payroll(
+    entity_amts: dict,
+    parsed: dict,
+    rules: dict,
+    pre_left: set[tuple[str, str]],
+    notes: list[str],
+    kids: dict[str, list[str]] | None = None,
+) -> None:
+    """斯佳 2026-09-14：湖南自己账上工资/社保/公积金整笔记在 5602，她按人拆到成本/管理两棵树。
+    台账合计 == 金蝶整笔时，把金蝶那格（连同它上面的父行）清掉、让台账按树重填左列，父行走公式；
+    不等就不动金蝶，只记说明。"""
+    entities = set(rules.get("left_resplit_entities") or [])
+    if not entities:
+        return
+    kids = kids or {}
+    tol = Decimal(str(rules.get("left_resplit_tolerance") or "0.01"))
+    item_to_code = rules.get("item_to_code") or {}
+    si_parents = rules.get("si_parent_codes") or {}
+    si_items = [i for i in item_to_code if i not in ("工资", "住房公积金")]
+    by_ent_item: dict[tuple[str, str], Decimal] = {}
+    for row in parsed.get("rows") or []:
+        key = (str(row.get("entity") or ""), str(row.get("name") or ""))
+        by_ent_item[key] = by_ent_item.get(key, Decimal("0")) + (row.get("debit") or Decimal("0"))
+    for ent in sorted(entities):
+        groups: list[tuple[str, list[str], Decimal]] = []
+        for item in ("工资", "住房公积金"):
+            total = by_ent_item.get((ent, item), Decimal("0"))
+            codes = [c for c in (item_to_code.get(item) or {}).values()]
+            groups.append((item, codes, total))
+        si_total = sum((by_ent_item.get((ent, i), Decimal("0")) for i in si_items), Decimal("0"))
+        groups.append(("社保", list(si_parents.values()), si_total))
+        for label, codes, total in groups:
+            if total == 0:
+                continue
+            kd_codes = [c for c in codes if (ent, c) in pre_left and _left_debit(entity_amts, ent, c) is not None]
+            if not kd_codes:
+                continue
+            kd_total = sum((_left_debit(entity_amts, ent, c) or Decimal("0") for c in kd_codes), Decimal("0"))
+            if abs(kd_total - total) <= tol:
+                for c in kd_codes:
+                    for code in (c, *_ancestors(c, kids)):
+                        cell = (entity_amts.get(ent) or {}).get(code)
+                        if cell:
+                            cell["debit"] = None
+                            cell["credit"] = None  # 结转贷方跟着走，父行改公式后由叶子决定
+                        pre_left.discard((ent, code))
+                notes.append(f"薪酬左列重分={ent}:{label}")
+            else:
+                notes.append(f"薪酬左列未重分={ent}:{label}(台账≠金蝶)")
+
+
 def apply_payroll(
     entity_amts: dict,
     dept_amts: dict,
@@ -883,6 +949,7 @@ def apply_payroll(
         for code, pair in (bucket or {}).items():
             if (pair or {}).get("debit") is not None or (pair or {}).get("credit") is not None:
                 pre_left.add((ent, str(code)))
+    resplit_left_by_payroll(entity_amts, parsed, rules, pre_left, notes, kids)
     unmapped = list(parsed.get("unmapped") or [])
     for row in parsed.get("rows") or []:
         code = str(row.get("code") or "")

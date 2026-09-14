@@ -401,6 +401,33 @@ def rollup_entity_parents(entity_amts: dict, layout: dict) -> None:
                 bucket[code] = {"debit": debit, "credit": credit}
 
 
+def parent_left_residuals(entity_amts: dict, layout: dict) -> list[str]:
+    """非总部父行左列是子行 SUM 公式；金蝶落在父级、没有叶子的发生额会被公式盖掉。这里把它揪出来。"""
+    kids = direct_children(layout)
+    hard = set(layout.get("parent_left_hard") or ["甲骨易"])
+    out: list[str] = []
+    for ent, bucket in (entity_amts or {}).items():
+        if ent in hard:
+            continue
+        for code, pair in (bucket or {}).items():
+            children = kids.get(str(code)) or []
+            if not children:
+                continue
+            # 只看发生额那一侧（收入贷方、费用借方）；另一侧是结转镜像，不当残差
+            side = "credit" if is_income(str(code), layout) else "debit"
+            parent_amt = (pair or {}).get(side)
+            if parent_amt is None:
+                continue
+            child_sum = None
+            for c in children:
+                v = (bucket.get(c) or {}).get(side)
+                if v is not None:
+                    child_sum = add_money(child_sum, v)
+            if abs((parent_amt or Decimal("0")) - (child_sum or Decimal("0"))) > Decimal("0.01"):
+                out.append(f"{ent}:{code}")
+    return out
+
+
 def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None:
     ws = wb.create_sheet("损益表", 0)
     ws.freeze_panes = layout.get("freeze") or "C3"
@@ -467,6 +494,8 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
     debit_letters = [p["debit"] for p in layout["entity_pairs"]]
     credit_letters = [p["credit"] for p in layout["entity_pairs"]]
     dept_letters = [letter for _n, letter in dept_columns(layout)]
+    # 斯佳 2026-09-14：父行左列只有总部抄金蝶；其余主体父行 = 子行 SUM 公式（和右列同一套）
+    parent_left_hard = set(layout.get("parent_left_hard") or ["甲骨易"])
 
     for acc in layout["accounts"]:
         code = acc["code"]
@@ -477,20 +506,24 @@ def write_pl_sheet(wb, layout: dict, entity_amts: dict, dept_amts: dict) -> None
         ws.cell(r, 1).font = font
         ws.cell(r, 2).font = font
         ws.cell(r, 2).alignment = left
+        child_codes = kids.get(code) or []
         for pair in layout["entity_pairs"]:
             header = pair["header"]
             bucket = (entity_amts.get(header) or {}).get(code) or {}
             dcell = ws[f"{pair['debit']}{r}"]
             ccell = ws[f"{pair['credit']}{r}"]
-            dcell.value = cell_num(bucket.get("debit"))
-            ccell.value = cell_num(bucket.get("credit"))
+            if child_codes and header not in parent_left_hard:
+                dcell.value = "=" + "+".join(f"{pair['debit']}{row_of[c]}" for c in child_codes)
+                ccell.value = "=" + "+".join(f"{pair['credit']}{row_of[c]}" for c in child_codes)
+            else:
+                dcell.value = cell_num(bucket.get("debit"))
+                ccell.value = cell_num(bucket.get("credit"))
             dcell.number_format = NF
             ccell.number_format = NF
         ws[f"S{r}"] = "=" + "+".join(f"{col}{r}" for col in debit_letters)
         ws[f"T{r}"] = "=" + "+".join(f"{col}{r}" for col in credit_letters)
         ws[f"S{r}"].number_format = NF
         ws[f"T{r}"].number_format = NF
-        child_codes = kids.get(code) or []
         for name, letter in dept_columns(layout):
             cell = ws[f"{letter}{r}"]
             cell.number_format = NF
@@ -1476,6 +1509,9 @@ def run(
     )
     apply_rent_abstract_split(dept_amts, rent_lines, layout, notes)
     rollup_entity_parents(entity_amts, layout)
+    parent_residual = parent_left_residuals(entity_amts, layout)
+    if parent_residual:
+        notes.append("父行发生额未落叶子=" + ",".join(parent_residual))
     if not any(profit_prev.get(e) for e in layout["entities"]):
         notes.append("无上月列")
 
@@ -1551,6 +1587,12 @@ def run(
         )
     if any("总部工资社保无部门辅助" in n for n in notes) and "甲骨易" not in payroll_covered:
         asks.append("总部核算项目余额表和凭证都没有把工资/社保挂到部门。这些格子请给拆分表或手填，不要拿做好的损益表倒填。")
+    if parent_residual:
+        asks.append(
+            "这些父级科目金蝶有整笔发生额但没有落到叶子，损益表父行按子行公式会看不到这笔："
+            + ",".join(parent_residual)
+            + "。请给职工薪酬台账/薪酬拆分表，或告诉我这笔该进哪个明细行。没给之前这几行核对不算平。"
+        )
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
         asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
