@@ -234,6 +234,28 @@ async def _open_context(p):
     return ctx, browser, "fresh"
 
 
+LOGIN_SCRIPT = HERE.parent.parent / "pl-dept-report" / "scripts" / "xingchen_login.py"
+ASK_LOGIN = (
+    "星辰网页没登录，也没有本机账密。请把金蝶网页用户名密码写进 ~/.config/finance/xingchen.local.json"
+    "（格式看 pl-dept-report/config/xingchen.local.example.json），或者自己从星辰引出「客户核算项目余额表」"
+    "（客户 + 1131 + 本年）放进文件夹或 Downloads。"
+)
+
+
+def _login_mod():
+    """复用月度损益表技能的账密登录（同一个白名单包里）。没装就返回 None。"""
+    if not LOGIN_SCRIPT.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("kingdee_posting_xingchen_login", LOGIN_SCRIPT)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 async def _ensure_xingchen(page) -> bool:
     await page.goto(WORKBENCH, wait_until="domcontentloaded")
     await page.wait_for_timeout(1500)
@@ -242,7 +264,19 @@ async def _ensure_xingchen(page) -> bool:
         await page.wait_for_timeout(3000)
     body = await page.locator("body").inner_text()
     if "登录" in body and "进入使用" not in body and "云星辰" not in body:
-        return False
+        # 同事机器没有明昊的 Chrome 会话：用 xingchen.local.json 账密登一次，会话存下来
+        login = _login_mod()
+        creds = login.load_creds() if login else None
+        if not login or not creds:
+            raise SystemExit(ASK_LOGIN)
+        await login.ensure_login(page, creds)
+        try:
+            await login.save_state(page.context)
+        except Exception:
+            pass
+        if await page.get_by_text("进入使用").count():
+            await page.get_by_text("进入使用").first.click()
+            await page.wait_for_timeout(3000)
     await page.goto(XINGCHEN_HOME, wait_until="domcontentloaded")
     await page.wait_for_timeout(1500)
     await _dismiss_overlays(page)
@@ -368,6 +402,15 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
 
     try:
         return asyncio.run(_run())
+    except SystemExit as e:
+        code = str(e)
+        human = {
+            "missing_creds": ASK_LOGIN,
+            "bad_password": "金蝶网页账号或密码错（xingchen.local.json），请核对后重跑",
+            "need_captcha": "金蝶网页登录要滑块/短信验证，脚本过不去。请先在浏览器登一次，或把引出的客户核算项目余额表放进文件夹",
+            "login_failed": "金蝶网页登录没成功。请核对 xingchen.local.json，或把引出的客户核算项目余额表放进文件夹",
+        }.get(code, code)
+        return {"ok": False, "error": human, "path": None}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}", "path": None}
 
@@ -383,4 +426,8 @@ def ensure_assist_xlsx(extra_dirs: list[Path] | None = None) -> Path:
         if path.is_file():
             return path
     reason = got.get("error") or "没有客户核算项目余额表"
-    raise SystemExit(f"{reason}。OpenAPI 没有这张表，请把引出的 xlsx 放到文件夹或 Downloads。")
+    raise SystemExit(
+        f"{reason}。这张表 OpenAPI 没有，销项/收款的应收科目都靠它。"
+        "两条路任选：① 把星辰引出的「客户核算项目余额表」（客户 + 1131 + 本年）xlsx 放到文件夹或 Downloads；"
+        "② 把金蝶网页账密写进 ~/.config/finance/xingchen.local.json，我自己登录引出。未生成引入表。"
+    )

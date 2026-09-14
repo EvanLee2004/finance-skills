@@ -116,6 +116,7 @@ flowchart TD
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
 | `config/业务规则.md` · `config/场景/` | 人话口径（数字以 json 为准） |
 | 本机 `~/.config/finance/kingdee.local.json` | 开放平台应用号；**三入口都用**；不进 git、更新不覆盖 |
+| 本机 `~/.config/finance/xingchen.local.json` | 金蝶网页账密（与 pl-dept-report 同一份）；销项/收款引出客户核算项目余额表时星辰没登录才用；更新不覆盖 |
 | 本机 `~/.config/finance/zhiyun.local.json` | 智云账号；**只有收款、且由 convert.py 读**；销项/付款禁止打开 |
 
 ## 8. 怎么跑

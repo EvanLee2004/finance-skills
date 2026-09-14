@@ -437,3 +437,40 @@ def test_pick_assist_uses_prev_completed_month_not_future():
     ar, rev, why = lookups.pick_assist_account("1", "2026-09-07", rows)
     assert (ar, rev, why) == ("113103", "510103", "")
     assert lookups.prev_completed_month("2026-09-07") == "202608"
+
+
+# ---- 余额表引出：同事机器没有明昊 Chrome 会话，要能走账密登录 ----
+
+assist_xlsx = _load("kingdee_posting_assist_unit", SCRIPTS / "assist_xlsx.py")
+
+
+def test_assist_export_reuses_pl_dept_report_login():
+    mod = assist_xlsx._login_mod()
+    assert mod is not None, "白名单里 pl-dept-report 应和 kingdee-posting 并排安装"
+    assert callable(mod.load_creds) and callable(mod.ensure_login) and callable(mod.save_state)
+
+
+def test_assist_ask_points_to_local_json_or_manual_export():
+    assert "xingchen.local.json" in assist_xlsx.ASK_LOGIN
+    assert "客户核算项目余额表" in assist_xlsx.ASK_LOGIN
+
+
+def test_assist_export_translates_login_exit_codes(monkeypatch, tmp_path):
+    import asyncio
+
+    monkeypatch.setattr(asyncio, "run", lambda coro: (_ for _ in ()).throw(SystemExit("bad_password")))
+    got = assist_xlsx.export_customer_assist_xlsx(tmp_path / "x.xlsx")
+    assert got["ok"] is False
+    assert "密码" in got["error"] and "bad_password" not in got["error"]
+
+
+def test_ensure_assist_xlsx_ask_gives_two_ways(monkeypatch, tmp_path):
+    monkeypatch.setattr(assist_xlsx, "find_assist_xlsx", lambda extra_dirs=None: None)
+    monkeypatch.setattr(assist_xlsx, "export_customer_assist_xlsx", lambda dest=None: {"ok": False, "error": "星辰未登录", "path": None})
+    try:
+        assist_xlsx.ensure_assist_xlsx([tmp_path])
+    except SystemExit as e:
+        msg = str(e)
+    else:
+        raise AssertionError("should stop")
+    assert "xingchen.local.json" in msg and "放到文件夹" in msg and "未生成引入表" in msg
