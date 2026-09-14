@@ -71,6 +71,12 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def ask_and_stop(msg: str) -> int:
+    log(msg)
+    print(f"ask={msg}", flush=True)
+    return 2
+
+
 def money(v):
     if v is None or v == "":
         return None
@@ -737,16 +743,40 @@ def parse_invoice_text(text: str) -> dict:
     return {"kind": kind, "seller": seller, "total": total, "tax": tax}
 
 
+NO_PDF_READER_ASK = (
+    "本机没有 pdfplumber，读不了发票 PDF，未生成引入表。"
+    "请先装：pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pdfplumber，再重跑。"
+)
+
+
 def parse_invoice_pdf(path: Path) -> dict:
+    """读不出来要说清是缺库还是这张票读不出字，不要都当成「票缺信息」。"""
     empty = {"kind": "", "seller": "", "total": None, "tax": None}
     try:
         import pdfplumber
-
+    except ImportError:
+        return {**empty, "error": "no_pdfplumber"}
+    try:
         with pdfplumber.open(str(path)) as pdf:
             text = "\n".join((page.extract_text() or "") for page in pdf.pages[:4])
     except Exception:
-        return empty
+        return {**empty, "error": "unreadable"}
+    if not text.strip():
+        return {**empty, "error": "unreadable"}
     return parse_invoice_text(text)
+
+
+def find_vendor_folder(vendor: str, dirs: dict[str, Path]) -> tuple[Path | None, str]:
+    """台账供应商名 ↔ 发票夹名。同名直接用；差个括号/后缀就按供应商模糊规则认；两个像的不猜。"""
+    folder = dirs.get(vendor)
+    if folder is not None:
+        return folder, ""
+    m = names.match_records(vendor, [(name, name) for name in dirs])
+    if m.status == "ok" and m.hit:
+        return dirs[m.hit[0]], ""
+    if m.status == "many":
+        return None, "发票夹名有多个像的，认不出是哪一个"
+    return None, "缺这家发票夹"
 
 
 def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, aliases: dict) -> list[VoucherLine]:
@@ -783,9 +813,9 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
             key=vendor,
             extra={"供应商": vendor, "sheet": sheet, "source_amt": str(payable) if payable is not None else ""},
         )
-        folder = dirs.get(vendor)
+        folder, folder_reason = find_vendor_folder(vendor, dirs)
         if folder is None:
-            line.status, line.reason = "待确认", "缺这家发票夹"
+            line.status, line.reason = "待确认", folder_reason
             lines.append(line)
             continue
         pdfs = list(folder.glob("*.pdf")) + list(folder.glob("*.PDF"))
@@ -794,6 +824,14 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
             lines.append(line)
             continue
         metas = [parse_invoice_pdf(p) for p in pdfs]
+        if any(m.get("error") == "no_pdfplumber" for m in metas):
+            wb_f.close()
+            wb_v.close()
+            raise SystemExit(NO_PDF_READER_ASK)
+        if any(m.get("error") == "unreadable" for m in metas):
+            line.status, line.reason = "待确认", "发票 PDF 读不出文字（可能是扫描件或坏文件）"
+            lines.append(line)
+            continue
         if any(
             (not m.get("kind")) or (not str(m.get("seller") or "").strip()) or m.get("total") is None
             for m in metas
@@ -1057,11 +1095,20 @@ def convert_receipt(
     return lines
 
 
+def find_desktop(root: Path) -> Path | None:
+    """Windows 把桌面挪到 OneDrive 时 ~/Desktop 不存在；按常见位置找。"""
+    for rel in ("Desktop", "桌面", "OneDrive/Desktop", "OneDrive/桌面"):
+        cand = root / rel
+        if cand.is_dir():
+            return cand
+    return None
+
+
 def default_desktop_dir(prefix: str = "金蝶入账", today: date | None = None, home: Path | None = None) -> Path:
     day = (today or date.today()).strftime("%Y%m%d")
     root = Path(home) if home else Path.home()
-    desktop = root / "Desktop"
-    base = desktop if desktop.is_dir() else Path.cwd()
+    desktop = find_desktop(root)
+    base = desktop if desktop else Path.cwd()
     path = base / f"{prefix}_{day}"
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -1343,16 +1390,14 @@ def main(argv=None) -> int:
     if args.master:
         master_data = json.loads(Path(args.master).read_text(encoding="utf-8"))
     elif args.no_api:
-        log("本次入账必须先读取总部当前档案；--no-api 只可用于开发排查，未生成引入表。")
-        return 2
+        return ask_and_stop("本次入账必须先读取总部当前档案；--no-api 只可用于开发排查，未生成引入表。")
     else:
         loaded = kingdee_api.try_load_master()
         if loaded.get("ok"):
             master_data = loaded["data"]
         else:
             reason = "本机没有金蝶应用号" if loaded.get("missing_credentials") else loaded.get("error") or "读取失败"
-            log(f"总部档案未核验（{reason}）；未生成引入表。请检查本机应用号和只读权限后重试。")
-            return 2
+            return ask_and_stop(f"总部档案未核验（{reason}）。未生成引入表。请检查本机应用号和只读权限后重试。")
     lookups = {}
     scene = args.scene
     if not scene:
@@ -1375,8 +1420,7 @@ def main(argv=None) -> int:
         fetched = kingdee_api.try_fetch_next_voucher_no(period)
         if not fetched.get("ok"):
             reason = "本机没有金蝶应用号" if fetched.get("missing_credentials") else fetched.get("error") or "读取失败"
-            log(f"当前月凭证号未核验（{reason}）；未生成引入表。请检查本机应用号后重试。")
-            return 2
+            return ask_and_stop(f"当前月凭证号未核验（{reason}）。未生成引入表。请检查本机应用号后重试。")
         start_no = int(fetched["next_number"])
 
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
@@ -1419,8 +1463,7 @@ def main(argv=None) -> int:
                     out_dir=out_dir,
                 )
     except SystemExit as e:
-        log(str(e))
-        return 2
+        return ask_and_stop(str(e) if str(e) else "材料不齐，未生成引入表。")
     log(
         f"这批 {result['source_count']}：可入账 {result['bookable_count']}，待确认 {result['hold_count']}。"
         f"填好的金蝶表在 {result['kingdee_path']}。请您看待确认，再自己去金蝶引入。我没有点引入。"

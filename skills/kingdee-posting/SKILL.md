@@ -41,7 +41,7 @@ description: >-
 python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <绝对目录>
 ```
 
-可加 `--scene 销项发票|付款|收款`。缺件会退出非 0，stdout 是 JSON，`ask` 是人话。把 `ask` 原样问她。
+可加 `--scene 销项发票|付款|收款`。缺件会退出非 0，stdout 是 JSON，`ask` 是人话。把 `ask` 原样问她。档案失败、没有应用号、凭证号查不到时 stdout 也是 `ask=`，**未生成引入表**，原样问她，不要交空表。
 
 按**表头**认，不靠文件名。
 
@@ -67,7 +67,7 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录> --scene
 
 斯佳点头「这两家新增」时加上 `--create-new-customers`：按现网 3～4 位客户编号 max+1 建档，第一笔用申请人科目。未点头不要加。
 
-没给输出目录时默认按模块写到桌面 `金蝶入账_销项_YYYYMMDD/`、`金蝶入账_付款_YYYYMMDD/`、`金蝶入账_收款_YYYYMMDD/`。系统 `python3` 没有 requests 也没关系：脚本会切到仓内 `.venv`。没有 `.venv` 就按清华镜像装 `requests`（失败再阿里 / 中科大 / 默认源）。不要另开环境管家。**不要**对 macOS 系统 Python 乱装一堆无关库。
+没给输出目录时默认按模块写到桌面 `金蝶入账_销项_YYYYMMDD/`、`金蝶入账_付款_YYYYMMDD/`、`金蝶入账_收款_YYYYMMDD/`（桌面在 `OneDrive/Desktop` 也认）。付款 PDF 靠 `pdfplumber`：本机没装时脚本会 `ask=` 停下，按提示装了再跑，不要交空表。系统 `python3` 没有 requests 也没关系：脚本会切到仓内 `.venv`。没有 `.venv` 就按清华镜像装 `requests`（失败再阿里 / 中科大 / 默认源）。不要另开环境管家。**不要**对 macOS 系统 Python 乱装一堆无关库。
 
 默认写出：
 

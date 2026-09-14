@@ -846,10 +846,13 @@ def test_cli_inspect_then_convert(tmp_path):
     assert convert.main(["--inspect", "--input-dir", str(tmp_path), "--scene", "销项发票"]) == 0
 
 
-def test_cli_refuses_to_create_unverified_auxiliaries_without_api(tmp_path):
+def test_cli_refuses_to_create_unverified_auxiliaries_without_api(tmp_path, capsys):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     assert convert.main(["--input-dir", str(tmp_path), "--scene", "销项发票", "--no-api"]) == 2
     assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+    captured = capsys.readouterr()
+    assert "ask=" in captured.out
+    assert "未生成引入表" in captured.out
 
 
 def test_inspect_receipt_without_sales_or_ar(tmp_path):
@@ -1681,3 +1684,82 @@ def test_cli_without_create_flag_does_not_post(tmp_path, monkeypatch):
     reason = str(detail.active.cell(2, 2).value or "")
     detail.close()
     assert "是否新建" in reason
+
+
+def test_payment_folder_name_fuzzy_matches_ledger_vendor(tmp_path, monkeypatch):
+    # 台账写全称，文件夹少了「（北京）」——不该算缺夹
+    _write_pay(tmp_path / "付款.xlsx", [["某某翻译（北京）有限公司", 100, "x"]])
+    folder = tmp_path / "某某翻译有限公司"
+    folder.mkdir()
+    _dummy_pdf(folder / "a.pdf")
+    monkeypatch.setattr(
+        convert,
+        "parse_invoice_pdf",
+        lambda p: {"kind": "普票", "seller": "某某翻译有限公司", "total": Decimal("100.00"), "tax": None},
+    )
+    result = _run(tmp_path, "付款")
+    assert result["bookable_count"] == 1
+    assert result["hold_count"] == 0
+
+
+def test_payment_two_similar_folders_hold_not_guess(tmp_path):
+    _write_pay(tmp_path / "付款.xlsx", [["某某翻译有限公司", 100, "x"]])
+    for name in ("某某翻译有限公司北京分公司", "某某翻译有限公司上海分公司"):
+        d = tmp_path / name
+        d.mkdir()
+        _dummy_pdf(d / "a.pdf")
+    result = _run(tmp_path, "付款")
+    assert result["hold_count"] == 1
+    xl = load_workbook(result["detail_path"])
+    text = " ".join(str(c.value) for ws in xl.worksheets for row in ws.iter_rows() for c in row if c.value)
+    xl.close()
+    assert "多个像的" in text
+
+
+def test_payment_unreadable_pdf_says_so(tmp_path, monkeypatch):
+    _write_pay(tmp_path / "付款.xlsx", [["北京某翻译店", 100, "x"]])
+    folder = tmp_path / "北京某翻译店"
+    folder.mkdir()
+    _dummy_pdf(folder / "scan.pdf")
+    monkeypatch.setattr(
+        convert,
+        "parse_invoice_pdf",
+        lambda p: {"kind": "", "seller": "", "total": None, "tax": None, "error": "unreadable"},
+    )
+    result = _run(tmp_path, "付款")
+    assert result["hold_count"] == 1
+    xl = load_workbook(result["detail_path"])
+    text = " ".join(str(c.value) for ws in xl.worksheets for row in ws.iter_rows() for c in row if c.value)
+    xl.close()
+    assert "读不出文字" in text
+    assert "发票缺票种" not in text
+
+
+def test_payment_missing_pdfplumber_stops_with_ask(tmp_path, monkeypatch, capsys):
+    _write_pay(tmp_path / "付款.xlsx", [["北京某翻译店", 100, "x"]])
+    folder = tmp_path / "北京某翻译店"
+    folder.mkdir()
+    _dummy_pdf(folder / "a.pdf")
+    monkeypatch.setattr(
+        convert,
+        "parse_invoice_pdf",
+        lambda p: {"kind": "", "seller": "", "total": None, "tax": None, "error": "no_pdfplumber"},
+    )
+    master_json = tmp_path / "master.json"
+    master_json.write_text(json.dumps(_master(), ensure_ascii=False), encoding="utf-8")
+    rc = convert.main(
+        ["--input-dir", str(tmp_path), "--scene", "付款", "--master", str(master_json), "--start-voucher-no", "1"]
+    )
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "ask=" in out and "pdfplumber" in out and "未生成引入表" in out
+    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+
+
+def test_default_desktop_dir_finds_onedrive_desktop(tmp_path):
+    from datetime import date
+
+    od = tmp_path / "OneDrive" / "Desktop"
+    od.mkdir(parents=True)
+    got = convert.default_desktop_dir("金蝶入账", today=date(2026, 9, 14), home=tmp_path)
+    assert got == od / "金蝶入账_20260914"
