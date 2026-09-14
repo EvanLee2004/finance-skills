@@ -849,7 +849,7 @@ def test_cli_inspect_then_convert(tmp_path):
 def test_cli_refuses_to_create_unverified_auxiliaries_without_api(tmp_path, capsys):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     assert convert.main(["--input-dir", str(tmp_path), "--scene", "销项发票", "--no-api"]) == 2
-    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert not list(tmp_path.glob("凭证引入_*_结果.xlsx"))
     captured = capsys.readouterr()
     assert "ask=" in captured.out
     assert "未生成引入表" in captured.out
@@ -1079,7 +1079,7 @@ def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):
         )
         == 0
     )
-    assert (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert list(tmp_path.glob("凭证引入_*_结果.xlsx"))
 
 
 def test_cli_receipt_without_zhiyun_still_outputs(tmp_path, monkeypatch):
@@ -1121,9 +1121,9 @@ def test_cli_receipt_without_zhiyun_still_outputs(tmp_path, monkeypatch):
         )
         == 0
     )
-    assert (tmp_path / "凭证引入_结果.xlsx").exists()
-    assert (tmp_path / "收款_明细结果.xlsx").exists()
-    assert (tmp_path / "对照说明.md").exists()
+    assert list(tmp_path.glob("凭证引入_*_结果.xlsx"))
+    assert (tmp_path / "收款_收款_明细结果.xlsx").exists()
+    assert (tmp_path / "对照说明_收款.md").exists()
 
 
 def test_cli_lookups_file_converts(tmp_path):
@@ -1153,7 +1153,7 @@ def test_cli_lookups_file_converts(tmp_path):
         )
         == 0
     )
-    assert (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert list(tmp_path.glob("凭证引入_*_结果.xlsx"))
 
 
 def test_sales_programme_peels_limited_company(tmp_path):
@@ -1564,7 +1564,7 @@ def test_sales_default_voucher_no_follows_month_max(tmp_path, monkeypatch):
         )
         == 0
     )
-    nums = [n for n in _voucher_nums(tmp_path / "凭证引入_结果.xlsx", 9) if n]
+    nums = [n for n in _voucher_nums(next(tmp_path.glob("凭证引入_*_结果.xlsx")), 9) if n]
     assert min(nums) == 26
     assert 1 not in nums
 
@@ -1638,7 +1638,7 @@ def test_cli_create_new_customers_then_books(tmp_path, monkeypatch):
     )
     assert posted and posted[0][0] == title
     assert posted[0][1] == kingdee_api.next_customer_number(_master()["customer"])
-    kd = load_workbook(tmp_path / "凭证引入_结果.xlsx")
+    kd = load_workbook(next(tmp_path.glob("凭证引入_*_结果.xlsx")))
     ws = kd[convert.KINGDEE_SHEET]
     accounts = [str(ws.cell(r, 7).value or "") for r in range(4, 7)]
     codes = [str(ws.cell(r, 18).value or "") for r in range(4, 7)]
@@ -1680,7 +1680,7 @@ def test_cli_without_create_flag_does_not_post(tmp_path, monkeypatch):
         )
         == 0
     )
-    detail = load_workbook(tmp_path / "发票_明细结果.xlsx")
+    detail = load_workbook(tmp_path / "发票_销项_明细结果.xlsx")
     reason = str(detail.active.cell(2, 2).value or "")
     detail.close()
     assert "是否新建" in reason
@@ -1753,7 +1753,7 @@ def test_payment_missing_pdfplumber_stops_with_ask(tmp_path, monkeypatch, capsys
     assert rc == 2
     out = capsys.readouterr().out
     assert "ask=" in out and "pdfplumber" in out and "未生成引入表" in out
-    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert not list(tmp_path.glob("凭证引入_*_结果.xlsx"))
 
 
 def test_default_desktop_dir_finds_onedrive_desktop(tmp_path):
@@ -1793,16 +1793,16 @@ def test_cli_mixed_folder_runs_every_module_with_consecutive_voucher_numbers(tmp
         ]
     )
     assert rc == 0
-    assert (out / "销项" / "凭证引入_结果.xlsx").exists()
-    assert (out / "收款" / "凭证引入_结果.xlsx").exists()
+    assert (out / "销项" / "凭证引入_销项_结果.xlsx").exists()
+    assert (out / "收款" / "凭证引入_收款_结果.xlsx").exists()
     assert not (out / "付款").exists()
     def _nos(path):
         ws = load_workbook(path)[convert.KINGDEE_SHEET]
         col = convert.col_by_label(ws, "凭证号 #")
         return {int(ws.cell(r, col).value) for r in range(4, ws.max_row + 1) if ws.cell(r, col).value not in (None, "")}
 
-    sales_nos = _nos(out / "销项" / "凭证引入_结果.xlsx")
-    rec_nos = _nos(out / "收款" / "凭证引入_结果.xlsx")
+    sales_nos = _nos(out / "销项" / "凭证引入_销项_结果.xlsx")
+    rec_nos = _nos(out / "收款" / "凭证引入_收款_结果.xlsx")
     assert sales_nos and rec_nos
     assert min(sales_nos) == 45
     assert min(rec_nos) == max(sales_nos) + 1
@@ -1820,5 +1820,5 @@ def test_cli_single_module_folder_keeps_flat_output(tmp_path):
         ["--input-dir", str(tmp_path), "--master", str(master), "--lookups", str(lookups), "--date", "2026-08-27", "--start-voucher-no", "1", "--out-dir", str(out)]
     )
     assert rc == 0
-    assert (out / "凭证引入_结果.xlsx").exists()
+    assert (out / "凭证引入_销项_结果.xlsx").exists()
     assert not (out / "销项").exists()

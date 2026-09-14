@@ -578,7 +578,7 @@ def test_cli_voucher_query_fail_exits_nonzero(tmp_path, monkeypatch):
         )
         == 2
     )
-    assert not (tmp_path / "凭证引入_结果.xlsx").exists()
+    assert not list(tmp_path.glob("凭证引入_*_结果.xlsx"))
 
 
 def test_sales_org_overrides_applicant_json(tmp_path):

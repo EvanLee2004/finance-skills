@@ -264,6 +264,8 @@ class VoucherLine:
     entries: list = field(default_factory=list)
 
 
+SCENE_ORDER = ("销项发票", "付款", "收款")
+SCENE_SUBDIR = {"销项发票": "销项", "付款": "付款", "收款": "收款"}
 SCENE_DESKTOP = {
     "销项发票": "金蝶入账_销项",
     "付款": "金蝶入账_付款",
@@ -1214,15 +1216,16 @@ def write_outputs(
     extras: list[str] | None = None,
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
-    detail = out_dir / f"{stem}_明细结果.xlsx"
-    kingdee = out_dir / "凭证引入_结果.xlsx"
+    tag = SCENE_SUBDIR.get(scene, scene)  # 销项 / 付款 / 收款，三张表放一起也分得清
+    detail = out_dir / f"{stem}_{tag}_明细结果.xlsx"
+    kingdee = out_dir / f"凭证引入_{tag}_结果.xlsx"
     write_detail(detail, lines, scene)
     write_kingdee(kingdee, lines, rules, booking, TEMPLATE)
     bookable = sum(1 for x in lines if x.status == "可入账")
     hold = sum(1 for x in lines if x.status != "可入账")
     sheet = first_sheet_name(lines)
     note = write_note(
-        out_dir / "对照说明.md",
+        out_dir / f"对照说明_{tag}.md",
         scene=scene,
         source_count=len(lines),
         bookable_count=bookable,
@@ -1367,10 +1370,6 @@ def run_dir(
     )
     result["new_customer_names"] = names_needing_create(lines)
     return result
-
-
-SCENE_ORDER = ("销项发票", "付款", "收款")
-SCENE_SUBDIR = {"销项发票": "销项", "付款": "付款", "收款": "收款"}
 
 
 def _lookups_for(scene: str, args) -> dict:
