@@ -431,7 +431,8 @@ def test_table_ar_code_ignored_on_six_col(tmp_path):
     assert "113101" not in accounts
 
 
-def test_booking_date_from_receipt_row(tmp_path):
+def test_booking_date_is_run_booking_not_receipt_row(tmp_path):
+    """斯佳 2026-09-14：记账日三入口统一（默认取当前月最后一张凭证的日期），表上收款日只用来查余额表期间。"""
     _write_month_draft(tmp_path / "稿.xlsx", [["2026-09-03", "甲科技有限公司", 10, "于占国", ""]])
     result = _run(
         tmp_path,
@@ -444,8 +445,8 @@ def test_booking_date_from_receipt_row(tmp_path):
     ws = kd[convert.KINGDEE_SHEET]
     dates = [str(ws.cell(r, 1).value or "") for r in range(4, 8)]
     kd.close()
-    assert any("2026-09-03" in d for d in dates)
-    assert not any("2026-08-27" in d for d in dates)
+    assert any("2026-08-27" in d for d in dates)  # _run 的 booking
+    assert not any("2026-09-03" in d for d in dates)
 
 
 def test_note_has_counts_not_names(tmp_path):

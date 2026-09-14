@@ -1886,3 +1886,24 @@ def test_receipt_without_deposit_hint_still_needs_sales(tmp_path):
     result = _run(tmp_path, "收款", lookups=_lookups(receipt_sales={}, order_sales={}))
     assert result["hold_count"] == 1
     assert _credit_line(result, "113312") is None
+
+
+def test_cli_default_booking_date_follows_last_voucher(tmp_path, monkeypatch):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    master = tmp_path / "master.json"
+    master.write_text(json.dumps(_master(), ensure_ascii=False), encoding="utf-8")
+    lookups = tmp_path / "lookups.json"
+    lookups.write_text(json.dumps(_lookups(), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        convert.kingdee_api,
+        "try_fetch_next_voucher_no",
+        lambda period=None: {"ok": True, "missing_credentials": False, "next_number": 89, "max_number": 88, "last_date": "2026-09-14", "period": "202609"},
+    )
+    out = tmp_path / "out"
+    rc = convert.main(["--input-dir", str(tmp_path), "--master", str(master), "--lookups", str(lookups), "--out-dir", str(out)])
+    assert rc == 0
+    ws = load_workbook(next(out.glob("凭证引入_*_结果.xlsx")))[convert.KINGDEE_SHEET]
+    dates = {str(ws.cell(r, 1).value or "")[:10] for r in range(4, ws.max_row + 1) if ws.cell(r, 1).value}
+    assert dates == {"2026-09-14"}
+    nos = {int(ws.cell(r, convert.col_by_label(ws, "凭证号 #")).value) for r in range(4, ws.max_row + 1) if ws.cell(r, 1).value}
+    assert nos == {89}

@@ -845,6 +845,7 @@ def try_fetch_next_voucher_no(period: str | None = None) -> dict:
         token, _domain = get_app_token(creds)
         extra = {"app-token": token}
         max_no = 0
+        last_date = ""
         page = 1
         while page <= 80:
             resp = _request(
@@ -872,6 +873,7 @@ def try_fetch_next_voucher_no(period: str | None = None) -> dict:
                 n = _voucher_no(row)
                 if n is not None and n > max_no:
                     max_no = n
+                    last_date = str(row.get("date") or row.get("voucher_date") or "")[:10]
             if len(rows) < 100:
                 break
             page += 1
@@ -880,6 +882,7 @@ def try_fetch_next_voucher_no(period: str | None = None) -> dict:
             "missing_credentials": False,
             "next_number": max_no + 1,
             "max_number": max_no,
+            "last_date": last_date,
             "period": yyyymm,
         }
     except Exception as e:

@@ -1057,7 +1057,7 @@ def convert_receipt(
             source_row=r,
             key=cust,
             expl=f"收：{cust}",
-            booking_date=rec_day,
+            booking_date=booking,  # 斯佳 2026-09-14：记账日统一=当前月最后一张凭证的日期；表上收款日只用来查余额表期间
             extra={"客户名称": cust, "sheet": sheet, "source_amt": str(amt) if amt is not None else ""},
         )
         if amt is None:
@@ -1401,7 +1401,7 @@ def run_dir(
             assist_name = Path(ar_xlsx).name
         else:
             assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=False)
-        extras.append("记账日：表上收款日")
+        extras.append("记账日：同当前月最后一张凭证（可 --date 指定）")
         extras.append("表上销售有则用，空则智云回款（名称或到账日+金额）→下单；部门可回退职员档案")
         lines = convert_receipt(
             src,
@@ -1527,13 +1527,18 @@ def main(argv=None) -> int:
     multi = len(scenes) > 1 or args.scene == "全部"
 
     start_no = args.start_voucher_no
-    if start_no is None:
+    if start_no is None or not args.date:
         period = (args.date or date.today().isoformat())[:7]
         fetched = kingdee_api.try_fetch_next_voucher_no(period)
         if not fetched.get("ok"):
             reason = "本机没有金蝶应用号" if fetched.get("missing_credentials") else fetched.get("error") or "读取失败"
             return ask_and_stop(f"当前月凭证号未核验（{reason}）。未生成引入表。请检查本机应用号后重试。")
-        start_no = int(fetched["next_number"])
+        if start_no is None:
+            start_no = int(fetched["next_number"])
+        if not args.date:
+            # 斯佳 2026-09-14：记账日统一 = 当前月最后一张凭证的日期；账上还没凭证才用今天
+            args.date = fetched.get("last_date") or date.today().isoformat()
+            log(f"记账日取当前月最后一张凭证：{args.date}")
 
     base = Path(args.out_dir).expanduser() if args.out_dir else None
     if multi and base is None:
