@@ -69,8 +69,9 @@ from rent_abstract import apply_rent_abstract_split, collect_rent_from_dir
 from payroll_ledger import (
     apply_payroll,
     discover_payroll_files,
+    explicit_payroll_files,
     is_payroll_account_name,
-    parse_payroll_file,
+    parse_payroll_files,
 )
 from layout import (
     account_row_map,
@@ -1155,6 +1156,7 @@ def run(
     no_api: bool,
     offline_xlsx: str | list[str] | None = "",
     skip_offline: bool = False,
+    payroll_xlsx: list[str] | None = None,
 ) -> int:
     layout = load_layout()
     books = load_books()
@@ -1356,10 +1358,15 @@ def run(
         notes.append(dept_note)
     special_rules = load_ben_gongsi_rules()
     filled = accounts_as_bengongsi(entity_amts, dept_rows, special_rules, layout)
-    payroll_files = discover_payroll_files([input_dir, *extra_files], period)
+    # 她亲口指的台账（--payroll-xlsx）不看假数/明昊测试文件名；夹子里扫到的才过滤
+    payroll_files = explicit_payroll_files(payroll_xlsx)
+    seen_pay = {str(p.resolve()) for p in payroll_files}
+    for found in discover_payroll_files([input_dir, *extra_files], period):
+        if str(found.resolve()) not in seen_pay:
+            payroll_files.append(found)
     payroll_parsed: dict = {}
     if payroll_files:
-        payroll_parsed = parse_payroll_file(payroll_files[0], period)
+        payroll_parsed = parse_payroll_files(payroll_files, period)
         if payroll_parsed.get("rows"):
             pay_ent_names = {
                 (str(r.get("entity") or ""), str(r.get("name") or ""))
@@ -1412,7 +1419,7 @@ def run(
     )
     payroll_covered: set[str] = set()
     payroll_codes: dict[str, set[str]] = {}
-    if payroll_parsed.get("rows") or payroll_parsed.get("dirty_sheets"):
+    if payroll_parsed.get("rows") or payroll_parsed.get("dirty_sheets") or payroll_parsed.get("empty_sheets"):
         payroll_covered, payroll_codes = apply_payroll(
             entity_amts, dept_amts, payroll_parsed, layout, notes, report_tmp
         )
@@ -1587,7 +1594,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="", help="xlsx 路径；默认桌面 月度损益表_当天/")
     parser.add_argument("--no-api", action="store_true", help="测试用。同事跑不要加")
     parser.add_argument("--offline-xlsx", action="append", default=[], help="山东/四川/济南代账利润表")
-    parser.add_argument("--payroll-xlsx", action="append", default=[], help="职工薪酬台账；假数/明昊测试文件名不会吃")
+    parser.add_argument("--payroll-xlsx", action="append", default=[], help="职工薪酬台账（可多次）；亲口指的文件一定吃，夹子里扫到的假数/明昊测试才跳过")
     parser.add_argument("--skip-offline", action="store_true", help="她说这三家先不处理")
     args = parser.parse_args(argv)
     period = parse_period(args.period)
@@ -1603,6 +1610,7 @@ def main(argv: list[str] | None = None) -> int:
         bool(args.no_api) or os.environ.get("PL_DEPT_SKIP_API") == "1",
         offline_xlsx=list(args.offline_xlsx or []) + list(args.payroll_xlsx or []),
         skip_offline=bool(args.skip_offline),
+        payroll_xlsx=list(args.payroll_xlsx or []),
     )
 
 

@@ -2357,3 +2357,165 @@ def test_xingchen_web_gaps_asks_hq_assist_if_api_only_has_account(tmp_path: Path
     gaps = convert.xingchen_web_gaps(items, "202608")
     assert "account" not in (gaps.get("jiagu") or [])
     assert "assist" in (gaps.get("jiagu") or [])
+
+
+# ---- 薪酬台账：没有真数据也能测的形状/契约 ----
+
+
+def _write_hunan_payroll(path: Path, wage_amount: float | None = None) -> None:
+    """湖南分公司：社保表部门只写「湖南分公司」，工资表才写人力资源部；工资表可掏空。"""
+    wb = openpyxl.Workbook()
+    si = wb.active
+    si.title = "202608湖南分公司社保公积金"
+    si["A1"] = "湖南分公司2026-8月份五险一金台账"
+    for col, h in zip("ABCDEFHJN", ["序号", "部门", "姓名", "基数", "工伤", "失业", "养老", "医疗", "公积金"]):
+        si[f"{col}2"] = h
+    si["H2"] = "养老"
+    si["E3"] = "单位\n(0.9%)"
+    si["F3"] = "单位\n（0.7%）"
+    si["G3"] = "个人\n（0.3%）"
+    si["H3"] = "单位\n（16%）"
+    si["I3"] = "个人\n（8%）"
+    si["J3"] = "单位\n（8.7%)"
+    si["K3"] = "个人\n(2%)"
+    si["N3"] = "基数"
+    si["O3"] = "单位\n(5%)"
+    si["P3"] = "个人\n(5%)"
+    si["A4"] = 1
+    si["B4"] = "湖南分公司"
+    si["C4"] = "甲"
+    si["E4"] = 9
+    si["F4"] = 7
+    si["H4"] = 160
+    si["J4"] = 87
+    si["O4"] = 50
+    si["A5"] = 2
+    si["B5"] = "标注基地（长沙）"
+    si["C5"] = "乙"
+    si["E5"] = 1
+    si["F5"] = 1
+    si["H5"] = 16
+    si["J5"] = 8
+    si["O5"] = 5
+    wage = wb.create_sheet("202608湖南分公司工资")
+    for i, h in enumerate(["序号", "姓名", "部门", "地区", "身份证号码", "电话号", "基本工资"], 1):
+        wage.cell(1, i).value = h
+    wage["A2"] = 1
+    wage["B2"] = "甲"
+    wage["C2"] = "人力资源部"
+    wage["D2"] = "湖南"
+    wage["G2"] = wage_amount
+    wage["A3"] = 2
+    wage["B3"] = "乙"
+    wage["C3"] = "AI训练师"
+    wage["D3"] = "湖南"
+    wage["G3"] = wage_amount
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    wb.close()
+
+
+def test_explicit_payroll_xlsx_is_eaten_even_if_name_says_fake(tmp_path: Path):
+    _write_account(
+        tmp_path / "wh.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("550198", "活动团建费", 8.0, None)],
+    )
+    _write_assist(
+        tmp_path / "wh_d.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("550198", "活动团建费", "大客户", 8.0, None)],
+    )
+    fake = tmp_path / "elsewhere" / "202608_职工薪酬台账_假数.xlsx"
+    _write_payroll(fake)
+    out = tmp_path / "out.xlsx"
+    r = _run(
+        ["--period", "202608", "--input-dir", str(tmp_path), "--out", str(out), "--no-api", "--payroll-xlsx", str(fake)]
+    )
+    assert out.is_file(), r.stdout + r.stderr
+    report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
+    assert "薪酬台账=202608甲骨易工资" in report
+    # 金额不进 stdout
+    assert "22" not in r.stdout.split("产物=")[0].replace("202608", "")
+
+
+def test_sheet_hint_ignores_month_digits():
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import _match_sheet_spec, load_payroll_rules
+
+    rules = load_payroll_rules()
+    assert _match_sheet_spec("202609上海", rules)["entity"] == "上海"
+    assert _match_sheet_spec("202701文化", rules)["kind"] == "si"
+    assert _match_sheet_spec("202609文化公积金", rules)["kind"] == "hf"
+    assert _match_sheet_spec("202609甲骨易工资", rules)["kind"] == "wage"
+    assert _match_sheet_spec("湖南劳务派遣", rules) is None
+
+
+def test_hunan_si_takes_fine_dept_from_hollow_wage_sheet(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import parse_payroll_file
+
+    path = tmp_path / "202608_职工薪酬台账.xlsx"
+    _write_hunan_payroll(path, wage_amount=None)
+    parsed = parse_payroll_file(path, "202608")
+    codes = {(r["code"], r["dept"]) for r in parsed["rows"]}
+    # 甲在工资表是人力资源部 → 社保进 5502 树；乙是长沙基地 → 5401 树
+    assert ("55020203", "湖南分公司") in codes
+    assert ("550203", "湖南分公司") in codes
+    assert ("54011104", "湖南分公司") in codes
+    assert not any(c.startswith("5501") for c, _ in codes)
+    assert parsed["unmapped"] == []
+    assert "202608湖南分公司工资" in parsed["empty_sheets"]
+    assert any(n.startswith("薪酬sheet认得但没金额=") for n in parsed["notes"])
+
+
+def test_profile_has_shape_but_no_amounts(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import profile_payroll_file
+
+    path = tmp_path / "202608_职工薪酬台账.xlsx"
+    _write_hunan_payroll(path, wage_amount=3333)
+    text = profile_payroll_file(path, "202608")
+    assert "认成=湖南分公司/hunan_si | 有行" in text
+    assert "认成=湖南分公司/wage | 有行" in text
+    assert "对不上的部门=无" in text
+    assert "3333" not in text and "160" not in text
+    assert "甲" not in text and "乙" not in text
+
+
+def test_split_table_round_trip_and_consumed_by_convert(tmp_path: Path):
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import parse_payroll_file, write_split_table
+
+    raw = tmp_path / "raw" / "202608_职工薪酬台账.xlsx"
+    _write_hunan_payroll(raw, wage_amount=100)
+    parsed = parse_payroll_file(raw, "202608")
+    split = write_split_table(parsed, tmp_path / "split" / "202608_薪酬拆分表.xlsx")
+    ws = openpyxl.load_workbook(split).active
+    assert ws.title == "薪酬拆分表"
+    assert [c.value for c in ws[1]] == ["主体", "科目编码", "项目", "部门", "次序", "金额"]
+    body = [[c.value for c in row] for row in ws.iter_rows(min_row=2)]
+    assert all(r[0] == "湖南分公司" for r in body)
+    assert "甲" not in {r[2] for r in body} and "乙" not in {r[2] for r in body}
+    hr_wage = [r for r in body if r[1] == "550201"]
+    assert hr_wage and hr_wage[0][5] == 100
+    again = parse_payroll_file(split, "202608")
+    assert again["sheets"] == ["薪酬拆分表"]
+    assert sum(r["debit"] for r in again["rows"]) == sum(r["debit"] for r in parsed["rows"])
+
+    # 材料夹里只放金蝶引出；原始台账在夹子外，只喂拆分表，不会两份都吃
+    src = tmp_path / "in"
+    _write_account(
+        src / "hn.xlsx",
+        "甲骨易（北京）语言科技股份有限公司湖南分公司",
+        [("560201", "工资", 200.0, None)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202608", "--input-dir", str(src), "--out", str(out), "--no-api", "--payroll-xlsx", str(split)])
+    assert out.is_file(), r.stdout + r.stderr
+    layout = load_layout()
+    row = account_row_map(layout)
+    hn = dept_col_letter(layout, "湖南分公司", 1)
+    sheet = openpyxl.load_workbook(out)["损益表"]
+    assert sheet[f"{hn}{row['550201']}"].value == 100
+    assert sheet[f"{hn}{row['540109']}"].value == 100

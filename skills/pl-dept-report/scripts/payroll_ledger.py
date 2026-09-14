@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""职工薪酬台账 → 损益表工资/社保/公积金叶子。金额只脚本加总，对话不回显。"""
+"""职工薪酬台账 → 损益表工资/社保/公积金叶子。金额只脚本加总，对话不回显。
+
+也可单独跑（在她机器上，零金额）：
+  python3 payroll_ledger.py --profile <台账.xlsx> --period 202608            # 只报形状
+  python3 payroll_ledger.py --split-table <out.xlsx> <台账.xlsx> --period 202608  # 出部门级拆分表
+"""
 from __future__ import annotations
 
+import argparse
 import re
 from decimal import Decimal
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from common import detect_period_text, load_json, money
 from layout import dept_col_letter, direct_children, load_layout
 
 CONFIG_NAME = "薪酬台账.json"
-PAYROLL_NEEDLES = ("基本工资", "单位部分养老", "单位月缴存额", "组织架构1", "组织架构-1")
+SPLIT_SHEET = "薪酬拆分表"
+SPLIT_HEADERS = ("主体", "科目编码", "项目", "部门", "次序", "金额")
 PAY_CELL_MAX = Decimal("1000000")
 _ID_OR_PHONE = re.compile(r"^(\d{15}|\d{17}[\dXx]|1\d{10})$")
 _HEADER_SKIP = ("身份证", "证件号", "手机", "电话", "联系方式")
+_DIGITS = re.compile(r"\d+")
 
 
 def load_payroll_rules() -> dict:
@@ -46,11 +54,29 @@ def looks_like_payroll(path: Path) -> bool:
         return False
     try:
         titles = " ".join(wb.sheetnames)
-        if any(s in titles for s in ("组织架构", "甲骨易工资", "文化工资")):
+        if any(s in titles for s in ("组织架构", "甲骨易工资", "文化工资", SPLIT_SHEET)):
             return True
     finally:
         wb.close()
     return False
+
+
+def explicit_payroll_files(paths: list[str | Path] | None) -> list[Path]:
+    """她亲口指的台账：不看文件名里的假数/明昊测试，不猜像不像，给了就吃。"""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw in paths or []:
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            continue
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
 
 
 def discover_payroll_files(homes: list[Path], period: str) -> list[Path]:
@@ -96,12 +122,18 @@ def _skip_sheet(title: str, rules: dict) -> bool:
 
 
 def _match_sheet_spec(title: str, rules: dict) -> dict | None:
+    """sheet 名去掉数字再认（「202608上海」「202609上海」都是上海）。`equals` 先于 `contains`。"""
     raw = _text(title)
     if any(n and n in raw for n in rules.get("skip_title_contains") or []):
         return None
-    for spec in rules.get("sheet_entity") or []:
+    bare = _DIGITS.sub("", raw).strip()
+    specs = rules.get("sheet_entity") or []
+    for spec in specs:
+        if bare and bare in (spec.get("equals") or []):
+            return spec
+    for spec in specs:
         hints = spec.get("contains") or []
-        if any(h and h in raw for h in hints):
+        if any(h and (h in raw or h in bare) for h in hints):
             return spec
     return None
 
@@ -240,6 +272,34 @@ def _load_org_map(wb, rules: dict) -> dict[str, tuple[str, str]]:
                 continue
             if name not in out and o1 and o1 != "组织架构-1":
                 out[name] = (o1, o2)
+    return out
+
+
+def _collect_name_dept(wb, rules: dict, period: str) -> dict[str, dict[str, str]]:
+    """各主体工资表里的 姓名→部门。社保表部门只写「湖南分公司」时拿这个补细部门。金额空也能建。"""
+    out: dict[str, dict[str, str]] = {}
+    aliases = rules.get("header_aliases") or {}
+    for title in wb.sheetnames:
+        if _skip_sheet(title, rules):
+            continue
+        spec = _match_sheet_spec(title, rules)
+        if not spec or spec.get("kind") != "wage":
+            continue
+        per = detect_period_text(title)
+        if per and per != period:
+            continue
+        ws = wb[title]
+        headers = _header_map(ws)
+        name_pos = _find_header(headers, aliases.get("name") or ["姓名"])
+        dept_pos = _find_header(headers, aliases.get("dept") or ["部门"])
+        if not name_pos or not dept_pos:
+            continue
+        bucket = out.setdefault(spec["entity"], {})
+        for r in range(max(name_pos[0], dept_pos[0]) + 1, (ws.max_row or 0) + 1):
+            name = _text(ws.cell(r, name_pos[1]).value)
+            dept = _text(ws.cell(r, dept_pos[1]).value)
+            if name and dept and name not in {"姓名", "合计", "总计"} and name not in bucket:
+                bucket[name] = dept
     return out
 
 
@@ -556,6 +616,7 @@ def parse_hunan_si(
     unmapped: list[str],
     name_prefix: dict[str, tuple[str, str]] | None = None,
     dirty: list[str] | None = None,
+    name_dept: dict[str, str] | None = None,
 ) -> list[dict]:
     cols = _hunan_unit_cols(ws)
     if not cols:
@@ -572,6 +633,9 @@ def parse_hunan_si(
             break
         if not name or name in {"姓名"}:
             continue
+        # 社保表部门只写主体名（「湖南分公司」）时，用工资表里这个人的部门（人力资源部→5502）
+        if name_dept and name in name_dept and (not dept_val or dept_val == entity):
+            dept_val = name_dept[name]
         if name_prefix and name in name_prefix:
             dept, prefix = name_prefix[name]
             occ = 1
@@ -639,39 +703,73 @@ def parse_hunan_zgs(
     return si_rows + wage_rows
 
 
+def parse_split_table(ws) -> list[dict]:
+    """「薪酬拆分表」：主体/科目编码/项目/部门/次序/金额。她机器上出的部门级表，没有人名，直接当行。"""
+    headers = _header_map(ws, 3, 12)
+    pos = {h: headers.get(h) for h in SPLIT_HEADERS}
+    if not pos["主体"] or not pos["科目编码"] or not pos["部门"] or not pos["金额"]:
+        return []
+    start = max(p[0] for p in pos.values() if p) + 1
+    rows: list[dict] = []
+    for r in range(start, (ws.max_row or start) + 1):
+        ent = _text(ws.cell(r, pos["主体"][1]).value)
+        code = _text(ws.cell(r, pos["科目编码"][1]).value)
+        if not ent or not code:
+            continue
+        item = _text(ws.cell(r, pos["项目"][1]).value) if pos["项目"] else ""
+        dept = _text(ws.cell(r, pos["部门"][1]).value)
+        occ = money(ws.cell(r, pos["次序"][1]).value) if pos["次序"] else None
+        amt = money(ws.cell(r, pos["金额"][1]).value)
+        _add_row(rows, ent, code, item, dept, int(occ or 1), amt, True)
+    return rows
+
+
+def _parse_sheet(ws, spec: dict, org_map: dict, rules: dict, unmapped: list[str], dirty: list[str], name_dept: dict) -> list[dict]:
+    kind = spec.get("kind")
+    if kind == "wage":
+        return parse_wage_sheet(ws, spec, org_map, rules, unmapped, dirty)
+    if kind == "agency_si":
+        return parse_agency_si(ws, spec, rules, dirty)
+    if kind == "hunan_si":
+        return parse_hunan_si(ws, spec, rules, unmapped, dirty=dirty, name_dept=name_dept.get(spec["entity"]))
+    if kind == "hunan_zgs":
+        return parse_hunan_zgs(ws, spec, rules, unmapped, dirty)
+    return parse_si_sheet(ws, spec, org_map, rules, unmapped, dirty)
+
+
 def parse_payroll_file(path: Path, period: str) -> dict:
     rules = load_payroll_rules()
     wb = load_workbook(path, data_only=True)
     try:
         org_map = _load_org_map(wb, rules)
+        name_dept = _collect_name_dept(wb, rules, period)
         rows: list[dict] = []
         unmapped: list[str] = []
         notes: list[str] = []
         used: list[str] = []
         dirty_sheets: list[str] = []
+        empty_sheets: list[str] = []
+        sheet_kinds: dict[str, str] = {}
         for title in wb.sheetnames:
+            if title == SPLIT_SHEET:
+                chunk = parse_split_table(wb[title])
+                sheet_kinds[title] = "split_table"
+                if chunk:
+                    used.append(title)
+                    rows.extend(chunk)
+                continue
             if _skip_sheet(title, rules):
                 continue
             spec = _match_sheet_spec(title, rules)
             if not spec:
                 continue
+            sheet_kinds[title] = f"{spec['entity']}/{spec.get('kind') or 'si'}"
             per = detect_period_text(title + "\n" + path.name)
             if per and per != period:
                 notes.append(f"薪酬sheet期间不符={title}:{per}")
                 continue
-            ws = wb[title]
             dirty: list[str] = []
-            kind = spec.get("kind")
-            if kind == "wage":
-                chunk = parse_wage_sheet(ws, spec, org_map, rules, unmapped, dirty)
-            elif kind == "agency_si":
-                chunk = parse_agency_si(ws, spec, rules, dirty)
-            elif kind == "hunan_si":
-                chunk = parse_hunan_si(ws, spec, rules, unmapped, dirty=dirty)
-            elif kind == "hunan_zgs":
-                chunk = parse_hunan_zgs(ws, spec, rules, unmapped, dirty)
-            else:
-                chunk = parse_si_sheet(ws, spec, org_map, rules, unmapped, dirty)
+            chunk = _parse_sheet(wb[title], spec, org_map, rules, unmapped, dirty, name_dept)
             if dirty and chunk:
                 notes.append(f"薪酬台账跳过脏行={title}")
             if chunk:
@@ -680,6 +778,10 @@ def parse_payroll_file(path: Path, period: str) -> dict:
             elif dirty:
                 dirty_sheets.append(title)
                 notes.append(f"薪酬台账无可用行={title}")
+            else:
+                empty_sheets.append(title)
+        if empty_sheets:
+            notes.append("薪酬sheet认得但没金额=" + ",".join(empty_sheets))
         return {
             "path": str(path),
             "rows": rows,
@@ -687,10 +789,79 @@ def parse_payroll_file(path: Path, period: str) -> dict:
             "notes": notes,
             "sheets": used,
             "dirty_sheets": dirty_sheets,
+            "empty_sheets": empty_sheets,
+            "sheet_kinds": sheet_kinds,
             "entities": sorted({r["entity"] for r in rows}),
         }
     finally:
         wb.close()
+
+
+def parse_payroll_files(paths: list[Path], period: str) -> dict:
+    """多份台账合起来（她可能工资一份、社保一份）。"""
+    merged: dict = {
+        "path": ";".join(str(p) for p in paths),
+        "rows": [],
+        "unmapped": [],
+        "notes": [],
+        "sheets": [],
+        "dirty_sheets": [],
+        "empty_sheets": [],
+        "sheet_kinds": {},
+        "entities": [],
+    }
+    for path in paths:
+        one = parse_payroll_file(Path(path), period)
+        merged["rows"].extend(one["rows"])
+        for key in ("unmapped", "notes", "sheets", "dirty_sheets", "empty_sheets"):
+            for v in one.get(key) or []:
+                if v not in merged[key]:
+                    merged[key].append(v)
+        merged["sheet_kinds"].update(one.get("sheet_kinds") or {})
+    merged["entities"] = sorted({r["entity"] for r in merged["rows"]})
+    return merged
+
+
+def profile_payroll_file(path: Path, period: str) -> str:
+    """零金额形状报告：哪个 sheet 认成什么、加了几行、哪些部门对不上。她机器上跑完可以直接发出来。"""
+    parsed = parse_payroll_file(path, period)
+    per_sheet: dict[str, int] = {}
+    for row in parsed["rows"]:
+        per_sheet[row["entity"]] = per_sheet.get(row["entity"], 0) + 1
+    lines = [f"文件={path.name}", f"期间={period}"]
+    for title, kind in parsed["sheet_kinds"].items():
+        state = "有行" if title in parsed["sheets"] else ("脏到没行" if title in parsed["dirty_sheets"] else "没金额")
+        lines.append(f"sheet={title} | 认成={kind} | {state}")
+    lines.append("主体行数=" + (",".join(f"{k}:{v}" for k, v in sorted(per_sheet.items())) or "无"))
+    codes = sorted({f"{r['entity']}:{r['code']}" for r in parsed["rows"]})
+    lines.append("主体:科目=" + (",".join(codes) or "无"))
+    lines.append("对不上的部门=" + (",".join(parsed["unmapped"]) or "无"))
+    lines.extend(parsed["notes"])
+    return "\n".join(lines) + "\n"
+
+
+def write_split_table(parsed: dict, out: Path) -> Path:
+    """部门级拆分表（无人名、无证件号）。同一 主体/科目/部门/次序 合成一行。"""
+    agg: dict[tuple, Decimal] = {}
+    items: dict[tuple, str] = {}
+    for row in parsed.get("rows") or []:
+        key = (row["entity"], row["code"], row["dept"], int(row.get("occurrence") or 1))
+        agg[key] = agg.get(key, Decimal("0")) + (row.get("debit") or Decimal("0"))
+        items.setdefault(key, row.get("name") or "")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SPLIT_SHEET
+    for c, h in enumerate(SPLIT_HEADERS, 1):
+        ws.cell(1, c).value = h
+    for r, key in enumerate(sorted(agg), 2):
+        ent, code, dept, occ = key
+        for c, v in enumerate((ent, code, items[key], dept, occ, float(agg[key])), 1):
+            ws.cell(r, c).value = v
+    out = Path(out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out)
+    wb.close()
+    return out
 
 
 def apply_payroll(
@@ -749,3 +920,28 @@ def apply_payroll(
 
 def is_payroll_account_name(name: str) -> bool:
     return _is_pay_name(name, load_payroll_rules())
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="薪酬台账形状探测 / 出部门级拆分表。stdout 不含金额、人名。")
+    parser.add_argument("xlsx", nargs="+", help="职工薪酬台账（可多份）")
+    parser.add_argument("--period", required=True, help="YYYYMM")
+    parser.add_argument("--profile", action="store_true", help="只报每个 sheet 认成什么、加了几行")
+    parser.add_argument("--split-table", default="", help="写部门级拆分表到这个 xlsx（无人名）")
+    args = parser.parse_args(argv)
+    paths = explicit_payroll_files(args.xlsx)
+    if not paths:
+        print("ask=没找到台账文件，请给 .xlsx 路径。", flush=True)
+        return 2
+    if args.profile or not args.split_table:
+        for p in paths:
+            print(profile_payroll_file(p, args.period), end="", flush=True)
+    if args.split_table:
+        parsed = parse_payroll_files(paths, args.period)
+        out = write_split_table(parsed, Path(args.split_table))
+        print(f"拆分表={out.resolve()}\n拆分行数={len(parsed['rows'])}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
