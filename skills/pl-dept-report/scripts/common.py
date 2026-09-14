@@ -22,11 +22,21 @@ def load_json(name: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def find_desktop(root: Path | None = None) -> Path | None:
+    """Windows 桌面可能在 OneDrive 下；按常见位置找，找不到返回 None。"""
+    root = Path(root) if root else Path.home()
+    for rel in ("Desktop", "桌面", "OneDrive/Desktop", "OneDrive/桌面"):
+        cand = root / rel
+        if cand.is_dir():
+            return cand
+    return None
+
+
 def default_desktop_dir(prefix: str, today: date | None = None, home: Path | None = None) -> Path:
     day = (today or date.today()).strftime("%Y%m%d")
     root = Path(home) if home else Path.home()
-    desktop = root / "Desktop"
-    base = desktop if desktop.is_dir() else Path.cwd()
+    desktop = find_desktop(root)
+    base = desktop if desktop else Path.cwd()
     path = base / f"{prefix}_{day}"
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -106,8 +116,8 @@ def discover_input_dir(explicit: str = "") -> Path:
             homes.append(cand)
             break
         root = root.parent
-    desktop = Path.home() / "Desktop"
-    if desktop.is_dir():
+    desktop = find_desktop()
+    if desktop:
         homes.extend(sorted(desktop.glob("月度损益表_*"), reverse=True))
         homes.append(desktop)
     homes.append(cwd)
