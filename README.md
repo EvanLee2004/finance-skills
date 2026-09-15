@@ -1,8 +1,19 @@
 # 财务部 skills
 
-一件活一个夹，都在 `skills/`。
+一件活一个夹，都在 `skills/`。这份 Gitee 仓库是源。同事跑任务只有两条路，不要混：
 
-开口对照：[技能表](#技能表)。源在 Gitee `Lee157/finance-skills` 的 `main`。
+```mermaid
+flowchart TD
+  R["Gitee 本仓库 main<br/>Lee157/finance-skills"]
+  R --> P["李尚的 skills 平台"]
+  R --> O["本机 OpenCode"]
+  P --> P1["平台里选技能、交材料、跑"]
+  O --> O1["先把本仓库拉到最新"]
+  O1 --> O2["再说人话跑任务"]
+```
+
+- **走平台**：李尚那边接这份仓库。同事在平台上点技能、上传表、看结果。不要再在 OpenCode 里跑同一趟。
+- **走 OpenCode**：自己把本仓库 `main` 拉到本机 opencode skills，再按[技能表](#技能表)开口。仓库没拉新，跑的就是旧的。
 
 本机已经有的账密 json **不要再问**。没有才让她写一次，不要把密码打进对话。
 
