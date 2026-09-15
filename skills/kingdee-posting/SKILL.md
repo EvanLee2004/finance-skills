@@ -1,6 +1,6 @@
 ---
 name: kingdee-posting
-version: "1.1"
+version: "1.2"
 description: >-
   把销项发票簿、供应商付款台账+发票PDF、或收款表，按技能自带的金蝶凭证引入空模填好。
   销项发票和付款不要登录智云、不要读 zhiyun.local.json；智云失败也必须出表。
@@ -20,11 +20,9 @@ description: >-
 
 | 入口 | 只用 | 禁止 |
 |------|------|------|
-| 销项发票 | `~/.config/finance/kingdee.local.json` | 读 / 验 / 登录 `zhiyun.local.json`；跑九点下单登录脚本；把智云失败当成停表 |
-| 付款 | 同上 `kingdee.local.json` | 同上 |
-| 收款 | `kingdee.local.json`；表上销售空了才由 **convert.py** 读 `zhiyun.local.json` | 你先手搓登录智云；智云失败整批空表 |
-
-`xingchen.local.json` 是月度损益表的，本技能不要打开。
+| 销项发票 | `kingdee.local.json`（开放平台）+ `xingchen.local.json`（网页引出客户核算项目余额表） | 读 `zhiyun.local.json`；把旧核算项目余额表放进材料夹当源 |
+| 付款 | `kingdee.local.json` | `zhiyun.local.json`、网页引出余额表 |
+| 收款 | `kingdee.local.json` + `xingchen.local.json`；表上销售空了才由 **convert.py** 读 `zhiyun.local.json` | 你先手搓登录智云；把旧余额表当源 |
 
 ## 1. 红线
 
@@ -52,7 +50,7 @@ python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <绝对目�
 
 **只有金蝶这一闸会停整批、不生成引入表**：没有应用号、档案失败（含 errcode 1030002006 且主动获取授权仍失败）、缓存过期、当月凭证号查不到。不能用 `--no-api` 绕过。凭证号禁止 silently 从 1 起。
 
-**客户核算项目余额表**（销项/收款抄 1131 全靠它，OpenAPI 没有）：**同事机首选她自己引出**（辅助核算类别=客户、科目=1131 应收账款、期间=本年，一个月一次，放材料夹或 Downloads）。先认文件夹 / Downloads 里已有的 xlsx；没有才 Playwright 引出——金蝶单点登录，脚本登录会把她浏览器里的金蝶挤掉，也可能被别处登录挤掉，不稳是正常的，不要反复重试。表解析会核：不是总部账套（企业准则 1131=应收股利，说明切错账套）或没有 1131 明细 → 整批停、`ask=` 带手动引出步骤。引出前若星辰没登录，用 `~/.config/finance/xingchen.local.json`（与月度损益表同一份网页账密）自己登，会话存到 `xingchen.playwright-state.json`。既没账密又没现成表 → 整批停、`ask=` 给她两条路（放表 / 填账密），**不要**让她「在本机 Chrome 登录」——脚本开的浏览器不是她的 Chrome。
+**客户核算项目余额表**（销项/收款抄 1131 全靠它，OpenAPI 没有）：脚本用 Playwright 从总部星辰引出（客户 + 1131 + 本年），切账套复用月度损益表那套搜索框。本机账密只读 `~/.config/finance/xingchen.local.json`，会话写 `xingchen.playwright-state.json`。**不要**认材料夹、Downloads、技能家里的旧 xlsx。引出后核公司名是总部、有 1131 明细；不是就整批停、`ask=`。缺网页账密 / 密码错 / 要滑块 / 切不到总部 → 原样问她写 json 后重跑，不要让她手导表。禁止点引入/审核/过账。
 
 **销项 / 付款：到此结束。禁止登录智云。禁止因为 `zhiyun.local.json` 存在、缺失或登录失败而停表、改口、让她去核对该文件。**
 
@@ -99,6 +97,7 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录>
 | `config/收款不记.json` | 斯佳确认不记的银行抬头 | 收款 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 | 三入口 |
 | 本机 `kingdee.local.json` | 开放平台应用号；不进仓 | **三入口都要** |
+| 本机 `xingchen.local.json` | 金蝶网页账密；不进仓 | **销项 / 收款引出余额表** |
 | 本机 `zhiyun.local.json` | 智云账号；不进仓 | **只有收款，且由 convert.py 读** |
 | 本机 `~/.cache/finance/kingdee-master.json` | 只读 API 档案短缓存 | 三入口 |
 

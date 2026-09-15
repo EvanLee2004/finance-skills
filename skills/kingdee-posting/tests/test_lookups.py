@@ -448,32 +448,46 @@ def test_assist_export_reuses_pl_dept_report_login():
     mod = assist_xlsx._login_mod()
     assert mod is not None, "白名单里 pl-dept-report 应和 kingdee-posting 并排安装"
     assert callable(mod.load_creds) and callable(mod.ensure_login) and callable(mod.save_state)
+    exp = assist_xlsx._export_mod()
+    assert exp is not None and callable(exp._switch_book)
 
 
-def test_assist_ask_points_to_local_json_or_manual_export():
+def test_assist_ask_points_to_local_json_not_old_excel():
     assert "xingchen.local.json" in assist_xlsx.ASK_LOGIN
-    assert "客户核算项目余额表" in assist_xlsx.ASK_LOGIN
+    assert "旧表" in assist_xlsx.ASK_LOGIN
+    assert "Downloads" not in assist_xlsx.ASK_LOGIN
 
 
 def test_assist_export_translates_login_exit_codes(monkeypatch, tmp_path):
     import asyncio
 
-    monkeypatch.setattr(asyncio, "run", lambda coro: (_ for _ in ()).throw(SystemExit("bad_password")))
+    def _boom(coro):
+        coro.close()
+        raise SystemExit("bad_password")
+
+    monkeypatch.setattr(asyncio, "run", _boom)
     got = assist_xlsx.export_customer_assist_xlsx(tmp_path / "x.xlsx")
     assert got["ok"] is False
     assert "密码" in got["error"] and "bad_password" not in got["error"]
 
 
-def test_ensure_assist_xlsx_ask_gives_two_ways(monkeypatch, tmp_path):
-    monkeypatch.setattr(assist_xlsx, "find_assist_xlsx", lambda extra_dirs=None: None)
-    monkeypatch.setattr(assist_xlsx, "export_customer_assist_xlsx", lambda dest=None: {"ok": False, "error": "星辰未登录", "path": None})
+def test_ensure_assist_xlsx_does_not_pick_folder_excel(monkeypatch, tmp_path):
+    fake = tmp_path / "核算项目余额表_客户_1131_本年.xlsx"
+    fake.write_bytes(b"not-used")
+    monkeypatch.setattr(
+        assist_xlsx,
+        "export_customer_assist_xlsx",
+        lambda dest=None: {"ok": False, "error": "星辰未登录", "path": None},
+    )
     try:
         assist_xlsx.ensure_assist_xlsx([tmp_path])
     except SystemExit as e:
         msg = str(e)
     else:
         raise AssertionError("should stop")
-    assert "xingchen.local.json" in msg and "放到文件夹" in msg and "未生成引入表" in msg
+    assert "xingchen.local.json" in msg and "未生成引入表" in msg
+    assert "放到文件夹" not in msg
+    assert "一个月引一次" not in msg
 
 
 def _assist_book(path: Path, company: str, rows):
@@ -497,7 +511,7 @@ def test_assist_checked_rejects_non_hq_book(tmp_path):
     try:
         assist_xlsx.parse_assist_xlsx_checked(p)
     except SystemExit as e:
-        assert "不是总部账套" in str(e) and "1131 应收账款" in str(e)
+        assert "不是总部账套" in str(e)
     else:
         raise AssertionError("should stop")
 
@@ -508,7 +522,7 @@ def test_assist_checked_rejects_empty_1131(tmp_path):
     try:
         assist_xlsx.parse_assist_xlsx_checked(p)
     except SystemExit as e:
-        assert "没有 1131 明细行" in str(e) and "应收股利" in str(e)
+        assert "没有 1131 明细行" in str(e)
     else:
         raise AssertionError("should stop")
 

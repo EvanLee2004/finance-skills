@@ -1085,21 +1085,10 @@ def test_cli_sales_runs_without_zhiyun_lookups(tmp_path, monkeypatch):
 
 def test_cli_receipt_without_zhiyun_still_outputs(tmp_path, monkeypatch):
     _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
-    _write_assist(
-        tmp_path / "核算项目余额表_客户_1131_本年.xlsx",
-        [
-            {
-                "period": "202607",
-                "customer_code": "1001",
-                "customer_name": "甲科技有限公司",
-                "account": "113103",
-                "ending_debit": "1",
-                "ytd_debit": "1",
-            }
-        ],
-    )
     master = tmp_path / "master.json"
     master.write_text(json.dumps(_master()), encoding="utf-8")
+    lookups = tmp_path / "lookups.json"
+    lookups.write_text(json.dumps(_lookups()), encoding="utf-8")
     monkeypatch.setattr(
         convert.zhiyun_api,
         "try_load_lookups",
@@ -1114,6 +1103,8 @@ def test_cli_receipt_without_zhiyun_still_outputs(tmp_path, monkeypatch):
                 "收款",
                 "--master",
                 str(master),
+                "--lookups",
+                str(lookups),
                 "--start-voucher-no",
                 "8",
                 "--out-dir",
@@ -1462,7 +1453,43 @@ def test_kingdee_api_has_no_assist_balance_openapi_path():
     assert "/jdy/v2/fi/voucher" in text
 
 
-def test_sales_reads_assist_xlsx_from_input_dir(tmp_path):
+def test_sales_uses_injected_assist_not_file_in_folder(tmp_path):
+    _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
+    _write_assist(
+        tmp_path / "核算项目余额表_客户_1131_本年.xlsx",
+        [
+            {
+                "period": "202607",
+                "customer_code": "1001",
+                "customer_name": "甲科技有限公司",
+                "account": "113199",
+                "ending_debit": "1",
+                "ytd_debit": "1",
+            }
+        ],
+    )
+    injected = [
+        {
+            "period": "202607",
+            "customer_code": "1001",
+            "customer_name": "甲科技有限公司",
+            "account": "113105",
+            "ending_debit": "1",
+            "ytd_debit": "1",
+        }
+    ]
+    result = _run(tmp_path, "销项发票", lookups=_lookups(assist_rows=injected, include_assist=True))
+    assert result["bookable_count"] == 1
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    accounts = [ws.cell(r, 7).value for r in range(4, 7)]
+    kd.close()
+    assert "113105" in accounts
+    assert "113199" not in accounts
+    assert "510105" in accounts
+
+
+def test_sales_ignores_assist_xlsx_sitting_in_input_dir(tmp_path, monkeypatch):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     _write_assist(
         tmp_path / "核算项目余额表_客户_1131_本年.xlsx",
@@ -1477,14 +1504,17 @@ def test_sales_reads_assist_xlsx_from_input_dir(tmp_path):
             }
         ],
     )
-    result = _run(tmp_path, "销项发票", lookups=_lookups(include_assist=False))
-    assert result["bookable_count"] == 1
-    kd = load_workbook(result["kingdee_path"])
-    ws = kd[convert.KINGDEE_SHEET]
-    accounts = [ws.cell(r, 7).value for r in range(4, 7)]
-    kd.close()
-    assert "113105" in accounts
-    assert "510105" in accounts
+
+    def _boom():
+        raise SystemExit("must_fetch_web")
+
+    monkeypatch.setattr(convert.assist_mod, "fetch_hq_assist", _boom)
+    try:
+        _run(tmp_path, "销项发票", lookups=_lookups(include_assist=False))
+    except SystemExit as e:
+        assert "must_fetch_web" in str(e)
+    else:
+        raise AssertionError("must not book from folder excel")
 
 
 def test_sales_police_books_0386_even_if_heading_absent_from_assist(tmp_path):

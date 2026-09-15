@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""客户核算项目余额表：认已有 xlsx，没有则按现网过滤网页引出。OpenAPI 没有这张表。"""
+"""客户核算项目余额表：Playwright 从总部星辰引出。OpenAPI 没有这张表。不捡本地旧 Excel。"""
 from __future__ import annotations
 
 import os
@@ -21,9 +21,11 @@ EXPORT_LOG = "https://tf.jdy.com/ierp/index.html?formId=bos_exportlog_list"
 WORKBENCH = "https://service.jdy.com/workbench/web/index.html"
 XINGCHEN_HOME = "https://tf.jdy.com/ierp/index.html?formId=home_page"
 HQ_NAME = "甲骨易（北京）语言科技股份有限公司"
+HQ_SEARCH = "语言科技"
 STATE = Path.home() / ".config" / "finance" / "xingchen.playwright-state.json"
-PROFILE = Path.home() / ".cache" / "chrome-devtools-mcp" / "chrome-profile"
+CACHE_DIR = Path.home() / ".cache" / "finance"
 DOWNLOADS = Path.home() / "Downloads"
+_ASSIST_CACHE: tuple[list, str] | None = None
 
 # 与 技能/金蝶/工作区/20260907_客户核算项目余额表/现网探测.md 同一套过滤。
 EXPORT_FILTERS = {
@@ -93,9 +95,8 @@ def find_assist_xlsx(extra_dirs: list[Path] | None = None) -> Path | None:
 
 
 MANUAL_EXPORT_STEPS = (
-    "手动引出步骤：星辰 → 进入使用 → 切到总部账套「甲骨易（北京）语言科技股份有限公司」→ 账务处理 → 核算项目余额表；"
-    "过滤：辅助核算类别=客户、科目=1131 应收账款（总部是小企业准则，1131 就是应收账款；企业准则那套 1131 是应收股利，说明账套切错了）、"
-    "期间=本年；「余额为 0 不显示」不要勾、「显示最明细科目」勾上 → 引出 → 引出结果查询下载 → xlsx 放进材料夹或 Downloads。"
+    "请核对本机 ~/.config/finance/xingchen.local.json（金蝶网页账密，与月度损益表同一份），重跑让脚本从总部星辰引出。"
+    "不要把旧的核算项目余额表放进材料夹当源。"
 )
 
 
@@ -120,12 +121,11 @@ def parse_assist_xlsx_checked(path: Path) -> list[lookup_mod.AssistRow]:
     company = assist_xlsx_company(path)
     if company and HQ_NAME not in company and company not in HQ_NAME:
         raise SystemExit(
-            f"客户核算项目余额表 {path.name} 是「{company}」的，不是总部账套。销项/收款只记总部。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+            f"网页引出的客户核算项目余额表是「{company}」的，不是总部账套。销项/收款只记总部。{MANUAL_EXPORT_STEPS} 未生成引入表。"
         )
     if not rows:
         raise SystemExit(
-            f"客户核算项目余额表 {path.name} 里没有 1131 明细行。多半是过滤没设对（科目没选 1131 应收账款 / 辅助核算类别没选客户），"
-            f"或引出时不在总部账套。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+            f"网页引出的客户核算项目余额表没有 1131 明细行。多半没切到总部，或过滤不是客户+1131+本年。{MANUAL_EXPORT_STEPS} 未生成引入表。"
         )
     return rows
 
@@ -253,83 +253,86 @@ async def _dismiss_overlays(page) -> None:
 
 
 async def _open_context(p):
-    if PROFILE.is_dir():
-        try:
-            ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE),
-                channel="chrome",
-                headless=False,
-                accept_downloads=True,
-            )
-            return ctx, None, "profile"
-        except Exception:
-            pass
     browser = await p.chromium.launch(headless=False, channel="chrome")
-    ctx = await browser.new_context(
-        accept_downloads=True,
-        storage_state=str(STATE) if STATE.is_file() else None,
-    )
+    kwargs = {"accept_downloads": True, "locale": "zh-CN"}
+    if STATE.is_file():
+        kwargs["storage_state"] = str(STATE)
+    ctx = await browser.new_context(**kwargs)
     return ctx, browser, "fresh"
 
 
 LOGIN_SCRIPT = HERE.parent.parent / "pl-dept-report" / "scripts" / "xingchen_login.py"
+EXPORT_SCRIPT = HERE.parent.parent / "pl-dept-report" / "scripts" / "xingchen_export.py"
 ASK_LOGIN = (
-    "星辰网页没登录，也没有本机账密。请把金蝶网页用户名密码写进 ~/.config/finance/xingchen.local.json"
-    "（格式看 pl-dept-report/config/xingchen.local.example.json），或者自己从星辰引出「客户核算项目余额表」"
-    "（客户 + 1131 + 本年）放进文件夹或 Downloads。"
+    "本机没有金蝶网页账密。请把用户名密码写进 ~/.config/finance/xingchen.local.json"
+    "（与月度损益表同一份，格式看 pl-dept-report/config/xingchen.local.example.json）。"
+    "销项/收款抄 1131 靠脚本从总部星辰引出客户核算项目余额表，不要把旧表放进材料夹。"
 )
 
 
-def _login_mod():
-    """复用月度损益表技能的账密登录（同一个白名单包里）。没装就返回 None。"""
-    if not LOGIN_SCRIPT.is_file():
+def _load_sibling(name: str, path: Path):
+    if not path.is_file():
         return None
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("kingdee_posting_xingchen_login", LOGIN_SCRIPT)
-    if spec is None or spec.loader is None:
-        return None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    folder = str(path.parent)
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        if added and sys.path and sys.path[0] == folder:
+            sys.path.pop(0)
+
+
+def _login_mod():
+    return _load_sibling("kingdee_posting_xingchen_login", LOGIN_SCRIPT)
+
+
+def _export_mod():
+    """损益表脚本和本技能都有 inspect_inputs.py，加载时先挪开本技能那份。"""
+    folder = str(EXPORT_SCRIPT.parent)
+    saved = []
+    for key in ("inspect_inputs", "common", "layout"):
+        mod = sys.modules.get(key)
+        origin = str(getattr(mod, "__file__", "") or "") if mod else ""
+        if mod is not None and "kingdee-posting" in origin.replace("\\", "/"):
+            saved.append((key, sys.modules.pop(key)))
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        return _load_sibling("kingdee_posting_xingchen_export", EXPORT_SCRIPT)
+    finally:
+        if added and sys.path and sys.path[0] == folder:
+            sys.path.pop(0)
+        for key, mod in saved:
+            sys.modules[key] = mod
 
 
 async def _ensure_xingchen(page) -> bool:
-    await page.goto(WORKBENCH, wait_until="domcontentloaded")
-    await page.wait_for_timeout(1500)
+    login = _login_mod()
+    if login is None:
+        raise SystemExit(ASK_LOGIN)
+    creds = login.load_creds()
+    await login.ensure_login(page, creds)
+    try:
+        await login.save_state(page.context)
+    except Exception:
+        pass
     if await page.get_by_text("进入使用").count():
         await page.get_by_text("进入使用").first.click()
-        await page.wait_for_timeout(3000)
-    body = await page.locator("body").inner_text()
-    if "登录" in body and "进入使用" not in body and "云星辰" not in body:
-        # 同事机器没有明昊的 Chrome 会话：用 xingchen.local.json 账密登一次，会话存下来
-        login = _login_mod()
-        creds = login.load_creds() if login else None
-        if not login or not creds:
-            raise SystemExit(ASK_LOGIN)
-        await login.ensure_login(page, creds)
-        try:
-            await login.save_state(page.context)
-        except Exception:
-            pass
-        if await page.get_by_text("进入使用").count():
-            await page.get_by_text("进入使用").first.click()
-            await page.wait_for_timeout(3000)
-    await page.goto(XINGCHEN_HOME, wait_until="domcontentloaded")
-    await page.wait_for_timeout(1500)
-    await _dismiss_overlays(page)
-    current = await page.locator("body").inner_text()
-    if HQ_NAME in current:
-        return True
-    handle = page.get_by_text(HQ_NAME).first
-    if await handle.count():
-        await handle.click()
-        await page.wait_for_timeout(800)
-        target = page.get_by_text(HQ_NAME, exact=False).first
-        if await target.count():
-            await target.click()
-            await page.wait_for_timeout(2500)
-    return HQ_NAME in await page.locator("body").inner_text()
+        await page.wait_for_timeout(2000)
+    exporter = _export_mod()
+    if exporter is None or not hasattr(exporter, "_switch_book"):
+        raise SystemExit("找不到月度损益表技能的切账套脚本（pl-dept-report/scripts/xingchen_export.py）。两个技能要装在一起。")
+    return bool(await exporter._switch_book(page, HQ_NAME, HQ_SEARCH))
 
 
 async def _set_customer_ar_filters(page) -> None:
@@ -346,7 +349,8 @@ async def _set_customer_ar_filters(page) -> None:
             await page.get_by_text("客户", exact=True).last.click()
             await page.keyboard.press("Enter")
             await page.wait_for_timeout(400)
-    await _click_text(page, "1131 应收账款") or await _click_text(page, "应收账款")
+    if not await _click_text(page, "1131 应收账款"):
+        await _click_text(page, "应收账款")
     if await page.get_by_text("显示最明细科目").count():
         await _click_text(page, "显示最明细科目")
     checked = page.locator("label").filter(has_text="余额为 0 不显示")
@@ -373,25 +377,34 @@ async def _set_customer_ar_filters(page) -> None:
 async def _export_via_log(page, dest: Path) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     mark = time.time()
-    await _click_text(page, "引出")
-    await page.wait_for_timeout(800)
-    if await page.get_by_text("到引出结果界面下载").count():
-        await page.get_by_text("到引出结果界面下载").first.click()
-        await page.wait_for_timeout(1500)
+    hit = page.get_by_text("引出", exact=True)
+    if await hit.count():
+        await hit.first.click()
     else:
-        await page.goto(EXPORT_LOG, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)
-    for _ in range(20):
-        body = await page.locator("body").inner_text()
-        if "成功" in body or "完成" in body:
-            break
-        await page.wait_for_timeout(1000)
+        await _click_text(page, "引出")
+    await page.wait_for_timeout(1000)
+    if await page.get_by_text("引出结果查询").count():
+        await page.get_by_text("引出结果查询").first.click()
+        await page.wait_for_timeout(800)
+    await page.goto(EXPORT_LOG, wait_until="domcontentloaded")
+    file_btn = None
+    for _ in range(40):
+        await page.wait_for_timeout(800)
+        loc = page.get_by_text("核算项目余额表-")
+        if await loc.count():
+            file_btn = loc.first
+            body = await page.locator("body").inner_text()
+            if "成功" in body:
+                break
+    if file_btn is None:
+        found = _newest_xlsx(DOWNLOADS, mark - 1)
+        if found:
+            dest.write_bytes(found.read_bytes())
+            return dest.is_file() and dest.stat().st_size > 400
+        return False
     try:
-        async with page.expect_download(timeout=20000) as dl_info:
-            if await page.get_by_text("下载").count():
-                await page.get_by_text("下载").first.click()
-            elif await page.get_by_text("核算项目余额表").count():
-                await page.get_by_text("核算项目余额表").first.click()
+        async with page.expect_download(timeout=60000) as dl_info:
+            await file_btn.click()
         download = await dl_info.value
         await download.save_as(str(dest))
         if dest.is_file() and dest.stat().st_size > 400:
@@ -402,12 +415,13 @@ async def _export_via_log(page, dest: Path) -> bool:
     if found:
         dest.write_bytes(found.read_bytes())
         return dest.is_file() and dest.stat().st_size > 400
-    return False
+    return dest.is_file() and dest.stat().st_size > 400
 
 
 def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
-    """网页引出客户+1131 核算项目余额表。失败不得假装 OpenAPI 通了。"""
-    dest = dest or (DOWNLOADS / "核算项目余额表_客户_1131_本年.xlsx")
+    """网页引出客户+1131 核算项目余额表。失败不得假装 OpenAPI 通了。不捡本地旧表。"""
+    dest = dest or (CACHE_DIR / "核算项目余额表_客户_1131_本次.xlsx")
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         import playwright  # noqa: F401
     except Exception as e:
@@ -418,21 +432,26 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
 
         async with async_playwright() as p:
             ctx, browser, mode = await _open_context(p)
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            page = await ctx.new_page()
             try:
                 if not await _ensure_xingchen(page):
                     return {
                         "ok": False,
                         "error": (
-                            "星辰登录了但没切到总部账套（可能账号在别处登着被挤下线，金蝶是单点登录；"
-                            "脚本登录也会把你浏览器里的金蝶挤掉）。自动引出不稳时请手动引出。" + MANUAL_EXPORT_STEPS
+                            "星辰已登录，但没切到总部账套「甲骨易（北京）语言科技股份有限公司」。"
+                            "不要点空账套。请核对网页账密后重跑。"
                         ),
                         "path": None,
                         "mode": mode,
                     }
                 await _dismiss_overlays(page)
                 await page.goto(ASSIST_FORM, wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000)
+                for _ in range(20):
+                    await _dismiss_overlays(page)
+                    body = await page.locator("body").inner_text()
+                    if "1131" in body or "核算项目余额表" in body or await page.get_by_text("展开过滤").count():
+                        break
+                    await page.wait_for_timeout(700)
                 await _dismiss_overlays(page)
                 await _set_customer_ar_filters(page)
                 ok = await _export_via_log(page, dest)
@@ -453,8 +472,8 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
         human = {
             "missing_creds": ASK_LOGIN,
             "bad_password": "金蝶网页账号或密码错（xingchen.local.json），请核对后重跑",
-            "need_captcha": "金蝶网页登录要滑块/短信验证，脚本过不去。请先在浏览器登一次，或把引出的客户核算项目余额表放进文件夹",
-            "login_failed": "金蝶网页登录没成功。请核对 xingchen.local.json，或把引出的客户核算项目余额表放进文件夹",
+            "need_captcha": "金蝶网页登录要滑块/短信验证，脚本过不去。请先关掉验证码后再跑，不要用手导的旧表凑。",
+            "login_failed": "金蝶网页登录没成功。请核对 xingchen.local.json 后重跑。",
         }.get(code, code)
         return {"ok": False, "error": human, "path": None}
     except Exception as e:
@@ -462,19 +481,32 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
 
 
 def ensure_assist_xlsx(extra_dirs: list[Path] | None = None) -> Path:
-    found = find_assist_xlsx(extra_dirs)
-    if found:
-        return found
-    dest = DOWNLOADS / "核算项目余额表_客户_1131_本年.xlsx"
+    del extra_dirs  # 生产不认材料夹/Downloads/技能家里的旧表
+    dest = CACHE_DIR / "核算项目余额表_客户_1131_本次.xlsx"
     got = export_customer_assist_xlsx(dest)
     if got.get("ok") and got.get("path"):
         path = Path(got["path"])
-        if path.is_file():
+        if path.is_file() and path.stat().st_size > 400:
+            parse_assist_xlsx_checked(path)
             return path
     reason = got.get("error") or "没有客户核算项目余额表"
     raise SystemExit(
-        f"{reason}。这张表 OpenAPI 没有，销项/收款的应收科目都靠它。"
-        "最稳的一条路：自己从星辰引出「客户核算项目余额表」放到文件夹或 Downloads，一个月引一次就够。"
-        + MANUAL_EXPORT_STEPS
-        + " 备选：把金蝶网页账密写进 ~/.config/finance/xingchen.local.json 让我登录引出（会把你浏览器里的金蝶挤下线）。未生成引入表。"
+        f"{reason}。这张表 OpenAPI 没有，销项/收款的应收科目都靠网页从总部引出。"
+        "请写好 ~/.config/finance/xingchen.local.json 后重跑。不要把旧核算项目余额表放进材料夹。未生成引入表。"
     )
+
+
+def clear_assist_cache() -> None:
+    global _ASSIST_CACHE
+    _ASSIST_CACHE = None
+
+
+def fetch_hq_assist() -> tuple[list, str]:
+    """本进程只引出一次。返回 (行, 文件名)。"""
+    global _ASSIST_CACHE
+    if _ASSIST_CACHE is not None:
+        return _ASSIST_CACHE
+    path = ensure_assist_xlsx()
+    rows = parse_assist_xlsx_checked(path)
+    _ASSIST_CACHE = (rows, path.name)
+    return _ASSIST_CACHE

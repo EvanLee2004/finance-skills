@@ -1341,21 +1341,19 @@ def create_confirmed_customers(to_create: list[str], customers: list) -> dict:
     return {"ok": True, "created": created, "customers": pool}
 
 
-def _assist_rows_for_run(input_dir: Path, box, required: bool) -> tuple[list, str]:
+def _assist_rows_for_run(input_dir: Path, box, required: bool, ar_xlsx: Path | None = None) -> tuple[list, str]:
+    del input_dir
     if box.assist_supplied:
         return list(box.assist_rows or []), ""
-    found = assist_mod.find_assist_xlsx([input_dir])
-    if found:
-        return assist_mod.parse_assist_xlsx_checked(found), found.name
-    if required:
-        path = assist_mod.ensure_assist_xlsx([input_dir])
-        return assist_mod.parse_assist_xlsx_checked(path), path.name
-    try:
-        path = assist_mod.ensure_assist_xlsx([input_dir])
-        return assist_mod.parse_assist_xlsx_checked(path), path.name
-    except SystemExit as e:
-        log(str(e))
-        return lookup_mod.rows_from_balance_box(box), ""
+    if ar_xlsx:
+        return assist_mod.parse_assist_xlsx_checked(Path(ar_xlsx)), Path(ar_xlsx).name
+    if not required:
+        try:
+            return assist_mod.fetch_hq_assist()
+        except SystemExit as e:
+            log(str(e))
+            return lookup_mod.rows_from_balance_box(box), ""
+    return assist_mod.fetch_hq_assist()
 
 
 def run_dir(
@@ -1384,10 +1382,11 @@ def run_dir(
     extras: list[str] = []
     if scene == "销项发票":
         src = Path(files["invoice"])
-        assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True)
+        assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True, ar_xlsx=ar_xlsx)
         extras.append("销项部门：组织架构优先，否则申请人部门.json，再职员档案唯一部门")
         extras.append("多条1131：按申请人科目.json拆腿，对不上仍待确认")
         extras.append("记账日：跑批当天")
+        extras.append("客户核算项目余额表：本次网页从总部引出，不读材料夹旧表")
         lines = convert_sales(src, master, rules, aliases, box, day, assist_rows=assist_rows)
     elif scene == "付款":
         src = Path(files["ledger"])
@@ -1396,11 +1395,7 @@ def run_dir(
         lines = convert_payment(input_dir, src, master, rules, aliases)
     else:
         src = Path(files["receipt"])
-        if ar_xlsx:
-            assist_rows = assist_mod.parse_assist_xlsx_checked(Path(ar_xlsx))
-            assist_name = Path(ar_xlsx).name
-        else:
-            assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=False)
+        assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True, ar_xlsx=ar_xlsx)
         extras.append("记账日：同当前月最后一张凭证（可 --date 指定）")
         extras.append("表上销售有则用，空则智云回款（名称或到账日+金额）→下单；部门可回退职员档案")
         lines = convert_receipt(
