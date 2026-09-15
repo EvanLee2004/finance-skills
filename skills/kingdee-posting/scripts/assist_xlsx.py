@@ -215,10 +215,10 @@ def _virtual_payload(data):
     return None
 
 
-def _rows_from_virtual(data) -> tuple[list[dict], int]:
+def _rows_from_virtual(data) -> tuple[list[dict], int, int]:
     payload = _virtual_payload(data)
     if not payload:
-        return [], 0
+        return [], 0, 0
     idx = payload.get("dataindex") or {}
     rows = payload.get("rows") or []
     total = int(payload.get("datacount") or 0)
@@ -226,10 +226,13 @@ def _rows_from_virtual(data) -> tuple[list[dict], int]:
     ytd_d, ytd_c = idx.get("ytddebit"), idx.get("ytdcredit")
     end_d, end_c = idx.get("enddebit"), idx.get("endcredit")
     out = []
+    raw_n = len(rows)
     for row in rows:
         if not isinstance(row, list):
             continue
-        acc = str(row[ai] if isinstance(ai, int) and ai < len(row) else "").replace(".0", "")
+        acc = str(row[ai] if isinstance(ai, int) and ai < len(row) else "").strip()
+        if acc.endswith(".0") and acc[:-2].replace(".", "", 1).isdigit():
+            acc = acc[:-2]
         if not acc.startswith("1131"):
             continue
         code = str(row[ci] if isinstance(ci, int) and ci < len(row) else "").strip()
@@ -255,7 +258,7 @@ def _rows_from_virtual(data) -> tuple[list[dict], int]:
                 "end_credit": _num(end_c),
             }
         )
-    return out, total
+    return out, total, raw_n
 
 
 async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
@@ -281,15 +284,17 @@ async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
                 "params": json.dumps(params, ensure_ascii=False, separators=(",", ":")),
             },
         )
+        if not resp.ok:
+            break
         data = await resp.json()
-        chunk, count = _rows_from_virtual(data)
+        chunk, count, raw_n = _rows_from_virtual(data)
         if total is None:
             total = count
         all_rows.extend(chunk)
-        start += size
-        if total is not None and start >= total:
+        if raw_n <= 0:
             break
-        if not chunk:
+        start += raw_n
+        if total is not None and start >= total:
             break
         if start > 200000:
             break

@@ -587,11 +587,58 @@ def test_rows_from_virtual_keeps_1131_only():
             ],
         }
     ]
-    rows, total = assist_xlsx._rows_from_virtual(payload)
-    assert total == 3
+    rows, total, raw_n = assist_xlsx._rows_from_virtual(payload)
+    assert total == 3 and raw_n == 3
     assert len(rows) == 2
     assert {r["account"] for r in rows} == {"113101"}
     assert assist_xlsx._scrape_is_year(rows)
+
+
+def test_rows_from_virtual_keeps_trailing_dot_zero_account():
+    payload = [
+        {
+            "a": "InvokeControlMethod",
+            "p": [
+                {
+                    "args": [
+                        {
+                            "datacount": 2,
+                            "dataindex": {"period": 0, "f0001number": 1, "f0001name": 2, "acctnumber": 3},
+                            "rows": [
+                                ["202601", "0001", "甲", "113105.0"],
+                                ["202612", "0001", "甲", "113312.0"],
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    rows, total, raw_n = assist_xlsx._rows_from_virtual(payload)
+    assert total == 2 and raw_n == 2
+    assert [r["account"] for r in rows] == ["113105"]
+
+
+def test_rows_from_virtual_empty_1131_page_still_reports_raw_n():
+    payload = [
+        {
+            "a": "x",
+            "p": [
+                {
+                    "args": [
+                        {
+                            "datacount": 400,
+                            "dataindex": {"period": 0, "f0001number": 1, "f0001name": 2, "acctnumber": 3},
+                            "rows": [["202601", "0002", "乙", "113312"]],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    rows, total, raw_n = assist_xlsx._rows_from_virtual(payload)
+    assert rows == []
+    assert total == 400 and raw_n == 1
 
 
 def test_scrape_is_year_needs_jan_and_dec():
