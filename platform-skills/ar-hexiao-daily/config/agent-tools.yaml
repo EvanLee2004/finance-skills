@@ -1,0 +1,68 @@
+schema_version: 1
+execution_mode: pi_harness
+instructions: SKILL.md
+tools:
+  - name: prepare_workspace
+    description: 创建当前核销日的隔离工作区，并复制任务固定的财务材料版本。
+  - name: fetch_zhiyun
+    description: 按任务固定日期从智云取数，或加载任务固定的回放取数包。
+  - name: build_fetch_preview
+    description: 建立取数检查预览，并把任务中保存的完整取数汇总和过程上下文返回给 Agent。
+  - name: inspect_fetched_data
+    description: 在确认取数包前，分页读取当前核销日的完整 AR、订单、核销和异常明细；根据 total、offset、limit 继续翻页直至读完。
+  - name: read_task_file
+    description: 分页读取任务工作区中的 JSON、CSV、Markdown、YAML 或文本资料；只能读取当前任务目录内的文件。
+    required_arguments:
+      - path
+  - name: inspect_order_evidence
+    description: 先用 offset/next_offset 分页获取判定摘要；再对每个 record_id 用 detail_offset=0 读取完整明细，后续携带 detail.fingerprint 并按 detail.next_offset 翻页至 detail.total。明细包含首次判定、同 SO 全部盈亏行、父 AR、来源及已有最终结果；长文本按 char_offset/char_total 连接。只有明细全部读取才计入检查覆盖。
+  - name: accept_fetched_data
+    description: 确认取数包完整并固定该取数包，之后才能生成核销计划。
+  - name: build_reconciliation_plan
+    description: 按 SKILL.md 的顺序执行输入检查、判定、流转预填、计划校验和核销日清生成。
+  - name: apply_reconciliation
+    description: 在日期、材料版本、计划指纹和权限全部匹配后写入工作副本并回读校验。
+    required_arguments:
+      - reconciliation_date
+      - material_set_id
+      - material_version
+      - plan_fingerprint
+  - name: finalize_batch
+    description: 仅在多日批次的所有单日核销完成后生成范围报告并结束批次。
+
+# 仅固定快照声明 ar-execution-v2 时使用；旧任务继续使用上面的 tools。
+execution_v2_tools:
+  - name: initialize_reconciliation
+    description: 取数确认后固定本日材料和执行检查点；只初始化，不分类、不写表。已有 ar_execution 检查点时直接遵循 next_tool。
+  - name: inspect_materials
+    description: 检查本次年度材料、字段、日期与来源指纹，建立固定输入基线。
+  - name: classify_receipts
+    description: 沿用既有财务规则生成首次判定、流转计划与逐单证据，此阶段不写业务表。
+  - name: review_order_evidence
+    description: 在全部首次判定的完整证据读完后确认初次检查；检查覆盖不足会明确返回缺失数量和记录编号。
+  - name: validate_reconciliation
+    description: 校验写入计划，固定可写、跳过和冲突项，返回后续写入必须原样使用的四项条件。
+  - name: build_initial_report
+    description: 根据固定校验计划生成并保存首次核销日清，保留跨月计提和流转手填说明。
+  - name: stage_reconciliation
+    description: 核对固定写入条件后创建隔离暂存副本，保存计划、首次日清及业务文件指纹。
+    required_arguments: [reconciliation_date, material_set_id, material_version, plan_fingerprint]
+  - name: write_ledger
+    description: 在隔离暂存中执行已校验盈亏计划并回读；失败后停止，不自动重复写入。
+    required_arguments: [reconciliation_date, material_set_id, material_version, plan_fingerprint]
+  - name: write_receipt_flow
+    description: 在盈亏完成后登记流转并回填状态，分别记录实际改动、相同值跳过、人工项及失败。
+    required_arguments: [reconciliation_date, material_set_id, material_version, plan_fingerprint]
+  - name: verify_reconciliation
+    description: 在独立复核空间重新分类和校验，并核对实际目标及受保护内容；只复核，不做第二轮写入。
+  - name: rescan_holds
+    description: 用本次固定来源和写后材料重扫适用挂账，区分本批解决、仍挂账及资料不足。
+  - name: build_final_report
+    description: 汇合首次、实际执行、回读和重扫结果，生成最终逐单原因与报告；生成不等于已经核对或发布。
+  - name: review_final_report
+    description: 用最终结果指纹重新检查所有逐单明细；首次已读不能替代写后检查，通过后才可发布。
+  - name: publish_reconciliation
+    description: 在最终检查完成且材料版本有效时发布唯一的新材料版本；重复请求复用已有发布事实。
+    required_arguments: [reconciliation_date, material_set_id, material_version, plan_fingerprint]
+  - name: complete_reconciliation
+    description: 核对已发布文件并登记正式辅助台账；平台会自动排队此必要步骤，重复请求复用原动作。

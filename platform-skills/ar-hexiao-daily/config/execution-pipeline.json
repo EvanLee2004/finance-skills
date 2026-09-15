@@ -1,0 +1,19 @@
+{
+  "phases": [
+    "inspect_materials",
+    "classify_receipts",
+    "review_order_evidence",
+    "validate_reconciliation",
+    "build_initial_report",
+    "stage_reconciliation",
+    "write_ledger",
+    "write_receipt_flow",
+    "verify_reconciliation",
+    "rescan_holds",
+    "build_final_report",
+    "review_final_report",
+    "publish_reconciliation",
+    "complete_reconciliation"
+  ],
+  "schema_version": "ar-execution-v2"
+}

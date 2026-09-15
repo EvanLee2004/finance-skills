@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+到账流转表接入（R2 三键匹配）。
+
+为什么单独一个模块：判定要回答"这笔核销对应到账流转表的哪一行、该写什么单号"，
+这是第 6 步的一半。此前 classify 只读 rec["flow_hits"] 而没人给它赋值 → E0/E12 是死码。
+
+设计要点
+- **按表头内容认表，不按文件名**（她各渠道分开好几张：汇款/微信/支付宝/美元户）。
+- 匹配键按可靠度排序（参考李尚 business-rules §3）：
+  1. 先按到账日期 + 到账额筛选候选行；PayPal/美元户若金额格为
+     `原币金额*流转汇率`，改用公式中的原币金额与智云原币到账额比较；
+  2. 再以智云销售名称/客户名称匹配流转表公司名称/汇款人，四种组合任一成立即名称命中；
+     PayPal/美元户的英文付款方名称可通过「到账名称→系统客户名称」对照表转换后，
+     与智云客户名称比较；对照缺失或一对多不自动猜；
+  3. 微信/支付宝另允许到账日期 +（净额 + 手续费）按同样名称规则匹配；
+  4. 日期金额命中但四种名称组合都不成立 → **弱命中**，列入人工处理。
+- 命中 0 → E0；命中 >1 → E12；命中 1 → 给出行号与建议单号。
+- 匹配只读；**写入**见 `apply_flow.py`（日清和写前校验通过后、仅强三键唯一命中）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import common  # noqa: E402
+import amount_policy  # noqa: E402
+
+# 认表特征。**必须有流转表专有列**，否则盈亏「明细」会被误认成流转表
+# （它也有"单号/客户名称/项目下单日期/应收金额"，实测把 5000 行明细当成了流转行）。
+_REQUIRED_HINTS = ("单号",)
+_SIGNATURE_COLS = ("是否更新应收款", "是否已登记系统", "收款形式")
+_NAME_HINTS = ("公司名称", "汇款人", "对方户名")
+_REMITTER_ALIASES = ("汇款人", "汇款人名称", "对方户名")
+_NAME_MAP_SOURCE = "到账名称"
+_NAME_MAP_TARGET = "系统客户名称"
+# 盈亏表专有列：出现即判定"这不是流转表"
+_LEDGER_MARKERS = ("计提金额", "新智云单号", "回款明细", "是否结账")
+
+_NOISE = re.compile(r"[（）()\s·、,，.。\-—_]|有限公司|股份|集团|分公司|总公司")
+_SIMPLE_FX_FORMULA = re.compile(
+    r"^\s*=\s*(?P<original>[+]?(?:\d+(?:\.\d*)?|\.\d+))\s*"
+    r"\*\s*(?P<rate>[+]?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+)
+_FORMULA_ORIGINAL_FORMS = frozenset({"paypal", "美元户"})
+
+
+def normalize_name(s: str) -> str:
+    """公司名归一：去噪声词与标点，便于子串比对。"""
+    return _NOISE.sub("", str(s or "")).strip().casefold()
+
+
+def name_similar(a: str, b: str) -> bool:
+    """一方是另一方子串即算相似（汇款人与开票客户常不完全一致）。"""
+    na, nb = normalize_name(a), normalize_name(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
+def amounts_equal(
+    a: Optional[float],
+    b: Optional[float],
+    tol: float = float(amount_policy.TECHNICAL_EPSILON),
+) -> bool:
+    if a is None or b is None:
+        return False
+    return abs(float(a) - float(b)) <= tol
+
+
+def formula_original_amount(formula, form: str) -> Tuple[Optional[float], Optional[float]]:
+    """只为 PayPal/美元户解析简单的 `=原币*汇率`，其它公式一律不猜。"""
+    normalized_form = re.sub(r"\s+", "", str(form or "")).lower()
+    if normalized_form not in _FORMULA_ORIGINAL_FORMS or not isinstance(formula, str):
+        return None, None
+    matched = _SIMPLE_FX_FORMULA.fullmatch(formula)
+    if not matched:
+        return None, None
+    original = float(matched.group("original"))
+    rate = float(matched.group("rate"))
+    if original < 0 or rate <= 0:
+        return None, None
+    return original, rate
+
+
+class FlowLedger:
+    """一份或多份到账流转表的只读索引。"""
+
+    def __init__(self, rows: Optional[List[dict]] = None):
+        self.rows: List[dict] = rows or []
+        self.sources: List[str] = []
+        # 英文到账名称 -> 一个或多个系统客户名称。集合长度大于 1 时是歧义，
+        # 只能人工处理，不能挑一个写入。
+        self.name_map: Dict[str, Set[str]] = {}
+        self.name_map_sources: List[str] = []
+        self.name_map_issues: List[str] = []
+
+    # ---------- 装载 ----------
+
+    @staticmethod
+    def _looks_like_flow(headers: Sequence[str]) -> bool:
+        norm = [common._norm(h) for h in headers]
+        joined = "|".join(norm)
+        if any(m in joined for m in _LEDGER_MARKERS):
+            return False  # 盈亏明细，不是流转表
+        if not all(h in joined for h in _REQUIRED_HINTS):
+            return False
+        if not any(s in joined for s in _SIGNATURE_COLS):
+            return False  # 没有流转表专有列 → 不认
+        return any(h in joined for h in _NAME_HINTS)
+
+    @staticmethod
+    def _name_map_columns(headers: Sequence[str]) -> Optional[Tuple[int, int]]:
+        """按表头识别中英文名称对照表，不依赖文件名。"""
+        source = common.fuzzy_find_col(headers, (_NAME_MAP_SOURCE,))
+        target = common.fuzzy_find_col(headers, (_NAME_MAP_TARGET,))
+        if source is None or target is None or source == target:
+            return None
+        return source, target
+
+    def _load_name_map_sheet(
+        self,
+        all_rows: Sequence[Sequence[object]],
+        source_label: str,
+    ) -> None:
+        """读取一张名称对照表；空值和一对多关系只记问题，不做猜测。"""
+        if not all_rows:
+            return
+        hrow, headers = common.find_header_row(
+            all_rows, "名称对照", [_NAME_MAP_SOURCE, _NAME_MAP_TARGET]
+        )
+        cols = self._name_map_columns(headers)
+        if cols is None:
+            return
+        if source_label not in self.name_map_sources:
+            self.name_map_sources.append(source_label)
+        source_idx, target_idx = cols
+        for row_no, row in enumerate(all_rows[hrow + 1 :], hrow + 2):
+            values = list(row)
+            source = (
+                str(values[source_idx]).strip()
+                if source_idx < len(values) and values[source_idx] is not None
+                else ""
+            )
+            target = (
+                str(values[target_idx]).strip()
+                if target_idx < len(values) and values[target_idx] is not None
+                else ""
+            )
+            if not source and not target:
+                continue
+            if not source:
+                self.name_map_issues.append(
+                    f"{source_label} 第{row_no}行：到账名称为空"
+                )
+                continue
+            if not target:
+                self.name_map_issues.append(
+                    f"{source_label} 第{row_no}行：系统客户名称为空"
+                )
+                continue
+            key = normalize_name(source)
+            if not key:
+                self.name_map_issues.append(
+                    f"{source_label} 第{row_no}行：到账名称归一化后为空"
+                )
+                continue
+            self.name_map.setdefault(key, set()).add(target)
+
+    @classmethod
+    def from_paths(
+        cls,
+        paths: Sequence[Path],
+        name_map_paths: Optional[Sequence[Path]] = None,
+    ) -> "FlowLedger":
+        import openpyxl
+
+        aliases = common.load_aliases()
+        inst = cls()
+        # Pin approved payer/customer aliases with the Skill. Workbook mappings
+        # are merged by the existing set-based loader: conflicts stay ambiguous.
+        name_map_file = Path(__file__).resolve().parent.parent / "config" / "到账名称对照.json"
+        name_map_rows = json.loads(name_map_file.read_text(encoding="utf-8"))
+        if (
+            not isinstance(name_map_rows, list)
+            or not name_map_rows
+            or name_map_rows[0] != [_NAME_MAP_SOURCE, _NAME_MAP_TARGET]
+            or any(
+                not isinstance(row, list) or len(row) != 2
+                or any(not isinstance(value, str) or not value.strip() for value in row)
+                for row in name_map_rows[1:]
+            )
+        ):
+            raise ValueError("内置到账名称对照格式无效，不能继续流转匹配")
+        inst._load_name_map_sheet(name_map_rows, "Skill内置到账名称对照")
+        flow_paths = [Path(p) for p in paths]
+        map_paths = [Path(p) for p in (name_map_paths if name_map_paths is not None else paths)]
+        all_paths = list(dict.fromkeys(flow_paths + map_paths))
+        map_path_set = set(map_paths)
+        for p in all_paths:
+            wb = None
+            try:
+                wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+                wb_formula = openpyxl.load_workbook(str(p), read_only=True, data_only=False)
+            except Exception:
+                if wb is not None:
+                    wb.close()
+                continue
+            for ws in wb.worksheets:
+                all_rows = list(ws.iter_rows(values_only=True))
+                if not all_rows:
+                    continue
+                if p in map_path_set:
+                    inst._load_name_map_sheet(
+                        all_rows,
+                        f"{p.name}#{ws.title}",
+                    )
+                hrow, headers = common.find_header_row(
+                    all_rows, "到账流转", ["日期", "公司名称", "金额", "单号"], aliases
+                )
+                if not cls._looks_like_flow(headers):
+                    continue
+                it = iter(all_rows[hrow + 1:])
+                try:
+                    cols = common.resolve_columns(
+                        headers, "到账流转", ["日期", "公司名称", "金额", "单号"], aliases
+                    )
+                except ValueError:
+                    continue
+                formula_rows = list(wb_formula[ws.title].iter_rows(values_only=True))
+                opt = {}
+                for k in ["收款形式", "是否更新应收款", "是否已登记系统"]:
+                    idx = common.fuzzy_find_col(
+                        headers, aliases.get("到账流转", {}).get(k, [k])
+                    )
+                    if idx is not None:
+                        opt[k] = idx
+                company_idx = common.fuzzy_find_col(headers, ("公司名称", "客户名称"))
+                remitter_idx = common.fuzzy_find_col(headers, _REMITTER_ALIASES)
+                rno = hrow + 1
+                for row in it:
+                    rno += 1
+                    vals = list(row)
+
+                    def cell(i):
+                        return vals[i] if i is not None and i < len(vals) else None
+
+                    date = common.norm_date(cell(cols["日期"]))
+                    amount = common.to_number(cell(cols["金额"]))
+                    if date is None and amount is None:
+                        continue
+                    company_name = str(cell(company_idx) or "").strip()
+                    remitter = str(cell(remitter_idx) or "").strip()
+                    payer = company_name or remitter or str(cell(cols["公司名称"]) or "").strip()
+                    form = (
+                        str(cell(opt.get("收款形式")) or "").strip()
+                        if "收款形式" in opt
+                        else ""
+                    )
+                    amount_formula = (
+                        formula_rows[rno - 1][cols["金额"]]
+                        if rno - 1 < len(formula_rows)
+                        and cols["金额"] < len(formula_rows[rno - 1])
+                        else None
+                    )
+                    formula_orig, formula_rate = formula_original_amount(amount_formula, form)
+                    inst.rows.append(
+                        {
+                            "file": p.name,
+                            "sheet": ws.title,
+                            "row_no": rno,  # 1-based，含表头
+                            "date": date,
+                            "company_name": company_name,
+                            "remitter": remitter,
+                            "payer": payer,
+                            "amount": amount,
+                            "amount_formula": amount_formula
+                            if isinstance(amount_formula, str) and amount_formula.startswith("=")
+                            else "",
+                            "formula_orig_amount": formula_orig,
+                            "formula_rate": formula_rate,
+                            "order_cell": str(cell(cols["单号"]) or "").strip(),
+                            "form": form,
+                            "updated": str(cell(opt.get("是否更新应收款")) or "").strip()
+                            if "是否更新应收款" in opt
+                            else "",
+                            "registered": str(cell(opt.get("是否已登记系统")) or "").strip()
+                            if "是否已登记系统" in opt
+                            else "",
+                        }
+                    )
+                inst.sources.append(f"{p.name}#{ws.title}")
+            wb.close()
+            wb_formula.close()
+        return inst
+
+    @classmethod
+    def from_workspace(
+        cls,
+        workspace: Path,
+        name_map_paths: Optional[Sequence[Path]] = None,
+    ) -> "FlowLedger":
+        """从 02_我的表副本 按内容识别流转表和名称对照表（不看文件名）。"""
+        d = Path(workspace) / "02_我的表副本"
+        if not d.is_dir():
+            return cls()
+        paths = sorted(d.glob("*.xlsx"))
+        return cls.from_paths(paths, name_map_paths=name_map_paths or paths)
+
+    # ---------- 匹配 ----------
+
+    def match(
+        self,
+        arrival_date,
+        amount_net: Optional[float],
+        customer: str = "",
+        fee: Optional[float] = 0.0,
+        sales_name: str = "",
+    ) -> dict:
+        """
+        返回 {"hits": n, "rows": [...], "matched_by": str}
+        matched_by ∈ 三键 / 三键(含手续费) / 三键(原币公式) /
+        三键(原币公式含手续费) 及其「中英文对照」变体 /
+        日期+金额(名字不符) / ""
+        """
+        date = common.norm_date(arrival_date)
+        gross = None
+        if amount_net is not None and fee:
+            gross = round(float(amount_net) + float(fee), 2)
+
+        def by_date(r):
+            return date is not None and r["date"] == date
+
+        def uses_formula_original(row: dict) -> bool:
+            return row.get("formula_orig_amount") is not None
+
+        cand_net = [
+            r for r in self.rows
+            if by_date(r)
+            and not uses_formula_original(r)
+            and amounts_equal(r.get("amount"), amount_net)
+        ]
+        cand_orig = [
+            r for r in self.rows
+            if by_date(r)
+            and uses_formula_original(r)
+            and amounts_equal(r.get("formula_orig_amount"), amount_net)
+        ]
+        cand_gross = (
+            [
+                r for r in self.rows
+                if by_date(r)
+                and not uses_formula_original(r)
+                and amounts_equal(r.get("amount"), gross)
+            ]
+            if gross is not None
+            else []
+        )
+        cand_orig_gross = (
+            [
+                r for r in self.rows
+                if by_date(r)
+                and uses_formula_original(r)
+                and amounts_equal(r.get("formula_orig_amount"), gross)
+            ]
+            if gross is not None
+            else []
+        )
+
+        def name_match_kind(row: dict) -> str:
+            """返回直接匹配/中英文对照/空；对照一对多时不自动命中。"""
+            flow_names = tuple(dict.fromkeys(
+                str(row.get(key) or "").strip()
+                for key in ("company_name", "remitter", "payer")
+            ))
+            zhiyun_names = {
+                str(sales_name or "").strip(),
+                str(customer or "").strip(),
+            }
+            direct = any(
+                name_similar(flow_name, zhiyun_name)
+                for flow_name in flow_names
+                for zhiyun_name in zhiyun_names
+                if flow_name and zhiyun_name
+            )
+            if direct:
+                return "直接"
+
+            # 对照表的 B 列语义是「系统客户名称」，所以转换后只与智云客户名称
+            # 比较；销售名称仍按原有直接匹配规则处理，避免把客户别名误当销售名。
+            normalized_form = re.sub(r"\s+", "", str(row.get("form") or "")).casefold()
+            if normalized_form not in _FORMULA_ORIGINAL_FORMS:
+                return ""
+            customer_name = str(customer or "").strip()
+            if not customer_name:
+                return ""
+            for flow_name in flow_names:
+                targets = self.name_map.get(normalize_name(flow_name), set())
+                if len(targets) == 1 and name_similar(next(iter(targets)), customer_name):
+                    return "中英文对照"
+            return ""
+
+        def add_alias_tag(tag: str) -> str:
+            if tag == "三键":
+                return "三键(中英文对照)"
+            if tag.endswith(")"):
+                return tag[:-1] + ",中英文对照)"
+            return tag + "(中英文对照)"
+
+        def matched_tag(rows: List[dict], normal: str, formula: str) -> str:
+            bases = {uses_formula_original(r) for r in rows}
+            if bases == {True}:
+                return formula
+            if bases == {False}:
+                return normal
+            return "三键(混合金额口径)"
+
+        direct = cand_net + [r for r in cand_orig if r not in cand_net]
+        with_fee = cand_gross + [r for r in cand_orig_gross if r not in cand_gross]
+        for pool, normal_tag, formula_tag in (
+            (direct, "三键", "三键(原币公式)"),
+            (with_fee, "三键(含手续费)", "三键(原币公式含手续费)"),
+        ):
+            named: List[dict] = []
+            kinds: List[str] = []
+            for row in pool:
+                kind = name_match_kind(row)
+                if kind:
+                    named.append(row)
+                    kinds.append(kind)
+            if named:
+                tag = matched_tag(named, normal_tag, formula_tag)
+                if kinds and all(kind == "中英文对照" for kind in kinds):
+                    tag = add_alias_tag(tag)
+                return {
+                    "hits": len(named),
+                    "rows": named,
+                    "matched_by": tag,
+                }
+
+        weak = direct + [r for r in with_fee if r not in direct]
+        if weak:
+            return {
+                "hits": len(weak),
+                "rows": weak,
+                "matched_by": "日期+金额(名字不符)",
+            }
+        return {"hits": 0, "rows": [], "matched_by": ""}
+
+    # ---------- 输出辅助 ----------
+
+    @staticmethod
+    def locate_text(hit: dict) -> str:
+        """给她看的定位说明（不是行号定位盈亏表，这里是流转表自己的行）。"""
+        if not hit or not hit.get("rows"):
+            return ""
+        r = hit["rows"][0]
+        return f"{r['file']}#{r['sheet']} 第{r['row_no']}行（{hit.get('matched_by','')}）"
+
+    @staticmethod
+    def suggest_order_cell(so_list: Sequence[str], existing: str = "") -> str:
+        """建议写进流转表「单号」列的文本：多 SO 换行分隔，已有的不重复加。"""
+        have = {s.strip() for s in re.split(r"[\s\n,，;；]+", existing or "") if s.strip()}
+        add = [s for s in dict.fromkeys([s.strip() for s in so_list if s and s.strip()]) if s not in have]
+        if not add:
+            return existing or ""
+        parts = ([existing.strip()] if existing and existing.strip() else []) + add
+        return "\n".join(parts)
+
+    @staticmethod
+    def suggest_order_amount_cell(
+        so_amounts: Sequence[Tuple[str, Optional[float]]], existing: str = ""
+    ) -> str:
+        """生成「SO  交付金额」文本；每个 SO 独占一行，已有其它订单保持不动。"""
+        ordered: List[Tuple[str, Optional[float]]] = []
+        seen = set()
+        for so, amount in so_amounts:
+            so = str(so or "").strip()
+            if not so or so in seen:
+                continue
+            seen.add(so)
+            ordered.append((so, amount))
+
+        lines = [x.strip() for x in str(existing or "").replace("\r", "").split("\n") if x.strip()]
+        result: List[str] = []
+        consumed = set()
+        for line in lines:
+            matched = None
+            for so, amount in ordered:
+                if re.search(rf"(?<![A-Z0-9]){re.escape(so)}(?![A-Z0-9])", line, re.I):
+                    matched = (so, amount)
+                    break
+            if matched is None:
+                result.append(line)
+                continue
+            so, amount = matched
+            if so in consumed:
+                continue
+            consumed.add(so)
+            result.append(FlowLedger._format_so_amount(so, amount))
+        for so, amount in ordered:
+            if so not in consumed:
+                result.append(FlowLedger._format_so_amount(so, amount))
+        return "\n".join(result)
+
+    @staticmethod
+    def _format_so_amount(so: str, amount: Optional[float]) -> str:
+        if amount is None:
+            return so
+        return f"{so}  {float(amount):,.2f}"
+
+
+def derive_flow_status(so_states: Sequence[str]) -> str:
+    """
+    到账流转表「是否更新应收款」三态（李尚 business-rules §9 + 明妹 7-23 录音）。
+
+    传进来每个 state 是这笔到账下某个 SOD 今天**能不能在她盈亏表里更新**：
+      · "ready" —— 订单已在她表里，这次能填（auto），或只是要拆行/指认（E5/E8）——她照样更得动
+      · "wait"  —— 订单还没交付进表（E2/E3），或数据有问题（异常），今天更新不了
+
+    规则：全部 ready → 是；一个 ready 都没有 → 空白；有的 ready 有的 wait → 部分。
+
+    ⚠ 2026-07-24 关键修正（明妹 7-23 录音原话："部分是指某些订单没交付、我没法更新"）：
+      **「部分核销」(E5) 不再算 wait**。她那笔到账的钱已经全部核销落地，只是要在表里
+      把一个订单拆成「已收/未收」两行——这算她**更新了**。以前把 E5 也算成"没更新"，
+      导致一笔明明全核掉的到账被误标「部分」（实测 AR26070112）。
+      只有「订单没交付进表」(E2/E3) 才让这笔到账变「部分」。
+      兼容旧入参：历史上传的是 bucket("auto"/"hold")，"auto" 仍按 ready 计。
+    """
+    def _ready(s: str) -> bool:
+        return s in ("ready", "auto")
+
+    states = [s for s in so_states if s]
+    if not states:
+        return ""
+    ready = sum(1 for s in states if _ready(s))
+    if ready == 0:
+        return ""
+    if ready == len(states):
+        return "是"
+    return "部分"
+
+
+def flow_status_policy(status: str) -> dict:
+    """
+    明妹口径（2026-07-23 核销清单回填讨论）：
+    - 全部订单没检索到 → 「是否更新」**留空**，**不要公式**
+    - 全部订单检索到并更新 → 填「是」；表若有惯用公式可套公式（本程序建议字面「是」）
+    - 部分更新 → 填「部分」，**颜色标出**哪些 SO 更了 / 没更
+    日清展示建议；日清与写前校验通过后安全子集可由 apply_flow 写入。
+    """
+    s = (status or "").strip()
+    if s in ("", "（空白）", "空白", "空"):
+        return {
+            "填法": "留空",
+            "公式策略": "不要公式、不要写「否」",
+            "颜色标注": "无需（整笔都还没更）",
+            "人话": "这笔到账关联的订单这次一个都还没能更新 → 「是否更新应收款」空着",
+        }
+    if s == "是":
+        return {
+            "填法": "是",
+            "公式策略": "可套你表里惯用公式；没有公式就填字面「是」",
+            "颜色标注": "无需（全部已更新）",
+            "人话": "这笔到账下订单全部检索到并已更新 → 填「是」",
+        }
+    if s in ("部分", "部份"):
+        return {
+            "填法": "部分",
+            "公式策略": "不要写成「是」的公式；字面「部分」",
+            "颜色标注": "已更新 SO 正常色；未更新 SO 标红（在单号列或备注里区分）",
+            "人话": "同一笔到账有的单更新了、有的还没 → 填「部分」，红字标没更新的单号",
+        }
+    return {
+        "填法": s,
+        "公式策略": "按明妹现场口径",
+        "颜色标注": "—",
+        "人话": f"状态={s}",
+    }
+
+
+def annotate_records(
+    records: List[dict],
+    flow: Optional[FlowLedger],
+    complete: bool = False,
+) -> List[dict]:
+    """
+    给每条记录补 flow_hits / flow_locate / flow_order_suggest（原地）。
+
+    **默认不判 E0**（complete=False）。她各渠道分开好几张表（汇款/微信/支付宝/美元户），
+    手上若只有其中一两张，其余渠道的到账当然找不到 —— 那是"没给全数据"，不是"对不到账"。
+    实测：只给汇款+微信两张表跑 7-08 的夹具，28 笔会被全部误判成 E0。
+
+    只有运行时显式声明"当天所有渠道的流转表都给全了"（--flow-complete）才判 E0；
+    否则找不到就标注"未在现有流转表中找到"，让记录按原通道规则继续判，不冤枉她。
+    """
+    if flow is None or not flow.rows:
+        return records
+    dates = [r["date"] for r in flow.rows if r.get("date")]
+    dmin, dmax = (min(dates), max(dates)) if dates else (None, None)
+    cache: Dict[tuple, dict] = {}
+    for rec in records:
+        # 三键里的「金额」必须是**这笔到账的总额**，不是单个 SO/SOD 的金额。
+        # 流转表一行 = 银行一笔到账；一笔到账挂 N 个订单时拿分项金额去比，永远对不上。
+        # （旧版就是拿 amount_orig 比的 → 多 SO 的到账全都匹配不到流转行。）
+        amount = rec.get("arrival_total")
+        if amount is None:
+            amount = rec.get("amount_orig")
+        key = (
+            str(rec.get("shoukuan_date")),
+            amount,
+            rec.get("customer") or "",
+            rec.get("sales_name") or "",
+            rec.get("fee") or 0.0,
+        )
+        if key not in cache:
+            cache[key] = flow.match(
+                rec.get("shoukuan_date"),
+                amount,
+                customer=rec.get("customer") or "",
+                fee=rec.get("fee") or 0.0,
+                sales_name=rec.get("sales_name") or "",
+            )
+        hit = cache[key]
+        d = common.norm_date(rec.get("shoukuan_date"))
+        covered = dmin is not None and d is not None and dmin <= d <= dmax
+        if not covered:
+            rec["flow_hits"] = None
+            rec["flow_matched_by"] = "流转表未覆盖该日期(未做三键)"
+            rec["flow_locate"] = ""
+            continue
+        if hit["hits"] == 0 and not complete:
+            rec["flow_hits"] = None  # 不判 E0：可能只是这个渠道的表没给
+            rec["flow_matched_by"] = "未在现有流转表中找到(可能缺该渠道的表)"
+            rec["flow_locate"] = ""
+            rec["flow_file"] = ""
+            rec["flow_sheet"] = ""
+            rec["flow_row_no"] = None
+            continue
+        rec["flow_hits"] = hit["hits"]
+        rec["flow_matched_by"] = hit["matched_by"]
+        rec["flow_locate"] = FlowLedger.locate_text(hit)
+        if hit["hits"] == 1 and hit.get("rows"):
+            r0 = hit["rows"][0]
+            rec["flow_file"] = r0.get("file") or ""
+            rec["flow_sheet"] = r0.get("sheet") or ""
+            rec["flow_row_no"] = r0.get("row_no")
+            rec["flow_order_existing"] = r0.get("order_cell") or ""
+            # 命中那一行的身份（日期/付款方/金额）。写入时拿它再对一次：
+            # 从「出计划」到实际写入之间流转表可能被插过行 → 行号错位，
+            # 光有 row_no 是证明不了"还是这一行"的。
+            rec["flow_identity"] = {
+                "date": r0.get("date").isoformat() if r0.get("date") else "",
+                "payer": r0.get("payer") or "",
+                "amount": r0.get("amount"),
+            }
+            so = str(rec.get("so") or "").strip()
+            if so:
+                rec["flow_order_suggest"] = FlowLedger.suggest_order_cell(
+                    [so], rec["flow_order_existing"]
+                )
+        else:
+            rec["flow_file"] = ""
+            rec["flow_sheet"] = ""
+            rec["flow_row_no"] = None
+    return records
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="到账流转表索引自检（只读）")
+    ap.add_argument("--workspace", default=str(common.WORK))
+    ap.add_argument("--paths", nargs="*", default=[])
+    ap.add_argument(
+        "--name-map", action="append", default=[],
+        help="名称对照表路径（表头为到账名称/系统客户名称），可重复；默认随流转表按表头自动识别",
+    )
+    args = ap.parse_args(argv)
+
+    flow = (
+        FlowLedger.from_paths(
+            [Path(p) for p in args.paths],
+            name_map_paths=[Path(p) for p in args.name_map] if args.name_map else None,
+        )
+        if args.paths
+        else FlowLedger.from_workspace(
+            Path(args.workspace),
+            name_map_paths=[Path(p) for p in args.name_map] if args.name_map else None,
+        )
+    )
+    print(f"流转表来源: {flow.sources or '（无）'}")
+    print(f"可用行数: {len(flow.rows)}")
+    if not flow.rows:
+        print("WARN: 没有认出任何到账流转表 → 三键匹配不可用，E0/E12 无法判定", file=sys.stderr)
+        return 1
+    filled = sum(1 for r in flow.rows if r.get("order_cell"))
+    multi = sum(1 for r in flow.rows if len(re.split(r"[\s\n]+", r["order_cell"].strip())) > 1)
+    formula_original = sum(1 for r in flow.rows if r.get("formula_orig_amount") is not None)
+    print(f"已填单号行: {filled}；其中多 SO 行: {multi}")
+    print(f"PayPal/美元户原币公式行: {formula_original}")
+    print(f"中英文名称对照: {len(flow.name_map)} 个有效英文名称，来源 {flow.name_map_sources or '（无）'}")
+    if flow.name_map_issues:
+        print(f"WARN: 名称对照表有 {len(flow.name_map_issues)} 个空值/格式问题，相关订单不自动猜测", file=sys.stderr)
+    print(json.dumps({
+        "sources": flow.sources,
+        "rows": len(flow.rows),
+        "formula_original_rows": formula_original,
+    }, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -252,3 +252,7 @@ git push gitee main
 - `gitee` → 仅 Gitee（备用）
 
 改 skill 后：本地测绿 → **`git push origin main`（双端）即交付**。默认**不**再打 zip、不挂 Release 附件。
+
+## 平台近期修改版本
+
+平台版应收核销、极速核销、合并报表和应收合并拆分的完整源码见 [platform-skills](platform-skills/README.md)。来源提交、使用依赖与同步边界在该目录说明中记录。

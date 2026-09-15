@@ -1,0 +1,65 @@
+{
+  "id": "kingdee-standard-cashflow-ytd-v1",
+  "verified_on": "2026-09-10",
+  "companies": [
+    "HEAD",
+    "CULTURE",
+    "SHANGHAI"
+  ],
+  "report": "cf",
+  "template": "standard",
+  "basis": "current-period column is calendar-year-to-date; current-month column is monthly; exact Kingdee filename and headers required",
+  "reference": "https://www.jdy.com/wenda/2016177870799495170.html",
+  "checks": [
+    {
+      "company": "北京甲骨易文化传媒有限公司",
+      "items": 35,
+      "errors": [],
+      "hashes": {
+        "202601": "2c00a2ccd1946787f6732aa5f9e4abda3a339110a53d9c232bfac8b4bede3f08",
+        "202607": "1ea72e6c1511ebba367a44d0d39569633c3c3ef294cd2325aecbffd6411f1c74",
+        "202608": "131bc8777c3825d5e176291af999c7d24dadf7f85e560b2845eac0bb0eeda519"
+      },
+      "headers": [
+        "项目",
+        "行次",
+        "本月金额",
+        "本期金额"
+      ]
+    },
+    {
+      "company": "甲骨易智译（上海）科技有限公司",
+      "items": 35,
+      "errors": [],
+      "hashes": {
+        "202601": "2b6870d6f498617008a5dec466bec1065d96598b4f13f664a628443174dba4d3",
+        "202607": "3376a65135185796e60c2b151a5158f85fdb729113bce493fb819e330541abe2",
+        "202608": "9a47f0d213e31a4e2bd12a8f82e6727accb70e7be5b0df79b8efd86411027921"
+      },
+      "headers": [
+        "项目",
+        "行次",
+        "本月金额",
+        "本期金额",
+        "上期金额"
+      ]
+    },
+    {
+      "company": "甲骨易（北京）语言科技股份有限公司",
+      "items": 35,
+      "errors": [],
+      "hashes": {
+        "202601": "ad126d61b64b664dfed249863142389b0c1e7cb01c6bf5f4a9a7630fe4feee1e",
+        "202607": "a7dc73bfda88a47fff1c825cb48c3088cdc829c358a484da813e1dd653ad532d",
+        "202608": "7af383b6eb750b94b16f62aee58141393f8e3cc5ab5ee902f0dcc750db91f3d8"
+      },
+      "headers": [
+        "项目",
+        "行次",
+        "本月金额",
+        "本期金额",
+        "上期金额"
+      ]
+    }
+  ]
+}

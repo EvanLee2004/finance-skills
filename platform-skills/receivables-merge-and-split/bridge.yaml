@@ -1,0 +1,26 @@
+name: 应收账款合并与销售拆分
+command: vendor/scripts/merge_and_split.py
+arguments:
+- kind: parameter
+  name: mode
+  flag: --mode
+- kind: file
+  role: primary
+  flag: --primary
+- kind: file
+  role: reference
+  flag: --reference
+- kind: parameter
+  name: base_month
+  flag: --base-month
+- kind: parameter
+  name: date_label
+  flag: --date
+output:
+  type: file
+  flag: --out
+  path: 应收账款合并结果.xlsx
+  additional_globs:
+  - 应收账款合并结果（部分）.xlsx
+  - 应收按销售拆分结果.zip
+success_message: 应收账款处理完成，合并结果和销售拆分结果已经生成。

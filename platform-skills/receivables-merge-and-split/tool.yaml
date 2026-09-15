@@ -1,0 +1,127 @@
+schema_version: 1
+id: receivables-merge-and-split
+name: 应收账款合并与销售拆分
+version: 1.1.5
+status: published
+category: 应收管理
+description: 一次上传应收材料，按选择的模式完成应收台账合并、销售归属和按销售人员拆分。
+ui:
+  employee_name: 应收账款合并与销售拆分
+  short_description: 一次上传应收材料，按选择的模式完成应收台账合并、销售归属和按销售人员拆分。
+  categories:
+  - 应收管理
+  estimated_minutes: 5
+  output_summary: 应收 all、领导部分版和销售拆分结果
+  action_label: 开始处理
+  popular: true
+tags:
+- Excel
+- 应收
+- 合并
+- 销售拆分
+- 离线
+operational_profile:
+  execution_kind: offline_file
+  external_sources: []
+  employee_labels:
+  - 上传应收材料
+  - 选择处理模式
+  - 输出结果文件
+file_inputs:
+- role: primary
+  name: 源台账或已有应收 all（按模式选择）
+  description: 仅合并或合并并拆分时上传本期源台账；直接拆分时上传已有应收 all。
+  required: true
+  multiple: false
+  min_files: 1
+  extensions:
+  - xlsx
+  - xlsm
+  max_size_mb: 100
+- role: reference
+  name: 上一版应收 all（合并模式填写）
+  description: 合并模式下用于回填销售标注和结转老坏账；首次建表可留空。
+  required: false
+  multiple: false
+  min_files: 1
+  extensions:
+  - xlsx
+  - xlsm
+  max_size_mb: 100
+input_schema:
+  type: object
+  required:
+  - mode
+  additionalProperties: false
+  properties:
+    mode:
+      type: string
+      title: 处理模式
+      description: 日常使用默认选择合并并按销售拆分。
+      enum:
+      - 仅合并
+      - 合并并按销售拆分
+      - 已有应收 all 直接拆分
+      default: 合并并按销售拆分
+    base_month:
+      type: string
+      title: 账龄基准月
+      description: 合并模式可留空自动识别；补历史月份时填写 YYYYMM。
+      pattern: ^$|^\d{6}$
+      default: ''
+    date_label:
+      type: string
+      title: 拆分结果日期标签
+      description: 拆分模式可留空自动从文件名识别；手工填写 MMDD。
+      pattern: ^$|^\d{4}$
+      default: ''
+output_schema:
+  type: object
+  required:
+  - status
+  - summary
+  - output_files
+  - warnings
+  properties:
+    status:
+      const: success
+    summary:
+      type: object
+    output_files:
+      type: array
+    warnings:
+      type: array
+handler:
+  adapter: python
+  entrypoint: scripts/entry.py
+  worker_pool: python
+runtime:
+  timeout_seconds: 900
+  memory_mb: 2048
+  concurrency_limit: 1
+  network_access: false
+  network_targets: []
+risk:
+  level: read_only
+  requires_confirmation: true
+  requires_change_review: false
+  requires_approval: false
+  modifies_uploaded_files: false
+permissions:
+  run: finance_user
+  manage: skill_admin
+safety_constraints: {}
+progress_stages:
+- key: reading_files
+  label: 正在读取文件
+- key: validating_fields
+  label: 正在检查字段
+- key: processing
+  label: 正在处理数据
+- key: generating_output
+  label: 正在生成结果文件
+result_presentation:
+  metrics: []
+upstream:
+  repository: https://gitee.com/Lee157/finance-skills.git
+  path: skills/receivables-merge-and-split
