@@ -1,4 +1,4 @@
-# docx · Word 文档处理技能
+# Word（通用）
 
 **甲骨易财务部自研**通用文档技能（研发维护：李明昊，2026-06）。服务于财务同事在 opencode 上的日常 Word 建/改/解析，与 receivables-merge 等业务技能同属 `finance-skills` 技能包。
 
@@ -15,7 +15,7 @@ flowchart TD
   B --> C["交回文档"]
 ```
 
-## 能干什么
+## 简介
 
 - 新建/编辑 .docx（报告、备忘录、函件、带格式文档）
 - 读正文、改批注与修订、插图、unpack/repack 精细改 XML
@@ -37,4 +37,4 @@ docx/
 
 ## 维护
 
-研发：李明昊 · 甲骨易财务部 · 改动走 `finance-skills` 仓库 `git push origin main`。同事说「更新财务skills」。不要再打 zip。
+改动：测绿后 `git push gitee main`。不要打 zip。

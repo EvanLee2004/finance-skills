@@ -1,4 +1,4 @@
-# pdf · PDF 处理技能
+# PDF（通用）
 
 **甲骨易财务部自研**通用文档技能（研发维护：李明昊，2026-06）。服务于财务同事在 opencode 上的日常 PDF 需求，与 receivables-merge 等业务技能同属 `finance-skills` 技能包。
 
@@ -15,7 +15,7 @@ flowchart TD
   B --> C["交回 PDF 或抽出的表"]
 ```
 
-## 能干什么
+## 简介
 
 - 读文/抽表、合并拆分、旋转、水印、填表、转图
 - 进阶：OCR 扫描件（需额外装 pytesseract，见 SKILL.md）
@@ -38,4 +38,4 @@ pdf/
 
 ## 维护
 
-研发：李明昊 · 甲骨易财务部 · 改动走 `finance-skills` 仓库 `git push origin main`。同事说「更新财务skills」。不要再打 zip。
+改动：测绿后 `git push gitee main`。不要打 zip。

@@ -1,4 +1,4 @@
-# pptx · PPT 演示文稿处理技能
+# PPT（通用）
 
 **甲骨易财务部自研**通用文档技能（研发维护：李明昊，2026-06）。服务于财务同事在 opencode 上的日常演示文稿需求，与 receivables-merge 等业务技能同属 `finance-skills` 技能包。
 
@@ -15,7 +15,7 @@ flowchart TD
   B --> C["交回 pptx"]
 ```
 
-## 能干什么
+## 简介
 
 - 新建/编辑 .pptx，改模板、加页、抽正文
 - 缩略图预览：`python3 scripts/thumbnail.py <文件.pptx>`
@@ -38,4 +38,4 @@ pptx/
 
 ## 维护
 
-研发：李明昊 · 甲骨易财务部 · 改动走 `finance-skills` 仓库 `git push origin main`。同事说「更新财务skills」。不要再打 zip。
+改动：测绿后 `git push gitee main`。不要打 zip。

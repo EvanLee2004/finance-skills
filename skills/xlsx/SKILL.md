@@ -1,6 +1,6 @@
 ---
 name: xlsx
-version: "1.0"
+version: "1.1"
 description: >-
   读写、清洗、格式化 Excel/表格（.xlsx/.xlsm/.csv/.tsv）：加列算公式、做表、洗乱表、出成品 spreadsheet。
   当用户说「做 Excel / 改 xlsx / 建个表 / 算一下这张表」或给表格文件要处理、且**交付物是表格文件**时，主动使用本技能。

@@ -2,7 +2,7 @@
 
 > **以后凡「更新技能 / 版本从哪来 / push 到哪 / 同事怎么更新」先看本文件。**  
 > 本 monorepo = 财务部全部官方 skill 的**唯一源码仓**；同事本机 opencode 里的官方技能夹是它的**安装副本**。  
-> **2026-07-25 起：默认分发 = git push 云端；同事一句话「更新财务skills」即可拉最新。不再发 zip 作为主路径。**
+> **2026-07-25 起：默认分发 = git push Gitee `main`。不再发 zip。**
 
 ---
 
@@ -31,12 +31,8 @@
 
 | 角色 | 动作 |
 |------|------|
-| **开发（明昊 / AI）** | 在本仓改码 → 该 skill `version` +0.1 → 测绿 → `git push gitee main`。**到此交付完成**。 |
-| **同事本机（已装过财务 skills）** | 对 opencode 说一句：**「更新财务skills」**（或「更新财务技能 / 更新财务技能包」）。Agent 从云端 `main` 拉最新 → **只覆盖财务包白名单** → **保留你本地 config** → **不动你自己做的其他 skill**。 |
-| **同事本机（首次安装）** | 说「安装财务skills」或粘手册第三节 A 段；Agent 从 Gitee/GitHub clone 后按白名单装入 opencode。 |
-
-> ⚠️ **push 了 ≠ 同事本机已更新。** 云端更新后，同事要说一次「更新财务skills」才会同步到本机。  
-> ⚠️ **更新 ≠ 清空 skills。** 只动官方白名单夹；同事自己装的 / 自己写的 skill **一律不删不改**。
+| **开发** | 改码 → 该 skill `version` +0.1 → 测绿 → `git push gitee main`。 |
+| **同事本机** | 从 Gitee `main` 拉最新到 opencode skills；只覆盖 `pack.json` 白名单；本机 `config/` 默认保留（核销跟仓库）；不要清空自己另装的技能。 |
 
 ---
 
@@ -50,11 +46,9 @@
 目录里每个官方 skill 一个夹（如 `labor-invoice-check`、`ar-hexiao-daily`）。  
 **更新只动财务包白名单夹**；同事自己装的其他 skill 不许删、不许改、不许挪。
 
-**财务包白名单（19）**  
-`receivables-merge` · `split-by-sales` · `labor-invoice-check` · `withholding-report-rename` · `compliance-spot-check` · `dreame-ar-progress-diff` · `dept-expense-alloc` · `ar-hexiao-daily` · `order-daily-summary` · `qige-invoice-to-kingdee` · `kingdee-posting` · `kingdee-gl-import` · `pl-dept-report` · `update-finance-skills` · `task-clarifier` · `xlsx` · `docx` · `pptx` · `pdf`  
-已下线 `env-doctor`，更新时从本机删掉。
+白名单见仓库根 `pack.json`。已下线：`env-doctor`、`qige-invoice-to-kingdee`、`task-clarifier`、`update-finance-skills`。
 
-**核销跟 main**：李尚最新已于 2026-08-17 合入 `main`。更新时覆盖 `ar-hexiao-daily`（含仓内 `config/` 业务规则）。凭据只留 `*.local.json`，不进仓。正本名单见 `skills/update-finance-skills/config/pack.json`。
+核销跟 `main`：更新时覆盖 `ar-hexiao-daily` 的仓内 `config/`。凭据只留 `*.local.json`。
 
 另：根下说明文件 `财务技能包_来源与更新.md` 一并覆盖更新（方便下次还能找到本说明）。
 
@@ -62,75 +56,9 @@
 
 ---
 
-## 四、同事一句话更新（主路径 · 必读）
+## 四、同事怎么更新
 
-### 触发语（任选其一即可）
-
-- **「更新财务skills」**（推荐，最短）
-- 「更新财务技能」/「更新财务技能包」/「把财务 skills 更新到最新」/「拉最新」
-
-命中技能：`update-finance-skills`。说什么用哪个见 `skills/财务技能_说什么用哪个.md`。
-
-### Agent 必须执行的步骤（写死）
-
-1. **读来源**：若本机已有 `update-finance-skills`，直接跑它的脚本，不要手搓复制。  
-2. **取最新源码必须先 Gitee**：  
-   ```bash
-   python3 "<本机 update-finance-skills>/scripts/update.py"
-   ```  
-   脚本内部：`git clone/pull` **https://gitee.com/Lee157/finance-skills** 的 `main`；Gitee 不通才 GitHub。  
-3. **白名单覆盖**到 opencode skills 目录（名单以 `pack.json` 为准）：  
-   - 覆盖 `SKILL.md`、`scripts/`、`README.md`、`references/` 等源码；本机没有的白名单夹整夹复制  
-   - **保留**本机各技能已有 `config/`（核销除外，业务规则跟仓库）  
-   - 把 `财务技能包_来源与更新.md` 和 `财务技能_说什么用哪个.md` 放到 skills 目录根  
-4. **禁止**：清空整个 skills；删除/改动白名单外任何夹。  
-5. **汇报**（必须逐条）：更新到的 **git short SHA**；更新/新增了哪些；白名单外是否「未动」；config 是否保留；提醒 **重启 opencode**。  
-   不要再装、不要再点名已下线的旧技能。白名单以 `pack.json` 为准。
-
-### 可复制提示词（同事 / Agent 通用）
-
-```
-更新财务skills
-
-请按官方 monorepo 把本机财务部官方技能更新到云端最新，全程自动完成，要点「允许访问」就允许。
-
-【唯一源】
-- Gitee（优先）: https://gitee.com/Lee157/finance-skills  分支 main
-- GitHub（备）: https://github.com/EvanLee2004/finance-skills  分支 main
-- 仓内路径: skills/<技能id>/
-- 若本机已有「财务技能包_来源与更新.md」或 SOURCE.md，先读确认。
-
-【红线·只动财务包，别碰我别的技能】
-- 只能更新/新增下面白名单文件夹；白名单以外一律不删、不改、不移动、不覆盖。
-- 禁止清空整个 skills 目录；禁止「只保留白名单这些」；禁止重命名白名单外的夹。
-
-【财务包白名单】
-receivables-merge、split-by-sales、labor-invoice-check、withholding-report-rename、compliance-spot-check、dreame-ar-progress-diff、dept-expense-alloc、ar-hexiao-daily、order-daily-summary、qige-invoice-to-kingdee、kingdee-posting、kingdee-gl-import、pl-dept-report、update-finance-skills、task-clarifier、xlsx、docx、pptx、pdf
-（另：把「财务技能包_来源与更新.md」「财务技能_说什么用哪个.md」放到 skills 目录根。核销已合入 main，更新时覆盖。）
-
-【装到哪】
-~/.config/opencode/skills/（Windows = %USERPROFILE%\.config\opencode\skills\）；定位不到就找本机 opencode 实际加载技能的目录。
-
-【怎么取源】
-优先 git clone/pull 上述仓库 main（国内优先 Gitee）。不要问我要 zip；不要等我发压缩包。
-
-【步骤】
-1）git 拉到最新 main，记下 short SHA。
-2）只对白名单：用仓内 skills/ 覆盖安装目录源码；新技能整夹复制。
-3）⚠ 保留我本地 config：某技能本机已有 config/ 则绝不覆盖；没有才从仓库复制。核销业务规则跟仓库。
-4）依赖可顺手补（国内镜像）：
-   pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pandas openpyxl xlrd pypdf pdfplumber pdf2image python-docx python-pptx markitdown lxml defusedxml Pillow requests playwright
-   playwright install chromium
-
-【汇报·必须逐条】
-- 更新到的 git short SHA + 远端（Gitee/GitHub）
-- 更新/新增了哪些财务技能
-- 白名单外其他技能：必须写「未动」（若误动立刻说明）
-- 我的 config/维护表保住没
-- 提醒我重启 opencode
-```
-
----
+从 Gitee `Lee157/finance-skills` 的 `main` 拉到本机 opencode skills。只覆盖 `pack.json` 白名单。本机已有 `config/` 默认不覆盖（核销跟仓库）。不要清空白名单外自己装的夹。开口对照 `skills/财务技能_说什么用哪个.md`。
 
 ## 五、开发侧 push（明昊 / AI）
 
@@ -179,13 +107,7 @@ git push origin main    # origin 已配置双 push：GitHub + Gitee
 ## 八、给 opencode / 其他 AI 的硬提示
 
 ```
-财务部官方 skill 只维护在这一个 monorepo：
-  GitHub: EvanLee2004/finance-skills
-  Gitee:  Lee157/finance-skills
-  分支:   main
-用户说「更新财务skills」= 跑 update-finance-skills（先 Gitee 再 GitHub）
-  → 白名单覆盖进 opencode skills → 保留各技能本地 config/
-  → 核销跟 main（李尚最新）→ 绝不碰白名单外的技能。
-不要再要求用户下 zip；不要自建平行仓库；不要只改本机 skills 却不回推开发仓。
-回推代码只在有写权限的开发机对 main 做；同事机默认只读 pull。
+财务部官方 skill 只维护在 Gitee Lee157/finance-skills 的 main。
+白名单见 pack.json。不要清空同事自己装的技能。不要发 zip。
+开发机测绿后 git push gitee main。
 ```

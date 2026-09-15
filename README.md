@@ -1,66 +1,60 @@
 # 财务部 skills
 
-一件活一个夹，都在 `skills/`。没有 `platform-skills/`。
+一件活一个夹，都在 `skills/`。
 
-对 OpenCode 说人话即可。开口对照：[`skills/财务技能_说什么用哪个.md`](skills/财务技能_说什么用哪个.md)。
+开口对照：[技能表](#技能表)。源在 Gitee `Lee157/finance-skills` 的 `main`。
 
-更新：说 **「更新财务skills」**。别人推上 Gitee 了，不等于你电脑已经更新。
+## 版本
 
-## 版本号（给李尚 / 给 agent）
+每个 skill 的 `SKILL.md` 里有 `version`。这次起业务 skill 是 **1.1**。
 
-2026-09-15 起，每个 skill 从 **1.0** 计。写在该夹 `SKILL.md` YAML 的 `version` 字段。
+改某个 `skills/<id>/` 的脚本、config 或 SKILL.md，只给那一个 +0.1，并改本表。没改的不要动版本。测绿后 `git push gitee main`。
 
-| 你改了什么 | 怎么记版本 |
-|------------|------------|
-| 改了某个 `skills/<id>/` 的 scripts、config 或 SKILL.md | **只给这一个** skill：`1.0` → `1.1` → `1.2`。同一 commit 改根 README 本表 |
-| 没改到的 skill | **禁止**动它的 version |
-| 破坏触发词 / 输入输出契约 | 仍 +0.1，并在该 skill README 写一句「同事要改口令」 |
+## 技能表
 
-发布：测绿后 `git push gitee main`。不要为版本号单独开夹。
+按使用人排。名称后括号是谁用。
 
-## 技能表（全部 1.0）
+### 亮晶
 
-| 同事怎么说 | id | version | 干什么 |
-|------------|----|---------|--------|
-| 跑本周应收 | receivables-merge | 1.0 | 分年表合成应收 all（含催收参考、原生透视） |
-| 把 all 拆给各销售 | split-by-sales | 1.0 | 一人一份 |
-| 本周抽谁 | compliance-spot-check | 1.0 | 合规抽查建议名单 |
-| 跑昨天的核销 | ar-hexiao-daily | 1.0 | 出纳核销日清（极速业务脚本） |
-| 出合并报表 | consolidated-statements | 1.0 | 八主体合并底稿；可从金蝶拉五个账套 |
-| 月度损益表 | pl-dept-report | 1.0 | 星辰拼损益表+利润表 |
-| 销项/付款/收款入金蝶 | kingdee-posting | 1.0 | 填凭证引入表，人去点引入 |
-| 序时账入金蝶 | kingdee-gl-import | 1.0 | 序时账 → 官方引入表 |
-| 劳务发票核对 | labor-invoice-check | 1.0 | 有票 / 800 以下 / 无票 |
-| 申报表重命名 | withholding-report-rename | 1.0 | 代扣代缴 PDF 改名 |
-| 部门费用归集 | dept-expense-alloc | 1.0 | 用友按人拆部门 |
-| 九点下单 | order-daily-summary | 1.0 | 下单数据（万元） |
-| 追觅进度对比 | dreame-ar-progress-diff | 1.0 | 多版 list diff |
-| 琪哥发票入金蝶 | qige-invoice-to-kingdee | 1.0 | 兼容入口，进销项 |
-| 更新财务skills | update-finance-skills | 1.0 | 从 Gitee 拉白名单 |
-| 帮我理清需求 | task-clarifier | 1.0 | 含糊时先问清 |
-| Excel / Word / PPT / PDF | xlsx / docx / pptx / pdf | 1.0 | 零散改文档 |
+| 名称 | id | version | 简介 |
+|------|----|---------|------|
+| 应收账款合并（亮晶） | receivables-merge | 1.1 | 分年表合成应收 all，带催收参考和透视 |
+| 应收按销售拆分（亮晶） | split-by-sales | 1.1 | 一张 all 拆成一人一份 |
+| 合规文件抽查（亮晶） | compliance-spot-check | 1.1 | 建议本周抽查名单 |
+| 劳务发票核对（亮晶） | labor-invoice-check | 1.1 | 有票 / 800 以下 / 无票 |
+| 九点下单统计（亮晶） | order-daily-summary | 1.1 | 下单数据（万元） |
+| 追觅应收进度对比（亮晶） | dreame-ar-progress-diff | 1.1 | 两版追觅 list 的进度差 |
 
-`project-detail-to-ledger` 在仓内，version 1.0，未进更新白名单。
+### 明妹
+
+| 名称 | id | version | 简介 |
+|------|----|---------|------|
+| 应收核销日清（明妹） | ar-hexiao-daily | 1.1 | 智云取数、判定、写盈亏和流转副本 |
+
+### 斯佳
+
+| 名称 | id | version | 简介 |
+|------|----|---------|------|
+| 金蝶入账（斯佳） | kingdee-posting | 1.1 | 销项 / 付款 / 收款填引入表，人去点引入 |
+| 月度损益表（斯佳） | pl-dept-report | 1.1 | 星辰多账套拼损益表和利润表 |
+| 序时账入金蝶（斯佳） | kingdee-gl-import | 1.1 | 序时账转官方引入表 |
+| 部门费用归集分摊（斯佳） | dept-expense-alloc | 1.1 | 用友按人拆部门费用 |
+| 合并报表（斯佳） | consolidated-statements | 1.1 | 八主体资负利润现金流底稿 |
+| 代扣代缴申报表重命名（斯佳） | withholding-report-rename | 1.1 | 申报 PDF 按公司名+金额改名 |
+
+### 通用
+
+| 名称 | id | version | 简介 |
+|------|----|---------|------|
+| Excel（通用） | xlsx | 1.1 | 读写和整理表格 |
+| Word（通用） | docx | 1.1 | 读写 Word |
+| PPT（通用） | pptx | 1.1 | 读写演示文稿 |
+| PDF（通用） | pdf | 1.1 | 读、拆、合并 PDF |
+
+已下线：`qige-invoice-to-kingdee`（销项已在金蝶入账）、`task-clarifier`、`update-finance-skills`、`env-doctor`。
 
 ## 仓库
 
-| | |
-|--|--|
-| **发布 / 同事拉** | Gitee https://gitee.com/Lee157/finance-skills **main** |
-| 形态 | 一个 monorepo，`skills/<id>/` |
-| 开发交付 | 测绿 → `git push gitee main` |
+Gitee：https://gitee.com/Lee157/finance-skills · 分支 `main`
 
-同事说「更新财务skills」→ 只覆盖白名单，保留本机 `config/`（核销业务规则跟仓库）。
-
-## 开发
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m pytest -q
-```
-
-改 skill 后：本地测绿 → **`git push gitee main`**。默认不再打 zip。
-
-真表、口令、客户明细不要进这个仓库。
+改完测绿后 `git push gitee main`。真表、口令、客户明细不进仓。

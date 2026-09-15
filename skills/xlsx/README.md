@@ -1,4 +1,4 @@
-# xlsx · Excel 表格处理技能
+# Excel（通用）
 
 **甲骨易财务部自研**通用文档技能（研发维护：李明昊，2026-06）。服务于财务同事在 opencode 上的日常 Excel 整理与小表制作，与 receivables-merge 等业务技能同属 `finance-skills` 技能包。
 
@@ -17,7 +17,7 @@ flowchart TD
 
 零散小活才走这里。应收合并、拆分、核销有专属技能。
 
-## 能干什么
+## 简介
 
 - 读写 .xlsx/.xlsm/.csv/.tsv，加列、公式、格式、洗乱表
 - 公式重算：`python3 scripts/recalc.py <文件.xlsx>`（走 LibreOffice）
@@ -38,4 +38,4 @@ xlsx/
 
 ## 维护
 
-研发：李明昊 · 甲骨易财务部 · 改动走 `finance-skills` 仓库 `git push origin main`。同事说「更新财务skills」。不要再打 zip。
+改动：测绿后 `git push gitee main`。不要打 zip。

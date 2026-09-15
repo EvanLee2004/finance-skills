@@ -1,6 +1,6 @@
 ---
 name: consolidated-statements
-version: "1.0"
+version: "1.1"
 description: >-
   按本部字段标准汇总八主体的资产负债表、利润表和现金流量表，生成合并及母公司六张主表。
   当用户说「出合并报表 / 合并报表 / 八主体合并报表 / 跑合并底稿」时用本技能。

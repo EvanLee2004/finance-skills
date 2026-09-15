@@ -5,7 +5,7 @@
 
 | 任务 | 工位 | 状态 | 备注 |
 |------|------|------|------|
-| 琪哥发票入金蝶 `qige-invoice-to-kingdee` | 正式 clone `项目/长期项目/财务部skills/finance-skills` · `main` | 使用中 | 兼容入口；不开 fork |
+| 琪哥发票入金蝶 `qige-invoice-to-kingdee` | — | 已下线 | 2026-09-15 源码夹删除；销项走 `kingdee-posting` |
 | 启动话术 + 更新技能 | 同上正式 clone · `main` | 使用中 | 同树 |
 | 合入李尚核销 | 同上正式 clone · `main` | 使用中 | 已 merge `gitee/agent/ar-hexiao-daily-1-3-0` @ `c3ea05f` |
 | 金蝶入账 `kingdee-posting` | 正式 clone · `main`（已含 018 + 拆腿/点头新建） | 使用中 | 本机已含收款找销售 `82d6a26`；推云后同事才能拉到 |
