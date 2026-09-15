@@ -50,12 +50,16 @@ def _write_month_draft(path: Path, receipt_rows, org=None, with_flow=True, with_
     wb.close()
 
 
-def test_inspect_month_draft_mixed_asks_without_scene(tmp_path):
+def test_inspect_month_draft_mixed_ready_without_scene(tmp_path):
     _write_month_draft(tmp_path / "2026年9月底稿.xlsx", [["2026-09-01", "甲科技有限公司", 10, "", ""]])
     report = inspect_inputs.inspect_dir(tmp_path)
-    assert report["ready"] is False
+    assert report["ready"] is True
     assert report["mixed"] is True
-    assert "销项发票" in (report.get("ask") or "")
+    assert report["scene"] == "全部"
+    assert report["scenes"] == ["销项发票", "收款"]
+    assert report["files"].get("invoice")
+    assert report["files"].get("receipt")
+    assert report.get("ask") == ""
 
 
 def test_inspect_scene_receipt_reads_boc_receipt_not_flow(tmp_path):
@@ -669,14 +673,14 @@ def test_sales_multi_assist_extra_lists_accounts(tmp_path):
         _lookups(
             assist_rows=[
                 {
-                    "period": "202608",
+                    "period": "202607",
                     "customer_code": "1001",
                     "customer_name": "甲科技有限公司",
                     "account": "113103",
                     "ending_debit": "80",
                 },
                 {
-                    "period": "202608",
+                    "period": "202607",
                     "customer_code": "1001",
                     "customer_name": "甲科技有限公司",
                     "account": "113107",

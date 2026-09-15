@@ -557,16 +557,21 @@ def write_detail(path: Path, lines: list[VoucherLine], scene: str) -> Path:
 
 
 def sales_sheet(wb) -> str | None:
-    for name in wb.sheetnames:
-        if name in ("发票", "数电票-专票"):
-            return name
+    aliases = inspect_mod.load_aliases()
+    sales_a = aliases.get("销项发票_列别名") or {}
+    named: list[str] = []
+    headered: list[str] = []
     for name in wb.sheetnames:
         ws = wb[name]
-        _, headers = inspect_mod.find_header_row(ws, None, ["单位名称", "价税合计"])
-        cleaned = inspect_mod._cleaned(headers)
-        if "单位名称" in cleaned and "价税合计" in cleaned:
-            return name
-    return None
+        _, raw = inspect_mod.find_header_row(ws, sales_a, ["单位名称", "价税合计"])
+        headers = inspect_mod._cleaned(raw)
+        if not inspect_mod.is_sales_sheet(name, headers, aliases):
+            continue
+        if str(name) in ("发票", "数电票-专票"):
+            named.append(name)
+        else:
+            headered.append(name)
+    return inspect_mod._pick_named(named, headered)
 
 
 def resolve_sales_party(
@@ -1386,7 +1391,9 @@ def run_dir(
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
         raise SystemExit(report.get("ask") or "材料不齐")
-    scene = str(report["scene"])
+    scene = str(report.get("scene") or "")
+    if scene not in ("销项发票", "付款", "收款"):
+        raise SystemExit("多种表请一次跑 convert.py（不要拆两次，会撞凭证号）")
     rules = load_rules()
     aliases = load_aliases()
     master = Master(master_data or {})
@@ -1445,14 +1452,17 @@ def run_dir(
 def _lookups_for(scene: str, args) -> dict:
     if args.lookups:
         return json.loads(Path(args.lookups).read_text(encoding="utf-8"))
-    if scene == "收款":
-        loaded_zy = zhiyun_api.try_load_lookups()
-        if loaded_zy.get("ok"):
-            return loaded_zy.get("data") or {}
-        reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
-        log(f"智云查找未核验（{reason}）；缺销售的行将待确认，其余仍出表。")
+    if scene != "收款":
+        log("本模块不登录智云。")
         return {}
-    log("本模块不登录智云。")
+    if inspect_mod.receipt_sales_complete(Path(args.input_dir)):
+        log("收款表销售列已齐，不登录智云。")
+        return {}
+    loaded_zy = zhiyun_api.try_load_lookups()
+    if loaded_zy.get("ok"):
+        return loaded_zy.get("data") or {}
+    reason = "本机没有智云账号" if loaded_zy.get("missing_credentials") else loaded_zy.get("error") or "读取失败"
+    log(f"智云查找未核验（{reason}）；缺销售的行将待确认，其余仍出表。")
     return {}
 
 

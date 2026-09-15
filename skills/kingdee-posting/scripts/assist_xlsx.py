@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from datetime import date
@@ -27,7 +26,6 @@ HQ_NAME = "甲骨易（北京）语言科技股份有限公司"
 HQ_SEARCH = "语言科技"
 STATE = Path.home() / ".config" / "finance" / "xingchen.playwright-state.json"
 CACHE_DIR = Path.home() / ".cache" / "finance"
-DOWNLOADS = Path.home() / "Downloads"
 _ASSIST_CACHE: tuple[list, str] | None = None
 
 # 与 技能/金蝶/工作区/20260907_客户核算项目余额表/现网探测.md 同一套过滤。
@@ -39,63 +37,6 @@ EXPORT_FILTERS = {
     "hide_zero_balance": False,
     "show_detail_accounts": True,
 }
-
-
-def workspace_assist_dirs() -> list[Path]:
-    # scripts/ -> kingdee-posting -> skills -> finance-skills -> 财务部skills
-    root = HERE.parents[3]
-    work = root / "技能" / "金蝶" / "工作区"
-    out = []
-    if work.is_dir():
-        for child in sorted(work.iterdir()):
-            if child.is_dir() and "客户核算项目余额表" in child.name:
-                out.append(child)
-        extra = work / "引出"
-        if extra.is_dir():
-            out.append(extra)
-    return out
-
-
-def _is_assist_name(name: str) -> bool:
-    if not name.endswith(".xlsx") or name.startswith("~$"):
-        return False
-    if "结果" in name:
-        return False
-    return "核算项目余额表" in name
-
-
-def _collect(folder: Path) -> list[Path]:
-    if not folder.is_dir():
-        return []
-    return [p for p in folder.glob("*.xlsx") if _is_assist_name(p.name)]
-
-
-def find_assist_xlsx(extra_dirs: list[Path] | None = None) -> Path | None:
-    env = os.environ.get("KINGDEE_ASSIST_XLSX", "").strip()
-    if env:
-        path = Path(env).expanduser()
-        if path.is_file():
-            return path
-    groups: list[list[Path]] = []
-    first: list[Path] = []
-    for raw in extra_dirs or []:
-        first.extend(_collect(Path(raw)))
-    if first:
-        groups.append(first)
-    work_hits: list[Path] = []
-    for folder in workspace_assist_dirs():
-        work_hits.extend(_collect(folder))
-    if work_hits:
-        groups.append(work_hits)
-    dl = _collect(DOWNLOADS)
-    if dl:
-        groups.append(dl)
-    for group in groups:
-        preferred = [p for p in group if "客户" in p.name and "1131" in p.name]
-        pool = preferred or group
-        return max(pool, key=lambda p: p.stat().st_mtime)
-    return None
-
 
 MANUAL_EXPORT_STEPS = (
     "请核对本机 ~/.config/finance/xingchen.local.json（金蝶网页账密，与月度损益表同一份），重跑让脚本从总部星辰引出。"
@@ -422,26 +363,6 @@ def parse_assist_xlsx(path: Path) -> list[lookup_mod.AssistRow]:
         return out
     finally:
         wb.close()
-
-
-def _newest_xlsx(folder: Path, after: float) -> Path | None:
-    newest = None
-    newest_mtime = after
-    if not folder.is_dir():
-        return None
-    for path in folder.glob("*.xlsx"):
-        if not _is_assist_name(path.name) and "核算项目余额表" not in path.name:
-            continue
-        if path.name.startswith("~$"):
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        if mtime > newest_mtime:
-            newest = path
-            newest_mtime = mtime
-    return newest
 
 
 async def _click_text(page, label: str) -> bool:
@@ -796,20 +717,21 @@ async def _export_via_log(page, dest: Path, before: set[str] | None = None) -> b
             break
     if not newest:
         return False
+    tmp = dest.with_name(dest.name + ".part")
     try:
+        if tmp.exists():
+            tmp.unlink()
         async with page.expect_download(timeout=60000) as dl_info:
             await page.get_by_text(newest, exact=True).first.click()
         download = await dl_info.value
-        await download.save_as(str(dest))
-        if dest.is_file() and dest.stat().st_size > 400:
+        await download.save_as(str(tmp))
+        if tmp.is_file() and tmp.stat().st_size > 400:
+            tmp.replace(dest)
             return True
     except Exception:
-        pass
-    found = _newest_xlsx(DOWNLOADS, mark - 1)
-    if found:
-        dest.write_bytes(found.read_bytes())
-        return dest.is_file() and dest.stat().st_size > 400
-    return dest.is_file() and dest.stat().st_size > 400
+        if tmp.exists():
+            tmp.unlink()
+    return False
 
 
 def export_customer_assist_xlsx(dest: Path | None = None) -> dict:

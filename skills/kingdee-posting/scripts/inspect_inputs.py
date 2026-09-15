@@ -93,6 +93,18 @@ def _cleaned(headers) -> list[str]:
     return [str(h).strip() for h in (headers or []) if h is not None and str(h).strip()]
 
 
+def _field_index(headers, aliases: dict, field: str) -> int | None:
+    names = (aliases or {}).get(field) or [field]
+    compact = {"".join(str(n).split()) for n in names}
+    for i, h in enumerate(headers or []):
+        if h is None:
+            continue
+        s = str(h).strip()
+        if s in names or "".join(s.split()) in compact:
+            return i
+    return None
+
+
 def is_sales_sheet(name: str, headers: list[str], aliases: dict | None = None) -> bool:
     title = str(name or "")
     if "组织架构" in title or "流水" in title:
@@ -108,8 +120,6 @@ def is_receipt_sheet(name: str, headers: list[str], aliases: dict | None = None)
     title = str(name or "")
     if "流水" in title:
         return False
-    if "收款" in title and "付款" not in title:
-        return True
     rec_a = (aliases or {}).get("收款_列别名") or {}
     cleaned = _cleaned(headers)
     if any("价税合计" in h for h in cleaned):
@@ -261,6 +271,52 @@ def classify_xlsx(path: Path, aliases: dict) -> str | None:
     return kinds[0] if kinds else None
 
 
+def receipt_sales_complete(root: Path, aliases: dict | None = None) -> bool:
+    """每一行有客户的收款都填了销售才 True；缺列或有空值则 False（这时才登智云）。"""
+    root = Path(root)
+    if not root.is_dir():
+        return False
+    aliases = aliases or load_aliases()
+    rec_a = aliases.get("收款_列别名") or {}
+    saw = False
+    for p in sorted(root.iterdir()):
+        if p.suffix.lower() not in {".xlsx", ".xlsm"} or p.name.startswith("~$"):
+            continue
+        if "收款" not in classify_xlsx_kinds(p, aliases):
+            continue
+        try:
+            wb = load_workbook(p, data_only=False)
+        except Exception:
+            return False
+        try:
+            sheet = find_receipt_sheet(wb, aliases)
+            if not sheet:
+                return False
+            ws = wb[sheet]
+            header_r, raw = find_header_row(ws, rec_a, ["客户名称", "借方（增加）"])
+            cust_i = _field_index(raw, rec_a, "客户名称")
+            sales_i = _field_index(raw, rec_a, "销售")
+            if cust_i is None or sales_i is None:
+                return False
+            n = 0
+            for row in ws.iter_rows(min_row=header_r + 1, max_row=ws.max_row or header_r, values_only=True):
+                if not row or cust_i >= len(row):
+                    continue
+                cust = str(row[cust_i] or "").strip()
+                if not cust:
+                    continue
+                n += 1
+                sales = row[sales_i] if sales_i < len(row) else None
+                if not str(sales or "").strip():
+                    return False
+            if n == 0:
+                return False
+            saw = True
+        finally:
+            wb.close()
+    return saw
+
+
 def payment_folders(root: Path, ledger: Path | None) -> list[Path]:
     skip = {ledger.resolve()} if ledger else set()
     out = []
@@ -292,59 +348,70 @@ def inspect_dir(input_dir: Path, scene: str | None = None) -> dict:
                     found[kind].append(str(p))
     hits = [k for k, v in found.items() if v]
     mixed = len(hits) > 1
-    if scene:
-        chosen = scene
-    elif len(hits) == 1:
-        chosen = hits[0]
-    else:
-        chosen = None
-    missing = []
+    targets = [scene] if scene else hits
+    missing: list[str] = []
     files: dict = {}
-    ask = ""
-    if mixed and not scene:
-        ask = "这个文件夹里同时有不止一种表。请说要跑「销项发票入金蝶」「付款入金蝶」还是「收款入金蝶」。"
+    asks: list[str] = []
+    ok: list[str] = []
+    if not targets:
         return {
             "ready": False,
             "scene": None,
-            "mixed": True,
-            "missing": ["指定模块"],
-            "files": {k: v for k, v in found.items() if v},
-            "ask": ask,
+            "scenes": [],
+            "mixed": False,
+            "missing": ["能认出来的业务表"],
+            "files": {},
+            "ask": "这个文件夹里我还没认出销项发票、付款或收款表。请放好对应 Excel，或直接说要跑哪一句。",
         }
-    if chosen == "销项发票":
-        if not found["销项发票"]:
-            missing.append("发票簿（要有单位名称、价税合计、申请人）")
-            ask = "还缺发票簿。把表放进这个文件夹即可，不用改文件名，也不用先填科目。"
+    for chosen in targets:
+        if chosen == "销项发票":
+            if not found["销项发票"]:
+                missing.append("发票簿（要有单位名称、价税合计、申请人）")
+                asks.append("还缺发票簿。把表放进这个文件夹即可，不用改文件名，也不用先填科目。")
+            else:
+                files["invoice"] = found["销项发票"][0]
+                ok.append("销项发票")
+        elif chosen == "付款":
+            pay_missing: list[str] = []
+            if not found["付款"]:
+                pay_missing.append("付款三列表（供应商 / 应付金额本币 / 开户名）")
+            ledger = Path(found["付款"][0]) if found["付款"] else None
+            folders = payment_folders(root, ledger)
+            files["ledger"] = str(ledger) if ledger else None
+            files["invoice_dirs"] = [str(p) for p in folders]
+            if not folders:
+                pay_missing.append("各家发票夹（夹里要有 PDF）")
+            if pay_missing:
+                missing.extend(pay_missing)
+                asks.append("付款还缺：" + "；".join(pay_missing) + "。台账放外面，一家一个夹，夹里放发票 PDF。")
+            else:
+                ok.append("付款")
+        elif chosen == "收款":
+            if not found["收款"]:
+                missing.append("收款表（日期 / 客户名称 / 借方（增加）；中行收款 sheet 即可）")
+                asks.append("还缺收款表。把月底稿放进这个文件夹即可，技能读「中行收款」。部门用组织架构，不必另填部门编码列。")
+            else:
+                files["receipt"] = found["收款"][0]
+                ok.append("收款")
         else:
-            files["invoice"] = found["销项发票"][0]
-    elif chosen == "付款":
-        if not found["付款"]:
-            missing.append("付款三列表（供应商 / 应付金额本币 / 开户名）")
-        ledger = Path(found["付款"][0]) if found["付款"] else None
-        folders = payment_folders(root, ledger)
-        files["ledger"] = str(ledger) if ledger else None
-        files["invoice_dirs"] = [str(p) for p in folders]
-        if not folders:
-            missing.append("各家发票夹（夹里要有 PDF）")
-        if missing:
-            ask = "付款还缺：" + "；".join(missing) + "。台账放外面，一家一个夹，夹里放发票 PDF。"
-    elif chosen == "收款":
-        if not found["收款"]:
-            missing.append("收款表（日期 / 客户名称 / 借方（增加）；中行收款 sheet 即可）")
-            ask = "还缺收款表。把月底稿放进这个文件夹即可，技能读「中行收款」。部门用组织架构，不必另填部门编码列。"
-        else:
-            files["receipt"] = found["收款"][0]
+            missing.append("能认出来的业务表")
+            asks.append("这个文件夹里我还没认出销项发票、付款或收款表。请放好对应 Excel，或直接说要跑哪一句。")
+    if scene:
+        ready = not missing and bool(ok)
+        scene_out = scene
+        scenes_out = [scene]
     else:
-        missing.append("能认出来的业务表")
-        ask = "这个文件夹里我还没认出销项发票、付款或收款表。请放好对应 Excel，或直接说要跑哪一句。"
-    ready = not missing and chosen is not None
+        ready = bool(ok)
+        scene_out = ok[0] if len(ok) == 1 else ("全部" if ok else None)
+        scenes_out = list(ok)
     return {
         "ready": ready,
-        "scene": chosen,
+        "scene": scene_out,
+        "scenes": scenes_out,
         "mixed": mixed,
         "missing": missing,
         "files": files,
-        "ask": ask if not ready else "",
+        "ask": " ".join(asks) if not ready else "",
     }
 
 

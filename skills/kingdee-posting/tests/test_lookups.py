@@ -439,6 +439,26 @@ def test_pick_assist_uses_prev_completed_month_not_future():
     assert lookups.prev_completed_month("2026-09-07") == "202608"
 
 
+def test_select_period_single_current_month_does_not_bypass():
+    rows = _assist(
+        {"period": "202609", "customer_code": "1", "name": "甲", "account": "113103", "ending_debit": "9"},
+    )
+    assert lookups.select_period_rows(rows, "2026-09-07") == []
+    ar, _rev, why = lookups.pick_assist_account("1", "2026-09-07", rows)
+    assert ar == ""
+    assert why
+
+
+def test_select_period_single_prior_month_still_used():
+    rows = _assist(
+        {"period": "202608", "customer_code": "1", "name": "甲", "account": "113103", "ending_debit": "1"},
+    )
+    got = lookups.select_period_rows(rows, "2026-09-07")
+    assert [r.period for r in got] == ["202608"]
+    ar, rev, why = lookups.pick_assist_account("1", "2026-09-07", rows)
+    assert (ar, rev, why) == ("113103", "510103", "")
+
+
 # ---- 余额表引出：同事机器没有明昊 Chrome 会话，要能走账密登录 ----
 
 assist_xlsx = _load("kingdee_posting_assist_unit", SCRIPTS / "assist_xlsx.py")
@@ -469,6 +489,14 @@ def test_assist_export_translates_login_exit_codes(monkeypatch, tmp_path):
     got = assist_xlsx.export_customer_assist_xlsx(tmp_path / "x.xlsx")
     assert got["ok"] is False
     assert "密码" in got["error"] and "bad_password" not in got["error"]
+
+
+def test_assist_source_does_not_scan_local_excel():
+    src = Path(assist_xlsx.__file__).read_text(encoding="utf-8")
+    assert "def find_assist_xlsx" not in src
+    assert "workspace_assist_dirs" not in src
+    assert "KINGDEE_ASSIST_XLSX" not in src
+    assert "DOWNLOADS" not in src
 
 
 def test_ensure_assist_xlsx_does_not_pick_folder_excel(monkeypatch, tmp_path):

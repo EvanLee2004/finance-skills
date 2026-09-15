@@ -246,12 +246,72 @@ def test_inspect_empty(tmp_path):
     assert inspect_inputs.main(["--input-dir", str(tmp_path)]) == 2
 
 
-def test_inspect_mixed_asks(tmp_path):
+def test_inspect_mixed_ready_without_scene(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()])
     _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲", 10, "于占国", "15", "113101"]])
     report = inspect_inputs.inspect_dir(tmp_path)
-    assert report["ready"] is False
+    assert report["ready"] is True
     assert report["mixed"] is True
+    assert report["scene"] == "全部"
+    assert "invoice" in report["files"]
+    assert "receipt" in report["files"]
+    assert inspect_inputs.main(["--input-dir", str(tmp_path)]) == 0
+
+
+def test_sales_sheet_skips_cover_named_invoice(tmp_path):
+    wb = Workbook()
+    cover = wb.active
+    cover.title = "发票"
+    cover.append(["发票封面"])
+    cover.append(["本月开票汇总", "见开票页"])
+    data = wb.create_sheet("开票")
+    data.append(["日期", "发票类型", "发票号", "单位名称", "价税合计", "金额", "税额", "申请人"])
+    data.append(_ok_sales())
+    org = wb.create_sheet("组织架构")
+    org.append(["姓名", "部门编码"])
+    org.append(["于占国", "15"])
+    wb.save(tmp_path / "记账.xlsx")
+    wb.close()
+    result = _run(tmp_path, "销项发票")
+    assert result["sheet"] == "开票"
+    assert result["bookable_count"] == 1
+
+
+def test_receipt_title_alone_is_not_receipt_sheet():
+    aliases = inspect_inputs.load_aliases()
+    assert inspect_inputs.is_receipt_sheet("收款说明", ["说明", "备注"], aliases) is False
+    assert inspect_inputs.is_receipt_sheet("中行收款", ["日期", "客户名称", "借方（增加）"], aliases) is True
+
+
+def test_lookups_for_skips_zhiyun_when_receipt_sales_filled(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "于占国", "15", "113101"]])
+    monkeypatch.setattr(
+        convert.zhiyun_api,
+        "try_load_lookups",
+        lambda: (_ for _ in ()).throw(AssertionError("销售列齐不应访问智云")),
+    )
+    args = SimpleNamespace(lookups=None, input_dir=str(tmp_path))
+    assert convert._lookups_for("收款", args) == {}
+    assert inspect_inputs.receipt_sales_complete(tmp_path) is True
+
+
+def test_lookups_for_hits_zhiyun_when_sales_blank(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "", "15", "113101"]])
+    called = {"n": 0}
+
+    def fake():
+        called["n"] += 1
+        return {"ok": False, "missing_credentials": True}
+
+    monkeypatch.setattr(convert.zhiyun_api, "try_load_lookups", fake)
+    args = SimpleNamespace(lookups=None, input_dir=str(tmp_path))
+    convert._lookups_for("收款", args)
+    assert called["n"] == 1
+    assert inspect_inputs.receipt_sales_complete(tmp_path) is False
 
 
 def test_inspect_payment_missing_pdf(tmp_path):

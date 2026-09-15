@@ -155,8 +155,6 @@ def select_period_rows(rows: list[AssistRow], invoice_day: str) -> list[AssistRo
     if not rows:
         return []
     periods = sorted({r.period for r in rows if r.period})
-    if len(periods) <= 1:
-        return list(rows)
     target = prev_completed_month(invoice_day)
     if not target:
         return []
