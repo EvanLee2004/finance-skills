@@ -1,5 +1,6 @@
 ---
 name: pptx
+version: "1.0"
 description: >-
   创建、编辑、解析 PPT 演示文稿（.pptx）：做幻灯片、改模板、抽正文、合并拆分 deck 等。
   当用户说「做 PPT / 写幻灯片 / 改这份演示文稿 / presentation / deck」或涉及 .pptx 时，主动使用本技能。

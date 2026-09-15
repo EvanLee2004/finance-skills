@@ -22,6 +22,7 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+import settlement_status  # noqa: E402
 import workbook_finalize  # noqa: E402
 
 HEADERS = [
@@ -144,7 +145,9 @@ def revisit_condition(code: str) -> str:
         "E8": "人工指定这个 SO 记在盈亏表的哪一行",
         "E9": "与销售核对预收余额差异后",
         "E_FEE": "旧手续费挂账码已废弃；用当前版本重新取数并按逐 SO 本次核销金额重判",
-        "E5": "尾差阈值拍板后，或人工确认可忽略",
+        "E5": "按本条原因核对未回满金额、逐 SO/SOD 分配依据或历史回款；补齐依据后重新取数判定，不直接忽略差额",
+        "E_SOD_HISTORY_MISMATCH": "核对本条列出的 SOD、历史回款归属及缺失业务行，修正后重新判定",
+        "E_SETTLED_CURRENT_EVENT_UNCOVERED": "核对目标 SOD 的本批金额、日期和方式与历史记录；整 SO 全部业务行结账后可按整单状态跳过",
     }.get(code, "条件具备后（人工判断）")
 
 
@@ -215,14 +218,26 @@ def merge_from_classify(rows: List[dict], result: dict, today: str) -> List[dict
             }
     # 今日 auto 命中同一案例 → 可补做（按 案例ID 精确匹配，不按 AR 粗放匹配）
     auto_cases = {
-        (i.get("case_id") or f"{(i.get('ar') or '-')}|{(i.get('so') or '-')}")
+        (i.get("case_id") or f"{(i.get('ar') or '-')}|{(i.get('so') or '-')}"): i
         for i in (result.get("auto") or [])
     }
     for cid, rec in by_case.items():
         if rec.get("状态") == "已完成":
             continue
         if cid in auto_cases:
-            rec["状态"] = "可补做"
+            item = auto_cases[cid]
+            if item.get("code") == settlement_status.SO_ALREADY_SETTLED:
+                delivery_date = common.norm_date(item.get("delivery_date"))
+                if delivery_date is not None and item.get("ledger_year") == delivery_date.year:
+                    rec["项目交付日期"] = delivery_date.isoformat()
+                    rec["交付年度"] = delivery_date.year
+                    # 仅本轮有效来源解除旧 E 码的保护；不保存为下一轮的长期豁免。
+                    rec["_settlement_source_rechecked"] = True
+                rec["复查条件"] = "今日判定提示整 SO 已结账；须用当前对应年度盈亏表复核全部业务行后才能标记完成"
+            else:
+                rec["状态"] = "可补做"
+                rec["原因"] = item.get("reason") or rec.get("原因") or ""
+                rec["复查条件"] = "今日判定可处理，仍须通过写前校验"
     return list(by_case.values())
 
 def rescan(rows: List[dict], result: Optional[dict], today: str) -> List[dict]:
@@ -291,15 +306,12 @@ def reclassify_against_ledger(rows: List[dict], ledger, today: str) -> Dict[str,
         stat["跳过"] = len(rows)
         return stat
     for r in rows:
-        if r.get("状态") in ("已完成", "可补做"):
+        if r.get("状态") == "已完成":
             stat["跳过"] += 1
             continue
         code = (r.get("E码") or "").strip()
         so = (r.get("SO") or "").strip()
-        if code in NEEDS_FRESH_EXPORT or not so:
-            stat["本地判不动"] += 1
-            continue
-        if code and code not in LOCAL_RECHECKABLE:
+        if not so:
             stat["本地判不动"] += 1
             continue
         target = ledger
@@ -311,6 +323,23 @@ def reclassify_against_ledger(rows: List[dict], ledger, today: str) -> Dict[str,
             target = ledger.get(int(year))
         if target is None:
             stat["跳过"] += 1
+            continue
+        # 父 AR 异常和来源身份/年度问题不能由本地订单结账状态消除。
+        protected_codes = {"E_PARENT_WRITEOFF_MISMATCH", "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED", "E7", "E_DELIVERY_DATE_MISSING", "E_DELIVERY_DATE_CONFLICT"}
+        settlement = target.so_settlement(so)
+        source_rechecked = bool(r.pop("_settlement_source_rechecked", False))
+        if (code not in protected_codes or source_rechecked) and settlement["all_settled"]:
+            r["状态"] = "已完成"
+            r["原因"] = settlement["reason"]
+            r["复查条件"] = "整单已结账，无需补写；原 E 码保留用于追溯挂起原因"
+            stat["跳过"] += 1
+            continue
+        if r.get("状态") == "可补做":
+            stat["跳过"] += 1
+            continue
+        if code in NEEDS_FRESH_EXPORT or (code and code not in LOCAL_RECHECKABLE):
+            r["复查条件"] = revisit_condition(code)
+            stat["本地判不动"] += 1
             continue
         hits = list(getattr(target, "so_index", {}).get(so, []) or [])
         if not hits:

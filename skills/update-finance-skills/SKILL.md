@@ -1,5 +1,6 @@
 ---
 name: update-finance-skills
+version: "1.0"
 description: >-
   从 Gitee 更新或安装财务部官方技能包。当用户说「更新 / 更新财务skills / 更新财务技能 /
   更新财务技能包 / 更新技能包 / 升级技能 / 同步技能 / 拉最新 / 安装财务skills /

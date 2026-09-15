@@ -2,7 +2,7 @@
 """
 应收 all 按销售人员拆分 · split.py （财务部 Agent 技能）
 ================================================================
-输入：一张"应收all"（receivables-merge 的产物，含销售人员等 17 列）。
+输入：一张"应收all"（应收账款合并与销售拆分的合并结果，含销售人员等 17 列）。
 输出：按【销售人员】拆成一人一份带下拉框的 Excel（亮晶姐模板：前8列蓝、后9列黄、下拉、冻结首行）。
 口径（项目五已验收，会变的放 config/拆分规则.md）：
   - 坏账桶（如 高美杰1）整行忽略、不分给任何人；
@@ -72,7 +72,12 @@ COL_WIDTHS = {"A": 7.8, "B": 12.2, "C": 20.1, "D": 14, "E": 30, "F": 15.8,
               "M": 21.0, "N": 37.1, "O": 21.0, "P": 13.1, "Q": 12}
 HEADER_KEYS = ["年度", "销售人员", "客户名称", "新智云单号", "文件名", "应收金额",
                "交付月份", "账龄", "结算阶段", "回款日期", "销售解释", "有无合同",
-               "合同分类", "PO", "客户确认", "客户结算周期", "是否按月"]
+               "合同分类", "PO单", "客户正式确认", "客户结算周期", "是否按月"]
+
+HEADER_ALIASES = {
+    "PO单": ("框架合同PO记录", "PO单"),
+    "客户正式确认": ("客户确认", "客户正式确认"),
+}
 
 THIN = Border(*[Side(style="thin", color="999999")] * 4)
 HDR_FONT = Font(name="等线", size=10.5, bold=True)
@@ -84,6 +89,10 @@ BODY_FONT = Font(name="等线", size=10.5)
 
 def log(m): print(m, flush=True)
 def norm(s): return re.sub(r"\s+", "", str(s or ""))
+def matches_header(key, header):
+    return any(alias in header for alias in HEADER_ALIASES.get(key, (key,)))
+
+
 def safe_name(s): return re.sub(r'[\\/:*?"<>|]', "_", str(s)).strip()
 
 
@@ -176,7 +185,7 @@ def find_data_sheet(wb):
             continue
         ws = wb[name]
         hdr = [norm(ws.cell(1, i).value) for i in range(1, 18)]
-        if sum(1 for k in HEADER_KEYS if any(k in h for h in hdr)) >= 12:
+        if sum(1 for k in HEADER_KEYS if any(matches_header(k, h) for h in hdr)) >= 12:
             cands.append((ws.max_row, name))
             if re.fullmatch(r"\d{4}[.年]\d{1,2}[.月]\d{1,2}日?", name.strip()):
                 dated.append((ws.max_row, name))
@@ -193,7 +202,10 @@ def map_columns(ws):
     actual = {c: norm(ws.cell(1, c).value) for c in range(1, ws.max_column + 1) if norm(ws.cell(1, c).value)}
     mapping = []
     for key in HEADER_KEYS:
-        mapping.append(next((c for c, h in actual.items() if key in h and c not in mapping), None))
+        aliases = HEADER_ALIASES.get(key, (key,))
+        exact = next((c for c, h in actual.items() if h in aliases and c not in mapping), None)
+        mapping.append(exact if exact is not None else next(
+            (c for c, h in actual.items() if matches_header(key, h) and c not in mapping), None))
     return mapping
 
 

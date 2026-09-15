@@ -135,8 +135,8 @@ def resolve_batch_date(s: Any, today: Optional[dt.date] = None) -> Optional[dt.d
 
 def prev_workday(d: Optional[dt.date] = None) -> dt.date:
     """
-    上一个工作日。仅在用户明确说“上个工作日”时使用；普通“昨天”可以是周末。
-    真正防漏天靠 batch_ledger 的空档检测。
+    上一个工作日。周一跑时"昨天"是周日——销售周末不核销，取回来必是空批。
+    注意：这**只是默认值的猜测**，不是漏天的兜底；真正防漏天靠 batch_ledger 的空档检测。
     """
     d = d or dt.date.today()
     cur = d - dt.timedelta(days=1)
@@ -278,10 +278,11 @@ def discover_year_ledgers(
         path = Path(primary).resolve()
         if not path.is_file():
             raise ValueError(f"找不到盈亏表：{path}")
-        year = ledger_year_from_name(path) or current
-        if year in explicit and explicit[year] != path:
-            raise ValueError(f"{year} 年指定了两份不同盈亏表，无法确定写哪一份")
-        explicit[year] = path
+        if path not in explicit.values():
+            year = ledger_year_from_name(path) or current
+            if year in explicit and explicit[year] != path:
+                raise ValueError(f"{year} 年指定了两份不同盈亏表，无法确定写哪一份")
+            explicit[year] = path
 
     base = Path(workspace) / "02_我的表副本"
     discovered: Dict[int, List[Path]] = {}
@@ -293,6 +294,10 @@ def discover_year_ledgers(
                 or "便携版" in path.stem
                 or path.suffix.lower() not in {".xlsx", ".xlsm"}
             ):
+                continue
+            # An explicitly assigned file already has its authoritative year;
+            # never rediscover that same path under today's fallback year.
+            if path.resolve() in explicit.values():
                 continue
             year = ledger_year_from_name(path) or current
             if year not in explicit:

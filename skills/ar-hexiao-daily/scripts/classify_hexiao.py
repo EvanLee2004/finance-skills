@@ -44,8 +44,12 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+from execution_lineage import payment_source_lineage  # noqa: E402
 import amount_policy  # noqa: E402
+import settlement_status  # noqa: E402
+import fallback_sequence as FS
 import fallback_allocation_ledger as FAL  # noqa: E402
+import baseline_receipts as BR  # noqa: E402
 import writeoff_duplicate_audit as WDA  # noqa: E402
 
 TOL = float(amount_policy.TECHNICAL_EPSILON)  # 技术金额比较容差
@@ -59,6 +63,8 @@ HUIKUAN_NAMES = {
     "arrival_date": ["到账日期", "回款日期"],
     "amount_orig": ["到账金额/原币", "到账金额原币"],
     "amount_local": ["到账金额/本币", "到账金额本币"],
+    "total_amount_orig": ["总到账金额/原币", "总到账金额原币", "总到账金额"],
+    "total_amount_local": ["总到账金额/本币", "总到账金额本币"],
     "fee": ["手续费/原币", "手续费"],
     "fee_local": ["手续费/本币", "手续费本币"],
     "tax": ["税费/原币", "税费"],
@@ -81,9 +87,27 @@ class CoverageError(Exception):
 
 
 def _prepare_parent_totals(p: dict) -> dict:
-    """Compute auditable gross receipt = net arrival + explicit fee/tax components."""
+    """Prefer Zhiyun's total receipt; otherwise compute arrival plus charges."""
     amount_orig = common.to_number(p.get("amount_orig"))
     amount_local = common.to_number(p.get("amount_local"))
+    existing_total_source = p.get("_parent_total_source")
+    original_marker = p.get("_parent_total_orig_explicit")
+    local_marker = p.get("_parent_total_local_explicit")
+    explicit_total_orig = (
+        None
+        if existing_total_source == "computed_amount_plus_fee_tax" or original_marker is False
+        else common.to_number(p.get("total_amount_orig"))
+    )
+    explicit_total_local = (
+        None
+        if existing_total_source == "computed_amount_plus_fee_tax" or local_marker is False
+        else common.to_number(p.get("total_amount_local"))
+    )
+    if original_marker is None:
+        p["_parent_total_orig_explicit"] = explicit_total_orig is not None
+    if local_marker is None:
+        p["_parent_total_local_explicit"] = explicit_total_local is not None
+    p.pop("_charge_error", None)
     components = []
     for name, local_name in (
         ("fee", "fee_local"),
@@ -118,14 +142,48 @@ def _prepare_parent_totals(p: dict) -> dict:
     charge_local = round(sum(local_values), 2) if len(local_values) == len(components) else None
     p["charge_amount_orig"] = charge_orig
     p["charge_amount_local"] = charge_local
-    p["total_amount_orig"] = (
-        round(float(amount_orig) + charge_orig, 2) if amount_orig is not None else None
-    )
-    p["total_amount_local"] = (
-        round(float(amount_local) + float(charge_local), 2)
-        if amount_local is not None and charge_local is not None
-        else None
-    )
+    has_explicit_total = explicit_total_orig is not None or explicit_total_local is not None
+    if has_explicit_total:
+        total_orig = explicit_total_orig
+        total_local = explicit_total_local
+        if total_orig is None and total_local is not None:
+            if common.is_cny(p.get("currency") or ""):
+                total_orig = total_local
+            elif (
+                amount_orig is not None
+                and amount_local is not None
+                and abs(float(amount_local)) > TOL
+            ):
+                total_orig = round(
+                    float(total_local) * float(amount_orig) / float(amount_local), 2
+                )
+        if total_local is None and total_orig is not None:
+            if common.is_cny(p.get("currency") or ""):
+                total_local = total_orig
+            elif (
+                amount_orig is not None
+                and amount_local is not None
+                and abs(float(amount_orig)) > TOL
+            ):
+                total_local = round(
+                    float(total_orig) * float(amount_local) / float(amount_orig), 2
+                )
+        total_source = "zhiyun_total_received"
+    else:
+        total_orig = (
+            round(float(amount_orig) + charge_orig, 2)
+            if amount_orig is not None
+            else None
+        )
+        total_local = (
+            round(float(amount_local) + float(charge_local), 2)
+            if amount_local is not None and charge_local is not None
+            else None
+        )
+        total_source = "computed_amount_plus_fee_tax"
+    p["total_amount_orig"] = total_orig
+    p["total_amount_local"] = total_local
+    p["_parent_total_source"] = total_source
     return p
 
 
@@ -133,12 +191,9 @@ def _prepare_parent_totals(p: dict) -> dict:
 # 一、读取 01_智云导出 的四张表 → payments
 # ══════════════════════════════════════════════════════════════
 def _sheet_rows(path: Path) -> Tuple[List[str], List[list]]:
-    import openpyxl
+    from workbook_read_cache import read_rows
 
-    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    rows = read_rows(path)
     if not rows:
         return [], []
     headers = [str(c).strip() if c is not None else "" for c in rows[0]]
@@ -433,7 +488,7 @@ def reconcile_writeoff_details(
     for p in payments:
         p_sos = {
             str(item.get("so") or "").strip()
-            for item in raw_by_ar.get(p["ar"], [])
+            for item in raw_by_ar.get(p["ar"], []) + [row for row in logical_rows if row["ar"] == p["ar"]]
             if str(item.get("so") or "").strip()
         }
         inherited = sorted({ar for so in p_sos for ar in unresolved_sos.get(so, [])})
@@ -560,6 +615,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
         c = _need(h, "回款记录", ["AR", "核销日期"], aliases)
         for k in [
             "到账日期", "到账金额原币", "到账金额本币",
+            "总到账金额原币", "总到账金额本币",
             "手续费", "手续费本币", "税费", "税费本币", "其他费用", "其他费用本币",
             "原币币种", "回款类型", "核销状态", "开票客户",
             "销售名称",
@@ -580,6 +636,12 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                 "arrival_date": common.norm_date(_get(vals, c.get("到账日期"))),
                 "amount_orig": common.to_number(_get(vals, c.get("到账金额原币"))),
                 "amount_local": common.to_number(_get(vals, c.get("到账金额本币"))),
+                "total_amount_orig": common.to_number(
+                    _get(vals, c.get("总到账金额原币"))
+                ),
+                "total_amount_local": common.to_number(
+                    _get(vals, c.get("总到账金额本币"))
+                ),
                 "fee": common.to_number(_get(vals, c.get("手续费"))) or 0.0,
                 "fee_local": common.to_number(_get(vals, c.get("手续费本币"))),
                 "tax": common.to_number(_get(vals, c.get("税费"))) or 0.0,
@@ -625,6 +687,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
         c = _need(h, "订单交付", ["AR", "SO", "交付额原币"], aliases)
         i_written = _col(h, "订单交付", "订单已核销金额", aliases)
         i_written_local = _col(h, "订单交付", "订单已核销金额本币", aliases)
+        i_deliver_local = _col(h, "订单交付", "交付额本币", aliases)
         i_rate = _col(h, "订单交付", "汇率", aliases)
         i_cur = _col(h, "订单交付", "币种", aliases)
         i_name = _col(h, "订单交付", "订单名称", aliases)
@@ -637,6 +700,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                 continue
             key = (ar, so)
             amt = common.to_number(_get(vals, c["交付额原币"]))
+            deliver_local = common.to_number(_get(vals, i_deliver_local))
             written_raw = _get(vals, i_written)
             written_local_raw = _get(vals, i_written_local)
             written_present = written_raw not in (None, "")
@@ -644,7 +708,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
             old = order_map.get(key)
             if old is None:
                 old = {
-                    "so": so, "deliver": None,
+                    "so": so, "deliver": None, "deliver_local": None,
                     "written_off": None, "written_off_local": None,
                     "written_off_present": False,
                     "written_off_local_present": False,
@@ -656,6 +720,8 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                 order_map[key] = old
             if amt is not None:
                 old["deliver"] = amt
+            if deliver_local is not None:
+                old["deliver_local"] = deliver_local
             if written_present:
                 old["written_off"] = common.to_number(written_raw)
                 old["written_off_present"] = True
@@ -705,7 +771,7 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
             continue
         if (item["ar"], item["so"]) not in order_map:
             order_map[(item["ar"], item["so"])] = {
-                "so": item["so"], "deliver": None, "rate": None,
+                "so": item["so"], "deliver": None, "deliver_local": None, "rate": None,
                 "written_off": None, "written_off_local": None,
                 "written_off_present": False,
                 "written_off_local_present": False,
@@ -714,6 +780,18 @@ def load_exports(workspace: Path, target_date: Optional[dt.date] = None) -> List
                 "currency": "", "name": "", "source": item.get("source") or "",
                 "snapshot_date": item.get("snapshot_date"),
             }
+    by_so_dates = {}
+    for order in order_map.values():
+        by_so_dates.setdefault(order["so"], []).append(order)
+    for related in by_so_dates.values():
+        dates = {order["delivery_date"] for order in related if order.get("delivery_date")}
+        conflict = len(dates) > 1 or any(any(word in order.get("delivery_date_issue", "") for word in ("冲突", "格式无效")) for order in related)
+        for order in related:
+            if conflict:
+                order.update(delivery_date=None, delivery_date_issue="项目交付日期冲突：同 SO 来源记录日期不一致")
+            elif len(dates) == 1 and order.get("delivery_date") is None:
+                order.update(delivery_date=next(iter(dates)), delivery_date_issue="",
+                             delivery_date_basis="同 SO 唯一一致的项目交付日期")
     for (ar, _so), order in order_map.items():
         by_ar[ar]["orders"].append(order)
 
@@ -929,6 +1007,9 @@ def partial_split_guidance(
             f"实际未收 = 最新交付 − 累计实际回款 = {remaining:.2f}。"
         )
 
+    if remaining <= TOL:
+        return balance + " 请核对历史回款、交付金额和 SOD 归属；当前不提供新增未收行指令。"
+
     if initial_receivable is None:
         baseline = (
             "盈亏表原始应收基线不能被最新交付额覆盖：先汇总这张单拆行前的原始应收，"
@@ -981,16 +1062,22 @@ def _order_delivery_local(
     amount_orig: Optional[float], p: dict, rates: Dict[str, float], order: Optional[dict],
     *, explicit_local: Optional[float] = None, explicit_orig: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[str]]:
-    """盈亏表金额统一为人民币：订单/SOD交付原币必须按订单币种和汇率换算。"""
+    """订单交付本币只认智云明确本币值或该订单自己的汇率。"""
     order = order or {}
-    money_p = dict(p)
-    money_p["currency"] = order.get("currency") or p.get("currency") or ""
-    return _localize_amount(
-        amount_orig, money_p, rates,
-        explicit_local=explicit_local,
-        explicit_orig=explicit_orig,
-        row_rate=order.get("rate"),
-    )
+    amount = common.to_number(amount_orig)
+    if amount is None:
+        return None, "E7"
+    currency = order.get("currency") or p.get("currency") or ""
+    if common.is_cny(currency):
+        return round(float(amount), 2), None
+    local = common.to_number(explicit_local)
+    original = common.to_number(explicit_orig)
+    if local is not None and original is not None and abs(float(original)) > TOL:
+        return round(float(amount) * float(local) / float(original), 2), None
+    rate = common.to_number(order.get("rate"))
+    if rate is not None and float(rate) > 0:
+        return round(float(amount) * float(rate), 2), None
+    return None, "E6"
 
 
 def _currency_key(value: Any) -> str:
@@ -1162,6 +1249,23 @@ def _allocate_parent_by_delivery(
     )
     detail_hist_orig = p.get("cumulative_writeoffs") or {}
     detail_hist_local = p.get("cumulative_writeoffs_local") or {}
+    # Only a new allocation needs this guard; an existing parent was handled above.
+    # Check the whole parent before skipping settled orders or assigning any money.
+    settled_sos = set(p.get("_ledger_settled_sos") or [])
+    if not set(grouped).issubset(settled_sos):
+        for so in grouped:
+            received = float((p.get("_ledger_received_local_by_so") or {}).get(so) or 0.0)
+            known = round(float(detail_hist_local.get(so) or 0.0) + float(fallback_hist_local.get(so) or 0.0), 2)
+            error = FAL.unexplained_receipts(str(p.get("ar") or ""), so, received, known)
+            if error:
+                p["_parent_allocation_error_code"] = "E_PARENT_ALLOCATION_HISTORY_MISSING"
+                return {}, {}, {}, error
+    detail_hist_orig = dict(detail_hist_orig)
+    detail_hist_local = dict(detail_hist_local)
+    for so, amount in (p.get("_batch_reserved_orig") or {}).items():
+        detail_hist_orig[so] = round(float(detail_hist_orig.get(so) or 0) + amount, 2)
+    for so, amount in (p.get("_batch_reserved_local") or {}).items():
+        detail_hist_local[so] = round(float(detail_hist_local.get(so) or 0) + amount, 2)
     allocations_orig: Dict[str, float] = {}
     allocations_local: Dict[str, float] = {}
     cumulative_orig_by_so: Dict[str, float] = {}
@@ -1301,6 +1405,7 @@ def _allocate_parent_by_delivery(
         "already_settled_sos": already_settled_sos,
         "unallocated_parent_amount": round(max(remaining, 0.0), 2),
         "rule": "delivery_amount_ascending_outstanding_waterfall",
+        "processing_order": {"rule": FS.RULE, "arrival_date": str(common.norm_date(p.get("arrival_date")) or ""), "ar": p.get("ar")},
     }
     return allocations_orig, allocations_local, audit, None
 
@@ -1318,9 +1423,69 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
         for order in orders if str(order.get("so") or "").strip()
     }
     duplicate_audit = p.get("duplicate_writeoff_audit") or {}
+    source_sos = {"", *sod_lines, *(p.get("writeoffs") or {})}
+    source_sos.update(str(order.get("so") or "").strip() for order in orders)
+    source_lineages = {so: payment_source_lineage(p, so) for so in source_sos}
+    so_receipt_sources: Dict[str, dict] = {}
 
     def finish(items: List[dict]) -> List[dict]:
+        # 零分配的整单已结账 SO 也必须有日清记录，并在分类和写前重新复核。
+        present_sos = {str(item.get("so") or "").strip() for item in items}
+        for allocation in (p.get("_parent_fallback_allocation") or {}).get("allocations") or []:
+            so = str(allocation.get("so") or "").strip()
+            if allocation.get("status") == "ledger_already_settled" and so and so not in present_sos:
+                # A zero receipt allocation does not erase the order's delivery.
+                # Preserve the same order-owned currency conversion used above;
+                # missing source amounts/rates stay missing for the flow guard.
+                deliveries = [
+                    _order_delivery_local(order.get("deliver"), p, rates, order)[0]
+                    for order in orders if str(order.get("so") or "").strip() == so
+                ]
+                delivery_local = (
+                    round(sum(deliveries), 2)
+                    if deliveries and all(value is not None for value in deliveries)
+                    else None
+                )
+                items.append(_hold(
+                    p, "E_SETTLED_SO_RECHECK", "顺序分配时盈亏表显示整 SO 已结账，本父回款分配 0；需复核当前全部业务行。",
+                    so=so, amount_orig=0.0, amount_local=0.0,
+                    deliver_local=delivery_local, so_delivery_local=delivery_local,
+                    all_sods=[str(line.get("sod") or "").strip() for line in (sod_lines.get(so) or []) if line.get("sod")],
+                ))
+                present_sos.add(so)
+        order_by_so = {
+            str(order.get("so") or "").strip(): order
+            for order in orders if str(order.get("so") or "").strip()
+        }
         for item in items:
+            order = (p.get("_parent_fallback_allocation") or {}).get("processing_order") or {}
+            if item.get("forced_code") == FS.ZERO:
+                item["zero_reserved_local"] = (p.get("_batch_reserved_local") or {}).get(item.get("so"), 0.0)
+            if not item.get("writeoff_sequence_key") and order.get("arrival_date"):
+                item["fallback_sequence_key"] = [order["arrival_date"], order["ar"]]
+            item["_execution_source_lineage"] = source_lineages.get(str(item.get("so") or "").strip())
+            if item.get("so") in so_receipt_sources:
+                item["so_receipt_source"] = so_receipt_sources[item["so"]]
+            allocation = p.get("_parent_fallback_allocation") or {}
+            for allocated in allocation.get("allocations") or []:
+                if allocated.get("so") == item.get("so"):
+                    reused = bool(allocation.get("reused_successful_allocation"))
+                    applied = reused and (
+                        "applied_sos" not in allocation or item.get("so") in allocation["applied_sos"]
+                    )
+                    item["parent_allocation_audit"] = {
+                        "ar": p.get("ar"), "so": item.get("so"),
+                        "allocated_local": allocated.get("allocated_local"),
+                        "historical_received_local": allocated.get("historical_received_local"),
+                        "reused": reused, "applied": applied,
+                    }
+                    item["fallback_allocation_reused"] = applied
+                    if "applied_cases" in allocation:
+                        item["parent_allocation_audit"]["applied_cases"] = {
+                            key: case for key, case in allocation["applied_cases"].items()
+                            if case["so"] == item.get("so")
+                        }
+                    break
             route_fields = route_fields_by_so.get(str(item.get("so") or "").strip()) or {}
             item.setdefault("delivery_date", route_fields.get("delivery_date"))
             item.setdefault("delivery_date_issue", route_fields.get("delivery_date_issue") or "")
@@ -1335,6 +1500,23 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 if str(duplicate_audit.get("comparison_basis") or "").startswith(
                     "delivery_fallback"
                 ):
+                    so = str(item.get("so") or "").strip()
+                    order = order_by_so.get(so) or {}
+                    if common.to_number((p.get("writeoffs_local") or {}).get(so)) is not None:
+                        item["local_amount_basis"] = "zhiyun_delivery_local"
+                    elif (
+                        common.to_number(order.get("rate")) is not None
+                        and float(common.to_number(order.get("rate"))) > 0
+                    ):
+                        item["local_amount_basis"] = "order_exchange_rate"
+                    elif common.is_cny(order.get("currency") or p.get("currency") or ""):
+                        item["local_amount_basis"] = "cny_same_currency"
+                    else:
+                        item["local_amount_basis"] = ""
+                        item["forced_code"] = "E6"
+                        item["forced_reason"] = (
+                            f"外币订单 {so} 既没有交付额本币，也没有有效订单汇率，禁止按原币写表"
+                        )
                     item.setdefault("warning_codes", []).append(
                         "W_WHOLE_PAYMENT_DELIVERY_FALLBACK"
                     )
@@ -1394,6 +1576,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
         p["_effective_cumulative_orig_by_so"] = effective_cumulative_orig
         p["_effective_cumulative_local_by_so"] = effective_cumulative_local
     fallback_local_by_so: Dict[str, float] = {}
+    comparison_basis = ""
     if writeoffs:
         H = writeoffs
         comparison_basis = str(duplicate_audit.get("comparison_basis") or "")
@@ -1425,10 +1608,24 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
         H, fallback_local_by_so, allocation_audit, allocation_error = (
             _allocate_parent_by_delivery(p, orders, rates)
         )
+        if not allocation_error:
+            p["_parent_fallback_allocation"] = allocation_audit
+            if not H and allocation_audit.get("allocations") and all(
+                entry.get("status") == "ledger_already_settled" for entry in allocation_audit["allocations"]
+            ):
+                return finish([])
+        if not allocation_error and not H and allocation_audit.get("processing_order") and (
+            p.get("_batch_previous_ars") or allocation_audit.get("reused_successful_allocation")
+        ) and allocation_audit.get("allocations") and all(
+            row.get("status") == "already_settled" for row in allocation_audit["allocations"]
+        ):
+            return finish([_hold(p, FS.ZERO, "前序回款已占满订单应收，本笔分配0，父回款余额保留审计", so=row["so"],
+                amount_orig=0.0, amount_local=0.0, deliver_local=next((_order_delivery_local(o.get("deliver"), p, rates, o)[0] for o in orders if o.get("so") == row["so"]), None))
+                for row in allocation_audit["allocations"]])
         if allocation_error or not H:
             return finish(_hold_each_source_order(
                 p,
-                "E1",
+                p.get("_parent_allocation_error_code") or "E1",
                 allocation_error or "父回款按交付额顺序分配后没有可核销订单",
             ))
         p["_parent_fallback_allocation"] = allocation_audit
@@ -1439,6 +1636,28 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
         if has_itemized_writeoff
         else fallback_local_by_so
     )
+    delivery_fallback_itemized = (
+        has_itemized_writeoff and comparison_basis.startswith("delivery_fallback")
+    )
+
+    def itemized_local(
+        amount: Optional[float],
+        order: Optional[dict],
+        *,
+        explicit_local: Optional[float] = None,
+        explicit_orig: Optional[float] = None,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        if delivery_fallback_itemized:
+            return _order_delivery_local(
+                amount, p, rates, order,
+                explicit_local=explicit_local,
+                explicit_orig=explicit_orig,
+            )
+        return _writeoff_business_amount(
+            amount,
+            explicit_local=explicit_local,
+            explicit_orig=explicit_orig,
+        )
 
     out: List[dict] = []
     deliver_by_so: Dict[str, float] = {}
@@ -1456,8 +1675,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
         order = order_by_so.get(so) or {}
         so_delivery_orig = deliver_by_so.get(so)
         if has_itemized_writeoff:
-            so_delivery_local, _ = _writeoff_business_amount(
-                so_delivery_orig,
+            so_delivery_local, _ = itemized_local(
+                so_delivery_orig, order,
                 explicit_local=business_local_by_so.get(so),
                 explicit_orig=h,
             )
@@ -1478,8 +1697,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
             if not one_sod or one_delivery is None:
                 continue
             if has_itemized_writeoff:
-                one_local, _ = _writeoff_business_amount(
-                    one_delivery,
+                one_local, _ = itemized_local(
+                    one_delivery, order,
                     explicit_local=business_local_by_so.get(so),
                     explicit_orig=h,
                 )
@@ -1493,6 +1712,66 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 sod_delivery_local[one_sod] = round(
                     sod_delivery_local.get(one_sod, 0.0) + float(one_local), 2
                 )
+        current_local = None
+        if has_itemized_writeoff:
+            current_local, _ = itemized_local(
+                h, order,
+                explicit_local=business_local_by_so.get(so),
+                explicit_orig=h,
+            )
+        else:
+            current_local, _ = _order_delivery_local(
+                h, p, rates, order,
+                explicit_local=business_local_by_so.get(so),
+                explicit_orig=h,
+            )
+        default_lines = []
+        for one_line in lines:
+            one = dict(one_line)
+            if has_itemized_writeoff:
+                one["deliver_local"], _ = itemized_local(
+                    one.get("deliver"), order,
+                    explicit_local=business_local_by_so.get(so),
+                    explicit_orig=h,
+                )
+            else:
+                one["deliver_local"], _ = _order_delivery_local(
+                    one.get("deliver"), p, rates, order
+                )
+            default_lines.append(one)
+        default_cumulative_local = None
+        default_cumulative_orig = (
+            effective_cumulative_orig.get(so)
+            if has_itemized_writeoff
+            else (p.get("_fallback_cumulative_orig_by_so") or {}).get(so)
+        )
+        if default_cumulative_orig is not None:
+            if has_itemized_writeoff:
+                default_cumulative_local, _ = itemized_local(
+                    default_cumulative_orig, order,
+                    explicit_local=effective_cumulative_local.get(so),
+                    explicit_orig=default_cumulative_orig,
+                )
+            else:
+                default_cumulative_local, _ = _order_delivery_local(
+                    default_cumulative_orig,
+                    p,
+                    rates,
+                    order,
+                    explicit_local=(
+                        (p.get("_fallback_cumulative_local_by_so") or {}).get(so)
+                    ),
+                    explicit_orig=default_cumulative_orig,
+                )
+        so_receipt_sources[so] = {
+            "amount_orig": float(h), "amount_local": current_local,
+            "delivery_local": so_delivery_local,
+            "cumulative_local": default_cumulative_local,
+            "currency": order.get("currency") or p.get("currency") or "人民币CNY",
+            "itemized_cumulative_authoritative": bool(has_itemized_writeoff and default_cumulative_local is not None),
+            "all_sods": all_sods, "sod_delivery_local": sod_delivery_local,
+            "writeoff_sequence_key": (p.get("_writeoff_sequence_key_by_so") or {}).get(so),
+        }
         fallback_partial = (
             not has_itemized_writeoff
             and so in set((p.get("_parent_fallback_allocation") or {}).get("partial_sos") or [])
@@ -1512,61 +1791,10 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 cand = "、".join(
                     f"{x['sod']}={x['deliver']}" for x in lines[:12]
                 ) + ("…" if len(lines) > 12 else "")
-                current_local = None
-                if has_itemized_writeoff:
-                    current_local, _ = _writeoff_business_amount(
-                        h,
-                        explicit_local=business_local_by_so.get(so),
-                        explicit_orig=h,
-                    )
-                else:
-                    current_local, _ = _order_delivery_local(
-                        h, p, rates, order,
-                        explicit_local=business_local_by_so.get(so),
-                        explicit_orig=h,
-                    )
-                default_lines = []
-                for one_line in lines:
-                    one = dict(one_line)
-                    if has_itemized_writeoff:
-                        one["deliver_local"], _ = _writeoff_business_amount(
-                            one.get("deliver"),
-                            explicit_local=business_local_by_so.get(so),
-                            explicit_orig=h,
-                        )
-                    else:
-                        one["deliver_local"], _ = _order_delivery_local(
-                            one.get("deliver"), p, rates, order
-                        )
-                    default_lines.append(one)
-                default_cumulative_local = None
-                default_cumulative_orig = (
-                    effective_cumulative_orig.get(so)
-                    if has_itemized_writeoff
-                    else (p.get("_fallback_cumulative_orig_by_so") or {}).get(so)
-                )
-                if default_cumulative_orig is not None:
-                    if has_itemized_writeoff:
-                        default_cumulative_local, _ = _writeoff_business_amount(
-                            default_cumulative_orig,
-                            explicit_local=effective_cumulative_local.get(so),
-                            explicit_orig=default_cumulative_orig,
-                        )
-                    else:
-                        default_cumulative_local, _ = _order_delivery_local(
-                            default_cumulative_orig,
-                            p,
-                            rates,
-                            order,
-                            explicit_local=(
-                                (p.get("_fallback_cumulative_local_by_so") or {}).get(so)
-                            ),
-                            explicit_orig=default_cumulative_orig,
-                        )
                 out.append(_hold(
                     p, "E5",
                     f"{so} 本次核销 {h:.2f}，但它下面的 SOD 金额凑不出唯一组合"
-                    f"（SOD 合计 {round(sum(float(x['deliver']) for x in lines), 2)}）。"
+                    f"（已提供金额的 SOD 合计 {round(sum(float(x['deliver']) for x in lines if x.get('deliver') is not None), 2)}）。"
                     f"候选：{cand}。你指一下这次核的是哪几个 SOD；"
                     f"若你指的那个 SOD 交付额比 {h:.2f} 大，就是只回了一部分——"
                     "实际未收必须按「智云最新交付额 − 累计实际回款」算，不能拿盈亏表旧应收减；"
@@ -1588,6 +1816,9 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                         )
                     ),
                     default_sod_lines=default_lines,
+                    so_delivery_local=so_delivery_local,
+                    all_sods=all_sods,
+                    writeoff_sequence_key=(p.get("_writeoff_sequence_key_by_so") or {}).get(so),
                     sod_delivery_local=sod_delivery_local,
                     default_match_basis=basis,
                     warning_codes=["W_DEFAULT_FIRST_SOD"],
@@ -1595,8 +1826,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
             else:
                 # 订单明细查不到 SOD → 退化成按 SO 匹配盈亏表（老路，仍可判）
                 if has_itemized_writeoff:
-                    current_local, _ = _writeoff_business_amount(
-                        h,
+                    current_local, _ = itemized_local(
+                        h, order,
                         explicit_local=business_local_by_so.get(so),
                         explicit_orig=h,
                     )
@@ -1608,7 +1839,7 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                     )
                 deliver_orig = deliver_by_so.get(so)
                 if has_itemized_writeoff:
-                    deliver_local, _ = _writeoff_business_amount(deliver_orig)
+                    deliver_local, _ = itemized_local(deliver_orig, order)
                 else:
                     deliver_local, _ = _order_delivery_local(deliver_orig, p, rates, order)
                 cumulative_orig = (
@@ -1619,8 +1850,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
                 cumulative_local = None
                 if cumulative_orig is not None:
                     if has_itemized_writeoff:
-                        cumulative_local, _ = _writeoff_business_amount(
-                            cumulative_orig,
+                        cumulative_local, _ = itemized_local(
+                            cumulative_orig, order,
                             explicit_local=(
                                 effective_cumulative_local.get(so)
                                 if has_itemized_writeoff
@@ -1676,13 +1907,13 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
             )
             current_orig = float(h) if unique_partial else line_orig
             if has_itemized_writeoff:
-                current_local, _ = _writeoff_business_amount(
-                    current_orig,
+                current_local, _ = itemized_local(
+                    current_orig, order,
                     explicit_local=business_local_by_so.get(so),
                     explicit_orig=h,
                 )
-                deliver_local, _ = _writeoff_business_amount(
-                    line_orig,
+                deliver_local, _ = itemized_local(
+                    line_orig, order,
                     explicit_local=business_local_by_so.get(so),
                     explicit_orig=h,
                 )
@@ -1705,8 +1936,8 @@ def expand_payment(p: dict, rates: Dict[str, float]) -> List[dict]:
             )
             if len(lines) == 1 and cumulative_orig is not None:
                 if has_itemized_writeoff:
-                    cumulative_local, _ = _writeoff_business_amount(
-                        cumulative_orig,
+                    cumulative_local, _ = itemized_local(
+                        cumulative_orig, order,
                         explicit_local=(
                             effective_cumulative_local.get(so)
                             if has_itemized_writeoff
@@ -1851,8 +2082,19 @@ def expand_payments(payments: List[dict], rates: Optional[Dict[str, float]] = No
     """全部到账 → records，并做 **AR + AR/SO 两级覆盖率硬校验**。"""
     rates = rates or {}
     records: List[dict] = []
-    for p in payments:
+    from collections import defaultdict
+    reservations = defaultdict(list)
+    dependencies = {}
+    for p in FS.ordered(payments):
+        sos = {o.get("so") for o in p.get("orders") or []}
+        reserved = [entry for so in sos for entry in reservations[so]] if not p.get("writeoffs") else []
+        p["_batch_reserved_orig"] = {so: round(sum(x[1] for x in reservations[so]), 2) for so in sos} if reserved else {}
+        p["_batch_reserved_local"] = {so: round(sum(x[2] for x in reservations[so]), 2) for so in sos} if reserved else {}
+        dependencies[p.get("ar")] = sorted({entry[0] for entry in reserved})
+        p["_batch_previous_ars"] = dependencies[p.get("ar")]
         records.extend(expand_payment(p, rates))
+        FS.reserve(p, reservations)
+    FS.bind_groups(records, dependencies)
     want = {p["ar"] for p in payments if p.get("ar")}
     got = {r.get("ar") for r in records if r.get("ar")}
     missing = sorted(want - got)
@@ -1892,15 +2134,9 @@ class LedgerIndex:
             self._load(path)
 
     def _load(self, path: Path):
-        import openpyxl
+        from workbook_read_cache import read_rows
 
-        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-        if "明细" not in wb.sheetnames:
-            names = list(wb.sheetnames)
-            wb.close()
-            raise ValueError(f"盈亏表无『明细』sheet：{names}")
-        all_rows = list(wb["明细"].iter_rows(values_only=True))
-        wb.close()
+        all_rows = read_rows(path, "明细")
 
         aliases = common.load_aliases()
         hrow, headers = common.find_header_row(
@@ -2030,6 +2266,119 @@ class LedgerIndex:
             return None
         return settled_rows[0]
 
+    def so_settlement(self, so: str) -> dict:
+        result = settlement_status.inspect_so(so, (
+            {"row": row, "so": snap.get("so"), "sod": snap.get("sod"), "settled": snap.get("jiezhang")}
+            for row in self.so_index.get(str(so or "").strip(), [])
+            for snap in [self.row_snapshot.get(row) or {}]
+        ))
+
+        if result['all_settled']:
+            incomplete = []
+            for sod in result['sods']:
+                evidence = [self.row_snapshot[r['row']] for r in result['rows'] if r.get('sod') == sod]
+                import receipt_history
+                if receipt_history.zero_rows(BR.ledger_rows(self, so, sod)):
+                    continue
+                if not any((common.to_number(row.get('huikuan')) or 0) > 0
+                           and common.norm_date(row.get('shoukuan_time'))
+                           and str(row.get('shoukuan_way') or '').strip() for row in evidence):
+                    incomplete.append(sod)
+            if incomplete:
+                result['all_settled'] = False
+                result['reason'] = '结账标记为是但缺少完整回款记录，继续逐笔核销：' + ','.join(incomplete)
+        return result
+
+    def payment_event_coverage(
+        self,
+        so: str,
+        sod: str,
+        amount_local: Optional[float],
+        receipt_time: Optional[dt.date],
+        payment_way: str,
+    ) -> dict:
+        """按本批回款的单元格证据判断它是否已经写入盈亏表。
+
+        盈亏表不保存 AR 号和核销记录 NUM，所以已写入证据只能来自同一 SO/SOD
+        行的「回款明细 + 收款时间 + 收款方式」。三项必须同时匹配且只能命中一行，
+        并且该行已经结账，才能把本批回款判为幂等；整 SO 已结账跳过另由 so_settlement 判断。
+        """
+        so_s = str(so or "").strip()
+        sod_s = str(sod or "").strip()
+        if sod_s:
+            rows = [
+                row_no
+                for row_no in self.sod_index.get(sod_s, [])
+                if str((self.row_snapshot.get(row_no) or {}).get("so") or "").strip()
+                == so_s
+            ]
+        else:
+            rows = list(self.so_index.get(so_s, []))
+
+        expected_date = common.norm_date(receipt_time)
+        expected_way = str(payment_way or "").strip()
+        expected_amount = common.to_number(amount_local)
+        payload = {
+            "status": "not_covered",
+            "basis": "no_unique_current_event_match",
+            "so": so_s,
+            "sod": sod_s,
+            "candidate_rows": sorted(rows),
+            "matched_rows": [],
+            "expected": {
+                "回款明细": round(float(expected_amount), 2)
+                if expected_amount is not None
+                else None,
+                "收款时间": expected_date,
+                "收款方式": expected_way,
+            },
+        }
+        settled_ref = self.settled_without_open_row(so_s, sod_s)
+        payload["candidate_values"] = [
+            {"row": row_no, "回款明细": common.to_number(snap.get("huikuan")),
+             "收款时间": common.norm_date(snap.get("shoukuan_time")),
+             "收款方式": str(snap.get("shoukuan_way") or "").strip(),
+             "是否结账": str(snap.get("jiezhang") or "").strip()}
+            for row_no in sorted(rows) for snap in [self.row_snapshot.get(row_no) or {}]
+        ]
+        payload["all_rows_settled"] = settled_ref is not None
+        payload["settled_row_ref"] = settled_ref
+
+        if expected_amount is None or expected_date is None or not expected_way:
+            payload["basis"] = "current_event_signature_incomplete"
+            return payload
+
+        matched = []
+        for row_no in sorted(rows):
+            snap = self.row_snapshot.get(row_no) or {}
+            received = common.to_number(snap.get("huikuan"))
+            actual_date = common.norm_date(snap.get("shoukuan_time"))
+            actual_way = str(snap.get("shoukuan_way") or "").strip()
+            if (
+                received is not None
+                and abs(float(received) - float(expected_amount)) <= TOL
+                and actual_date == expected_date
+                and actual_way == expected_way
+            ):
+                matched.append({
+                    "row": int(row_no),
+                    "settled": str(snap.get("jiezhang") or "").strip() == "是",
+                    "回款明细": round(float(received), 2),
+                    "收款时间": actual_date,
+                    "收款方式": actual_way,
+                })
+        payload["matched_rows"] = matched
+        if len(matched) > 1:
+            payload["status"] = "ambiguous"
+            payload["basis"] = "current_event_matches_multiple_rows"
+        elif len(matched) == 1 and matched[0]["settled"]:
+            payload["status"] = "covered"
+            payload["basis"] = "ledger_amount_receipt_time_payment_way_and_settled"
+            payload["row"] = matched[0]["row"]
+        elif len(matched) == 1:
+            payload["basis"] = "current_event_row_exists_but_is_not_settled"
+        return payload
+
     def business_rows(self, so: str, sod: str, row: Optional[int] = None) -> List[int]:
         """
         返回同一 SOD 的全部拆分行。
@@ -2039,10 +2388,18 @@ class LedgerIndex:
         SOD 回款混进来。
         """
         if sod:
-            rows = list(self.sod_index.get(sod, []))
+            rows = [r for r in self.sod_index.get(sod, [])
+                    if str((self.row_snapshot.get(r) or {}).get("so") or "").strip() == so]
             if rows:
                 return sorted(rows)
-        return [int(row)] if row is not None else []
+        if row is None:
+            return []
+        snap = self.row_snapshot.get(int(row)) or {}
+        if str(snap.get("so") or "").strip() != so:
+            return []
+        if sod and str(snap.get("sod") or "").strip() not in ("", sod):
+            return []
+        return [int(row)]
 
     def business_totals(
         self, so: str, sod: str, row: Optional[int] = None
@@ -2069,12 +2426,14 @@ class LedgerIndex:
         so: str,
         sod: str = "",
         current_received: Optional[float] = None,
+        receipt_time: Optional[dt.date] = None,
+        payment_way: str = "",
     ) -> Optional[int]:
         """
         在离线对比表中定位候选行；仅供差异审计，不参与日常判定。
 
         拆行后的同一 SOD 可能有多行；优先用“本次回款明细”唯一命中当前切片，
-        其次才接受唯一 SOD / 唯一 SO。不能唯一证明就返回 None，禁止猜行。
+        再用收款时间和收款方式核对当前切片；不能唯一证明就返回 None，禁止猜行。
         """
         candidates: List[int] = []
         if sod:
@@ -2085,13 +2444,24 @@ class LedgerIndex:
             return None
         if current_received is not None:
             exact = []
+            expected_date = common.norm_date(receipt_time)
+            expected_way = str(payment_way or "").strip()
             for one_row in candidates:
-                got = common.to_number(
-                    (self.row_snapshot.get(one_row) or {}).get("huikuan")
-                )
+                snap = self.row_snapshot.get(one_row) or {}
+                got = common.to_number(snap.get("huikuan"))
                 if (
                     got is not None
                     and abs(float(got) - float(current_received)) <= TOL
+                    and (
+                        expected_date is None
+                        or common.norm_date(snap.get("shoukuan_time"))
+                        == expected_date
+                    )
+                    and (
+                        not expected_way
+                        or str(snap.get("shoukuan_way") or "").strip()
+                        == expected_way
+                    )
                 ):
                     exact.append(one_row)
             if len(exact) == 1:
@@ -2172,6 +2542,92 @@ class LedgerIndex:
 # ══════════════════════════════════════════════════════════════
 # 四、单条判定
 # ══════════════════════════════════════════════════════════════
+def _record_event_coverage(
+    rec: dict,
+    ledger: LedgerIndex,
+    rates: Dict[str, float],
+) -> dict:
+    """从智云记录生成当前回款的可核对签名，再检查盈亏表覆盖情况。"""
+    amount_orig = common.to_number(rec.get("amount_orig"))
+    if amount_orig is None:
+        return {
+            "status": "unavailable",
+            "basis": "missing_current_amount",
+            "source_ar": rec.get("ar") or "",
+        }
+
+    local = common.to_number(rec.get("amount_local"))
+    if local is None:
+        local, err = _localize_amount(
+            float(amount_orig),
+            rec,
+            rates,
+            row_rate=rec.get("rate"),
+        )
+        if err or local is None:
+            return {
+                "status": "unavailable",
+                "basis": "current_local_amount_unavailable",
+                "source_ar": rec.get("ar") or "",
+            }
+
+    shoukuan_date = common.norm_date(rec.get("shoukuan_date"))
+    hexiao_date = common.norm_date(rec.get("hexiao_date"))
+    receipt_time = common.receipt_time(shoukuan_date, hexiao_date)
+    payment_way = common.pay_way(
+        rec.get("status") or "",
+        shoukuan_date,
+        hexiao_date,
+    )
+    coverage = ledger.payment_event_coverage(
+        str(rec.get("so") or "").strip(),
+        str(rec.get("sod") or "").strip(),
+        round(float(local), 2),
+        receipt_time,
+        payment_way,
+    )
+    coverage["source_ar"] = rec.get("ar") or ""
+    coverage["source_writeoff_sequence_key"] = rec.get("writeoff_sequence_key")
+    return coverage
+
+
+def _mark_event_idempotent(
+    result: dict,
+    ledger: LedgerIndex,
+    coverage: dict,
+    code: str,
+    reason: str,
+) -> dict:
+    """把已被当前回款证据覆盖的盈亏行标成幂等跳过。"""
+    settled_ref = int(coverage["row"])
+    snap = ledger.row_snapshot.get(settled_ref) or {}
+    result.update({
+        "bucket": "auto",
+        "code": code,
+        "reason": reason,
+        "ledger_row_ref": settled_ref,
+        "so": str(snap.get("so") or result.get("so") or "").strip(),
+        "sod": str(snap.get("sod") or result.get("sod") or "").strip(),
+        "idempotence_audit": coverage,
+        "five_cols": {
+            "计提": snap.get("jiti"),
+            "回款明细": snap.get("huikuan"),
+            "是否结账": "是",
+            "收款时间": common.norm_date(snap.get("shoukuan_time")),
+            "收款方式": snap.get("shoukuan_way"),
+            "实收SOD": str(snap.get("sod") or result.get("sod") or "").strip(),
+        },
+        "current_values": {
+            "计提": snap.get("jiti"),
+            "回款明细": snap.get("huikuan"),
+            "是否结账": snap.get("jiezhang"),
+            "收款时间": snap.get("shoukuan_time"),
+            "收款方式": snap.get("shoukuan_way"),
+        },
+    })
+    return result
+
+
 def classify_one(
     rec: dict,
     ledger: Optional[LedgerIndex],
@@ -2196,8 +2652,16 @@ def classify_one(
         "flow_sheet": rec.get("flow_sheet") or "",
         "flow_row_no": rec.get("flow_row_no"),
         "flow_order_existing": rec.get("flow_order_existing") or "",
+        "flow_identity": rec.get("flow_identity") or {},
         "huikuan_type": rec.get("huikuan_type") or "",
         "status": rec.get("status") or "",
+        "write_currency_audit": {
+            "currency": rec.get("currency") or "",
+            "amount_orig": common.to_number(rec.get("amount_orig")),
+            "amount_local": common.to_number(rec.get("amount_local")),
+            "deliver_local": common.to_number(rec.get("deliver_local")),
+            "local_amount_basis": rec.get("local_amount_basis") or "",
+        },
         "match_basis": rec.get("match_basis") or "",
         "bucket": "exception",
         "code": "",
@@ -2206,9 +2670,14 @@ def classify_one(
         "locate_hint": "",
         "current_values": {},
         "candidates": [],
+        "idempotence_audit": {},
         "warning_codes": list(rec.get("warning_codes") or []),
         "duplicate_writeoff_audit": rec.get("duplicate_writeoff_audit") or {},
         "ambiguous_sod_waterfall": rec.get("ambiguous_sod_waterfall") or {},
+        "sod_capacity_audit": rec.get("sod_capacity_audit") or [],
+        "parent_allocation_audit": rec.get("parent_allocation_audit") or {},
+        "fallback_batch_cases": rec.get("fallback_batch_cases") or [],
+        "fallback_batch_ars": rec.get("fallback_batch_ars") or [],
         "ledger_year": rec.get("target_ledger_year"),
         "ledger_path": rec.get("target_ledger_path") or "",
         "delivery_date": (
@@ -2219,6 +2688,7 @@ def classify_one(
         "delivery_date_issue": rec.get("delivery_date_issue") or "",
         # 仅供同一 SO/SOD 的跨父 AR 分笔链复核；不得用这些字段跨 SO 或跨 SOD 合并。
         "split_payment_source": {
+            "receivable_group_scope": rec.get("receivable_group_scope") or {},
             "amount_local": common.to_number(rec.get("amount_local")),
             "cumulative_local": common.to_number(rec.get("cumulative_received_local")),
             "detail_cumulative_local": common.to_number(
@@ -2239,6 +2709,7 @@ def classify_one(
                 if str(key or "").strip() and common.to_number(value) is not None
             },
             "writeoff_sequence_key": rec.get("writeoff_sequence_key"),
+            "fallback_sequence_key": rec.get("fallback_sequence_key"),
         },
     }
     if "_year_route_order" in rec:
@@ -2262,46 +2733,130 @@ def classify_one(
 
     # 父 AR 金额守恒失败是付款级硬闸；即使盈亏里已有结账行，也必须保留异常，
     # 不能被下面的订单幂等快捷路径改写为普通 auto/skip。
-    if rec.get("forced_code") == "E_PARENT_WRITEOFF_MISMATCH":
-        result["code"] = "E_PARENT_WRITEOFF_MISMATCH"
+    if rec.get("forced_code") in {"E_PARENT_WRITEOFF_MISMATCH", "E_SYSTEM_OVER_WRITEOFF_UNRESOLVED", "E_PARENT_ALLOCATION_HISTORY_MISSING", "E_PARENT_ALLOCATION_BASELINE_CHANGED", "E_SOD_HISTORY_MISMATCH"}:
+        result["code"] = rec["forced_code"]
         result["reason"] = rec.get("forced_reason") or "父回款金额守恒检查未通过"
+        if rec["forced_code"] in {"E_PARENT_ALLOCATION_HISTORY_MISSING", "E_PARENT_ALLOCATION_BASELINE_CHANGED", "E_SOD_HISTORY_MISMATCH"}:
+            result["bucket"] = "hold"
         return result
 
-    # 写前第一道幂等：目标订单已经结账，且没有拆分后遗留的未结账承接行。
+    if rec.get("forced_code") == FS.ZERO:
+        before = FS.ledger_so_rows(ledger, rec.get("so"))
+        received = sum(float(row.get("回款明细") or 0) for row in before.values())
+        reserved = float(rec.get("zero_reserved_local") or 0)
+        delivery = common.to_number(rec.get("deliver_local"))
+        valid = bool(before) and delivery is not None and abs(received + reserved - delivery) <= TOL
+        result["zero_allocation_basis"] = {"before_rows": before, "reserved_local": reserved, "delivery_local": delivery}
+        if not valid:
+            result.update(bucket="hold", code="E_FALLBACK_ZERO_BASELINE", reason="零分配的订单或前序回款余额无法在当前盈亏表核实")
+        else:
+            result.update(bucket="auto", code=FS.ZERO, reason=rec.get("forced_reason") or "本笔分配0")
+        result["_year_route_order"] = rec.get("_year_route_order", 0)
+        return result
+
+    import receipt_history
+    zero = receipt_history.zero_candidate(rec, result, ledger)
+    if zero is not None:
+        return zero
+    import receipt_correction
+    correction = receipt_correction.candidate(rec, result, ledger, rates, thr, year_now)
+    if correction is not None:
+        return correction
+
+    # Select delivery/baseline handling before any row-filled or settled skip.
+    baseline_candidate = BR.candidate(rec, result, ledger)
+    if baseline_candidate is not None:
+        return baseline_candidate
+
+    # 整 SO 业务状态与本批事件幂等分开；父 AR 硬闸已在前面检查。
     if ledger is not None and rec.get("so"):
-        settled_ref = ledger.settled_without_open_row(rec.get("so"), rec.get("sod") or "")
-        if settled_ref is not None:
-            snap = ledger.row_snapshot.get(settled_ref) or {}
+        settlement = ledger.so_settlement(rec["so"])
+        if settlement["all_settled"]:
+            source_notes = []
+            if rec.get("forced_code") and rec.get("forced_code") != "E_SETTLED_SO_RECHECK":
+                source_notes.append(f"来源检查 {rec['forced_code']}：{rec.get('forced_reason') or '未提供具体原因'}")
+            source_sods = set((result.get("split_payment_source") or {}).get("all_sods") or [])
+            missing_sods = sorted(source_sods - set(settlement["sods"]))
+            if missing_sods:
+                source_notes.append(f"当前来源另含表内未登记 SOD：{','.join(missing_sods)}；保留为来源差异，未新增行")
+            for source_sod, delivery in (result["split_payment_source"].get("sod_delivery_local") or {}).items():
+                initial, _, _ = ledger.business_totals(rec["so"], source_sod)
+                if initial is not None and abs(float(delivery) - initial) > TOL:
+                    source_notes.append(f"SOD={source_sod} 当前来源交付 {float(delivery):.2f}，表内原始应收合计 {initial:.2f}，差额 {float(delivery) - initial:.2f}；已结账历史值保留")
             result.update({
-                "bucket": "auto",
-                "code": "OK_ALREADY_SETTLED",
-                "reason": "订单已写入/已结账，且不存在拆分未结账行；按幂等跳过",
-                "ledger_row_ref": settled_ref,
-                "so": str(snap.get("so") or rec.get("so") or "").strip(),
-                "sod": str(snap.get("sod") or rec.get("sod") or "").strip(),
-                "five_cols": {
-                    "计提": snap.get("jiti"),
-                    "回款明细": snap.get("huikuan"),
-                    "是否结账": "是",
-                    "收款时间": common.norm_date(snap.get("shoukuan_time")),
-                    "收款方式": snap.get("shoukuan_way"),
-                    "实收SOD": str(snap.get("sod") or rec.get("sod") or "").strip(),
-                },
-                "current_values": {
-                    "计提": snap.get("jiti"),
-                    "回款明细": snap.get("huikuan"),
-                    "是否结账": snap.get("jiezhang"),
-                    "收款时间": snap.get("shoukuan_time"),
-                    "收款方式": snap.get("shoukuan_way"),
-                },
+                "bucket": "auto", "code": settlement_status.SO_ALREADY_SETTLED,
+                "reason": settlement["reason"] + (" 来源提示：" + "；".join(source_notes) if source_notes else ""),
+                "so_settlement_audit": settlement,
+                "ledger_row_ref": settlement["rows"][0]["row"],
+                "five_cols": {},
+                "locate_hint": f"在对应年度盈亏明细按 SO={rec['so']} 查看全部业务行（含拆分行）",
             })
+            if rec.get("forced_code") == "E_SETTLED_SO_RECHECK":
+                result["reason"] += " 本父回款分配金额为 0，未占用父回款金额。"
+            if source_notes:
+                result["warning_codes"].append("W_SETTLED_SO_SOURCE_DIFFERENCE")
             return result
+
+    # 未整单结账时，仍按本批金额、日期和方式判断事件幂等。
+    allocation = rec.get("parent_allocation_audit") or {}
+    applied = allocation.get("applied", allocation.get("reused"))
+    cases = allocation.get("applied_cases") or {}
+    if "applied_cases" in allocation:
+        prior = cases.get(f"{rec.get('ar')}|{rec.get('so')}|{rec.get('sod') or ''}")
+        applied = prior is not None and abs(float(prior["amount_local"]) - float(rec.get("amount_local") or 0.0)) <= TOL
+        if prior is not None and not applied:
+            result.update({"bucket": "hold", "code": "E_PARENT_ALLOCATION_HISTORY_MISSING",
+                           "reason": f"父回款 {rec.get('ar')} 的 SOD={rec.get('sod')} 已写 {prior['amount_local']:.2f}，本次计划金额不同；禁止覆盖原分配，请核对来源变更。"})
+            return result
+        rec = {**rec, "fallback_allocation_reused": applied}
+    fresh_allocation = bool(allocation) and not applied
+    if fresh_allocation and ledger is not None:
+        _, received = ledger.so_totals(rec.get("so") or "")
+        history = common.to_number(allocation.get("historical_received_local"))
+        current_applied = sum(case["amount_local"] for case in cases.values())
+        known = float(history or 0.0) + current_applied
+        error = FAL.unexplained_receipts(
+            rec.get("ar") or "", rec.get("so") or "", received, known,
+            reused_allocation=bool(allocation.get("reused")), current_applied=current_applied,
+        )
+        if error:
+            code = "E_PARENT_ALLOCATION_BASELINE_CHANGED" if allocation.get("reused") else "E_PARENT_ALLOCATION_HISTORY_MISSING"
+            result.update({"bucket": "hold", "code": code, "reason": error})
+            return result
+    event_coverage = None
+    if ledger is not None and rec.get("so") and not fresh_allocation:
+        event_coverage = _record_event_coverage(rec, ledger, rates)
+        result["idempotence_audit"] = event_coverage
+        if event_coverage.get("status") == "covered":
+            if rec.get("fallback_allocation_reused"):
+                idem_code = "OK_FALLBACK_ALLOCATION_ALREADY_APPLIED"
+                idem_reason = (
+                    "同一父回款已按回款明细、收款时间和收款方式唯一对应到已结账行；"
+                    "复用既有顺序分配，按幂等跳过"
+                )
+            elif rec.get("itemized_cumulative_authoritative"):
+                idem_code = "OK_ITEMIZED_CUMULATIVE_ALREADY_APPLIED"
+                idem_reason = (
+                    "智云逐单回款已按回款明细、收款时间和收款方式唯一对应到已结账行；"
+                    "按幂等跳过，未结账行继续留给后续新回款承接"
+                )
+            else:
+                idem_code = "OK_ALREADY_SETTLED"
+                idem_reason = (
+                    "本批回款已按回款明细、收款时间和收款方式唯一对应到已结账行；"
+                    "按幂等跳过"
+                )
+            return _mark_event_idempotent(
+                result, ledger, event_coverage, idem_code, idem_reason
+            )
 
     # 展开阶段已定性的（分笔/超额/没回满/无下单…）直接落地
     forced = rec.get("forced_code")
     if forced:
         result["code"] = forced
         reason = rec.get("forced_reason") or ""
+        if forced == "E_SETTLED_SO_RECHECK" and ledger is not None:
+            reason = ledger.so_settlement(rec.get("so"))["reason"] + " 顺序分配时的整单结账依据已变化，请重新生成分配计划。"
         if (
             forced == "E5"
             and ledger is not None
@@ -2311,7 +2866,7 @@ def classify_one(
         ):
             initial_receivable, existing_received = ledger.so_totals(rec["so"])
             reason = (
-                f"{rec['so']} 没回满。"
+                f"{rec['so']} 当前回款无法安全落表。"
                 + partial_split_guidance(
                     rec["partial_latest_delivery"],
                     rec["partial_current_received"],
@@ -2348,21 +2903,9 @@ def classify_one(
         )
         return result
 
-    # 流转表三键信号（有做才判）
-    flow_hits = rec.get("flow_hits")
-    if flow_hits is not None:
-        try:
-            fh = int(flow_hits)
-        except (TypeError, ValueError):
-            fh = -1
-        if fh == 0:
-            result["code"] = "E0"
-            result["reason"] = "流转表三键对不到账（0 行）"
-            return result
-        if fh > 1:
-            result["code"] = "E12"
-            result["reason"] = "同日同额同名命中多行"
-            return result
+    # Flow ambiguity is handled by the flow plan; ledger evidence is independent.
+    if rec.get("flow_hits") not in (None, 1):
+        result["warning_codes"].append("W_FLOW_LOCATION_UNRESOLVED")
     if rec.get("customer_archive_failed"):
         result["code"] = "E10"
         result["reason"] = "建档失败/搜不到客户"
@@ -2385,6 +2928,14 @@ def classify_one(
         row, how, cands = int(preferred_row), "同SO未结清SOD顺序核销", []
     else:
         row, how, cands = ledger.match(so, sod, amount_orig)
+        if fresh_allocation and sod:
+            outstanding = [
+                candidate for candidate in ledger.sod_index.get(sod, [])
+                if (ledger.row_snapshot.get(candidate) or {}).get("so") == so
+                and ledger._is_outstanding(ledger.row_snapshot[candidate])
+            ]
+            if len(outstanding) == 1:
+                row, how, cands = outstanding[0], "本父回款待写SOD唯一未结清行", outstanding
 
     # 定位不到唯一行 → 用「整段逐位对齐」严格消歧（对不齐就继续挂起）
     align_note = ""
@@ -2406,8 +2957,9 @@ def classify_one(
         result["code"] = "E8"
         result["reason"] = (
             f"盈亏表里有 {len(cands)} 行同时满足 SO={so}"
-            + (f" 且应收金额={amount_orig}" if amount_orig is not None else "")
-            + "，分不清记哪行，你指一下"
+            + f"，目标 SOD={sod or '-'}、本次匹配金额={amount_orig}；现有身份和金额证据不足以唯一定位。"
+            + "候选行：" + ",".join(map(str, cands))
+            + "；候选仅表示可能位置，不表示每行应收都等于本次金额。请核对 SOD 和拆分行归属。"
         )
         result["candidates"] = cands
         return result
@@ -2461,6 +3013,61 @@ def classify_one(
     local_f = round(float(local), 2)
     result["split_payment_source"]["amount_local"] = local_f
 
+    if event_coverage is None:
+        event_coverage = ledger.payment_event_coverage(
+            so,
+            sod,
+            local_f,
+            r_time,
+            way,
+        )
+        result["idempotence_audit"] = event_coverage
+
+    # 所有目标行都已结账，但本批事件没有在表中留下可核对的证据时，
+    # 明确挂起，禁止把历史结账行当成本批已写入，也禁止覆盖历史金额。
+    settled_ref = ledger.settled_without_open_row(so, sod)
+    if (
+        settled_ref is not None
+        and (event_coverage or {}).get("status") != "covered"
+    ):
+        matched_rows = (event_coverage or {}).get("matched_rows") or []
+        if (event_coverage or {}).get("status") == "ambiguous":
+            detail = f"金额、收款时间和收款方式同时命中 {len(matched_rows)} 行"
+        elif matched_rows:
+            detail = "找到相同回款证据，但对应行尚未结账"
+        else:
+            expected = (event_coverage or {}).get("expected") or {}
+            actual = (event_coverage or {}).get("candidate_values") or []
+            values = "；".join(
+                f"第 {v['row']} 行：金额={v.get('回款明细')}、日期={v.get('收款时间')}、方式={v.get('收款方式') or '空'}"
+                for v in actual
+            )
+            detail = (
+                f"本批要求金额={expected.get('回款明细')}、日期={expected.get('收款时间')}、方式={expected.get('收款方式') or '空'}；"
+                f"历史值为 {values or '无可用候选'}，没有同时匹配的唯一行"
+            )
+        result.update({
+            "bucket": "hold",
+            "code": "E_SETTLED_CURRENT_EVENT_UNCOVERED",
+            "reason": (
+                f"盈亏表中 SO={so}、SOD={sod or '-'} 的目标行已全部结账，但{detail}；"
+                "同 SO 仍有未结账业务行，不能整单跳过；请核对本批回款与历史记录的归属，不覆盖历史行"
+            ),
+            "ledger_row_ref": settled_ref,
+            "current_values": {
+                "计提": snap.get("jiti"),
+                "回款明细": snap.get("huikuan"),
+                "差异": snap.get("chayi"),
+                "是否结账": str(snap.get("jiezhang") or "").strip()
+                if snap.get("jiezhang") is not None
+                else "",
+                "收款时间": str(snap.get("shoukuan_time") or "")[:10],
+                "收款方式": snap.get("shoukuan_way"),
+                "实收SOD": snap.get("sod"),
+            },
+        })
+        return result
+
     # ── 结账 / 计提（2026-07-29 交付额变动会议更新）──────────────────────────
     # 【结账】= 这笔到账给这个 SOD 下发的「任务」做完没有。任务 = 智云本次核销这个单的金额。
     #   能走到这里（bucket=auto）的行 = 核销命中 + 已交付进表 → 任务能做且已做 → 一律「是」。
@@ -2475,6 +3082,13 @@ def classify_one(
     #   当前已回款切片应收 = 当前未结清行应收 - U
     #   新增未回款行应收 = U
     # 这样所有拆分行应收合计始终等于原始应收基线，且累计只在当前 SOD 内计算。
+    if sod and str(snap.get("sod") or "").strip() not in ("", sod):
+        result.update({
+            "bucket": "hold", "code": "E_SOD_HISTORY_MISMATCH",
+            "reason": f"SO={so} 的目标 SOD={sod}，候选第 {row} 行已登记 SOD={snap.get('sod')}；不能借用其他 SOD 的历史回款。请核对 SOD 归属后重判。",
+            "ledger_row_ref": row,
+        })
+        return result
     initial_receivable, existing_received, business_rows = ledger.business_totals(so, sod, row)
     source_cumulative = common.to_number(rec.get("cumulative_received_local"))
     # 部分回款仍保留一条未结账行，不能只靠“全部行已结账”判幂等：
@@ -2504,25 +3118,16 @@ def classify_one(
             )
         ]
         idempotent_row = ledger.comparison_row(
-            so, sod, current_received=local_f
+            so,
+            sod,
+            current_received=local_f,
+            receipt_time=r_time,
+            payment_way=way,
         )
         if idempotent_row not in materialized_rows:
-            if rec.get("itemized_cumulative_authoritative"):
-                # 逐 SO 新事件必须能按本次金额定位到已写切片，不能只因表内累计较大
-                # 就借用另一父回款的已收行判幂等；否则会静默漏掉后续不同父 AR。
-                idempotent_row = None
-            else:
-                idempotent_row = next(
-                    (
-                        one_row
-                        for one_row in reversed(materialized_rows)
-                        if common.to_number(
-                            (ledger.row_snapshot.get(one_row) or {}).get("huikuan")
-                        )
-                        is not None
-                    ),
-                    materialized_rows[-1] if materialized_rows else None,
-                )
+            # 无法同时按本次金额、收款时间和收款方式定位到已落表切片时，
+            # 即使累计金额已经较大，也不能借用另一笔父回款的行判幂等。
+            idempotent_row = None
         if idempotent_row is not None:
             idem = ledger.row_snapshot.get(idempotent_row) or {}
             result.update({
@@ -2578,16 +3183,10 @@ def classify_one(
         round(float(deliver) - cumulative_received, 2)
         if deliver is not None else None
     )
-    delivery_above_baseline = (
-        deliver is not None
-        and initial_receivable is not None
-        and float(deliver) > float(initial_receivable) + max(thr, TOL)
-    )
     business_tail_settled = (
         settlement_delta is not None
         and abs(settlement_delta) > max(thr, TOL)
         and abs(settlement_delta) <= BUSINESS_SETTLEMENT_TOL
-        and not delivery_above_baseline
     )
     if business_tail_settled:
         result["settlement_tolerance_audit"] = {
@@ -2626,61 +3225,6 @@ def classify_one(
     ):
         remaining = round(float(deliver) - cumulative_received, 2)
         current_receivable = common.to_number(snap.get("yingshou"))
-        preserve_baseline_blank_carry = delivery_above_baseline
-        if preserve_baseline_blank_carry:
-            result["five_cols"] = {
-                "计提": None,
-                "回款明细": local_f,
-                "是否结账": "是",
-                "收款时间": r_time.isoformat() if r_time else None,
-                "收款方式": way,
-                "实收SOD": sod or snap.get("sod") or None,
-            }
-            result["row_operation"] = {
-                "type": "split_below",
-                "receivable_mode": "preserve_baseline_blank_carry",
-                "source_receivable": round(float(initial_receivable), 2),
-                "baseline_receivable": round(float(initial_receivable), 2),
-                "source_row_receivable": (
-                    round(float(current_receivable), 2)
-                    if current_receivable is not None else None
-                ),
-                "remaining_unreceived": remaining,
-                "existing_received": existing_received,
-                "current_received": local_f,
-                "cumulative_received": cumulative_received,
-                "latest_delivery": round(float(deliver), 2),
-                "business_rows": business_rows,
-                "inserted_five_cols": {
-                    "计提": None,
-                    "回款明细": None,
-                    "是否结账": "否",
-                    "收款时间": None,
-                    "收款方式": None,
-                    "实收SOD": sod or snap.get("sod") or None,
-                },
-            }
-            result["bucket"] = "auto"
-            result["code"] = "E5"
-            result["reason"] = partial_split_guidance(
-                float(deliver),
-                local_f,
-                initial_receivable=initial_receivable,
-                existing_received=existing_received,
-            )
-            result["current_values"] = {
-                "计提": snap.get("jiti"),
-                "回款明细": snap.get("huikuan"),
-                "差异": snap.get("chayi"),
-                "是否结账": str(snap.get("jiezhang") or "").strip()
-                if snap.get("jiezhang") is not None
-                else "",
-                "收款时间": str(snap.get("shoukuan_time") or "")[:10],
-                "收款方式": snap.get("shoukuan_way"),
-                "实收SOD": snap.get("sod"),
-            }
-            result["ledger_row_ref"] = row
-            return result
         if current_receivable is None:
             result["bucket"] = "hold"
             result["code"] = "E5"
@@ -2956,7 +3500,7 @@ def _make_split_payment_chain(
         amount = common.to_number(source.get("amount_local"))
         cumulative = common.to_number(source.get("cumulative_local"))
         delivery = common.to_number(source.get("delivery_local"))
-        order_key = source.get("writeoff_sequence_key")
+        order_key = source.get("writeoff_sequence_key") or source.get("fallback_sequence_key")
         if amount is None or cumulative is None or delivery is None:
             return None, "缺少本币本次额、运行累计额或最新交付额"
         if float(amount) <= 0:
@@ -2987,22 +3531,7 @@ def _make_split_payment_chain(
     opening_remaining = round(latest - initial_cumulative, 2)
     snap = ledger.row_snapshot.get(int(ref)) or {}
     current_receivable = common.to_number(snap.get("yingshou"))
-    baseline_receivable, _, _ = ledger.business_totals(
-        str(group[0].get("so") or ""), str(group[0].get("sod") or ""), ref
-    )
-    preserve_baseline_blank_carry = (
-        baseline_receivable is not None
-        and latest > float(baseline_receivable) + max(tolerance, TOL)
-        and any(
-            (result.get("row_operation") or {}).get("receivable_mode")
-            == "preserve_baseline_blank_carry"
-            for result in group
-        )
-    )
-    source_receivable = (
-        round(float(baseline_receivable), 2)
-        if preserve_baseline_blank_carry else opening_remaining
-    )
+    source_receivable = opening_remaining
 
     # 已有完整聚合结清行时，1 元以内的父回款尾差不再触发逐父 AR 拆行。
     # 例如 0.12 + 211463.88 = 211464.00：0.12 虽然实际到账，但业务口径
@@ -3018,8 +3547,7 @@ def _make_split_payment_chain(
     aggregate_is_settled = str(snap.get("jiezhang") or "").strip() == "是"
     final_cumulative = prepared[-1][3]
     if (
-        not preserve_baseline_blank_carry
-        and 0 < tiny_parent_total <= settlement_tail_tolerance
+        0 < tiny_parent_total <= settlement_tail_tolerance
         and abs(final_cumulative - latest) <= max(tolerance, TOL)
         and aggregate_is_settled
         and current_receivable is not None
@@ -3056,8 +3584,7 @@ def _make_split_payment_chain(
     effective_prepared = list(prepared)
     absorbed_tail_payments: List[dict] = []
     if (
-        not preserve_baseline_blank_carry
-        and 0 < tiny_parent_total <= settlement_tail_tolerance
+        0 < tiny_parent_total <= settlement_tail_tolerance
         and abs(final_cumulative - latest) <= max(tolerance, TOL)
     ):
         tiny_indexes = [
@@ -3105,7 +3632,7 @@ def _make_split_payment_chain(
         if settled and index != len(effective_prepared) - 1:
             return None, "分笔链在最后一笔之前已经结清，后续回款会造成超额"
         paid_receivable = previous_remaining if settled else round(previous_remaining - remaining, 2)
-        if not preserve_baseline_blank_carry and paid_receivable < -max(tolerance, TOL):
+        if paid_receivable < -max(tolerance, TOL):
             return None, "分笔后剩余应收反而增加，连续拆行不守恒"
         five = dict(result.get("five_cols") or {})
         # 已结清行的幂等判定会从盈亏表带回整行历史回款额；分笔链中每个
@@ -3124,15 +3651,10 @@ def _make_split_payment_chain(
             "so": result.get("so") or "",
             "sod": result.get("sod") or "",
             "writeoff_sequence_key": list(order_key),
+            "sequence_basis": "writeoff_record" if (result.get("split_payment_source") or {}).get("writeoff_sequence_key") else FS.RULE,
             "current_received": amount,
             "cumulative_received": cumulative,
-            "receivable": (
-                round(float(current_receivable), 2)
-                if preserve_baseline_blank_carry and index == 0 and current_receivable is not None
-                else None
-                if preserve_baseline_blank_carry
-                else round(max(paid_receivable, 0.0), 2)
-            ),
+            "receivable": round(max(paid_receivable, 0.0), 2),
             "remaining_after": remaining,
             "settled": settled,
             "five_cols": five,
@@ -3140,7 +3662,7 @@ def _make_split_payment_chain(
         })
         previous_remaining = remaining
 
-    tail_audit = {} if preserve_baseline_blank_carry else {
+    tail_audit = {
         "tolerance": settlement_tail_tolerance,
         "absorbed_total": round(sum(x["amount"] for x in absorbed_tail_payments), 2),
         "absorbed_payments": absorbed_tail_payments,
@@ -3174,8 +3696,7 @@ def _make_split_payment_chain(
     final_unpaid = None
     if previous_remaining > max(tolerance, TOL):
         final_unpaid = {
-            "receivable": None if preserve_baseline_blank_carry else previous_remaining,
-            "remaining_unreceived": previous_remaining,
+            "receivable": previous_remaining,
             "five_cols": {
                 "计提": None, "回款明细": None, "是否结账": "否",
                 "收款时间": None, "收款方式": None,
@@ -3183,13 +3704,10 @@ def _make_split_payment_chain(
             },
         }
 
-    def row_matches(row_no: int, expected_receivable: Optional[float], expected_five: dict) -> bool:
+    def row_matches(row_no: int, expected_receivable: float, expected_five: dict) -> bool:
         actual = ledger.row_snapshot.get(int(row_no)) or {}
         actual_receivable = common.to_number(actual.get("yingshou"))
-        if actual_receivable is None or expected_receivable is None:
-            if actual_receivable is not None or expected_receivable is not None:
-                return False
-        elif abs(float(actual_receivable) - float(expected_receivable)) > max(tolerance, TOL):
+        if actual_receivable is None or abs(float(actual_receivable) - float(expected_receivable)) > max(tolerance, TOL):
             return False
         if str(actual.get("so") or "").strip() != str(group[0].get("so") or "").strip():
             return False
@@ -3215,10 +3733,10 @@ def _make_split_payment_chain(
         return common.norm_date(actual.get("shoukuan_time")) == common.norm_date(expected_five.get("收款时间"))
 
     expected_rows = [
-        (step.get("receivable"), step.get("five_cols") or {}) for step in steps
+        (float(step["receivable"]), step.get("five_cols") or {}) for step in steps
     ]
     if final_unpaid:
-        expected_rows.append((final_unpaid.get("receivable"), final_unpaid.get("five_cols") or {}))
+        expected_rows.append((float(final_unpaid["receivable"]), final_unpaid.get("five_cols") or {}))
     business_rows = sorted(ledger.business_rows(
         str(group[0].get("so") or ""), str(group[0].get("sod") or ""), ref
     ))
@@ -3233,26 +3751,15 @@ def _make_split_payment_chain(
     if len(materialized_starts) > 1:
         return None, "盈亏表中存在多条完整分笔链，无法唯一定位"
     materialized_start = materialized_starts[0] if materialized_starts else None
-    source_row_matches = preserve_baseline_blank_carry or (
-        current_receivable is not None
-        and abs(float(current_receivable) - opening_remaining) <= max(tolerance, TOL)
-    )
-    if not source_row_matches and materialized_start is None:
+    if (
+        current_receivable is None
+        or abs(float(current_receivable) - opening_remaining) > max(tolerance, TOL)
+    ) and materialized_start is None:
         return None, "当前未结清行应收与分笔链起点剩余金额不一致"
 
     operation = {
         "type": "split_payment_chain",
         "source_receivable": source_receivable,
-        "receivable_mode": (
-            "preserve_baseline_blank_carry"
-            if preserve_baseline_blank_carry else "conserve_receivable"
-        ),
-        "baseline_receivable": baseline_receivable,
-        "source_row_receivable": (
-            round(float(current_receivable), 2)
-            if current_receivable is not None else None
-        ),
-        "opening_unreceived": opening_remaining,
         # 写前校验用这份快照证明当前行仍是生成分笔链时看到的聚合基线。
         # 这样可以安全迁移旧版“多父回款合并在一行”的已填状态，同时拒绝
         # 校验前后被人工改动过的行。
@@ -3280,11 +3787,118 @@ def _expand_ambiguous_sod_waterfall(
     ledger: Optional[LedgerIndex],
     tolerance: float,
 ) -> List[dict]:
-    """把无法唯一落到 SOD 的逐 SO 金额按盈亏未结清行顺序分配。"""
-    if not rec.get("default_first_sod") or ledger is None or not rec.get("so"):
+    """先确定盈亏应收组的交付口径，再分配逐 SO 回款到已登记业务行。"""
+    if ledger is None or not rec.get("so"):
         return [rec]
 
+    # An SO kept as one historical receivable group uses the SO's latest
+    # delivery. Source SOD additions do not change that group's AR baseline.
+    # Keep genuinely separate ledger SOD groups on the existing waterfall.
+    source = rec.get("so_receipt_source") or {}
+    so = str(rec["so"]).strip()
+    so_rows = sorted(ledger.so_index.get(so, []))
+    ledger_sods = {str((ledger.row_snapshot.get(row) or {}).get("sod") or "").strip() for row in so_rows}
+    source_sods = set(source.get("all_sods") or [])
+    may_resolve = not rec.get("forced_code") or (
+        rec.get("forced_code") == "E5" and rec.get("default_first_sod")
+    )
+    if not may_resolve:
+        return [rec]
+    historical_scopes = [entry["receivable_group_scope"]
+                         for entry in (getattr(ledger, "baseline_receipt_state", {}) or {}).values()
+                         if (entry.get("receivable_group_scope") or {}).get("so") == so]
+    if historical_scopes and (
+        len(historical_scopes) != 1 or not source or
+        ledger_sods != {historical_scopes[0].get("ledger_sod")} or
+        not set(historical_scopes[0].get("source_sods") or []).issubset(source_sods)
+    ):
+        failed = dict(rec)
+        failed.pop("default_first_sod", None)
+        failed.update(forced_code="E_SOD_HISTORY_MISMATCH",
+                      forced_reason="已登记按 SO 最新交付额核销的应收组，当前来源范围缺失、缩减或盈亏出现独立 SOD 组；禁止退回单个 SOD 金额核销。")
+        return [failed]
+    if source and may_resolve and len(ledger_sods) == 1 and "" not in ledger_sods and source_sods:
+        sod = next(iter(ledger_sods))
+        rows = BR.ledger_rows(ledger, so, sod)
+        anchors = [row for row in rows.values() if row["应收金额"] is not None]
+        baseline = sum(BR.cents(row["应收金额"]) or 0 for row in rows.values())
+        delivery = BR.cents(source.get("delivery_local"))
+        if historical_scopes and BR.cents(historical_scopes[0].get("baseline_receivable")) != baseline:
+            failed = dict(rec)
+            failed.pop("default_first_sod", None)
+            failed.update(forced_code="E_SOD_HISTORY_MISMATCH",
+                          forced_reason="SO 应收组的原始应收合计与已登记历史基线不一致，禁止继续核销。")
+            return [failed]
+        # Several physical AR rows may be ordinary splits of this one SOD.
+        if anchors and baseline > 0:
+            amounts = source.get("sod_delivery_local") or {}
+            if delivery is None or delivery <= 0 or sod not in source_sods:
+                failed = dict(rec)
+                failed.pop("default_first_sod", None)
+                failed.update(forced_code="E_SOD_HISTORY_MISMATCH", forced_reason="原始应收组缺少完整一致的 SO 最新交付额依据，不能用原始应收或单个来源 SOD 金额代替。")
+                return [failed]
+            resolved = {key: value for key, value in rec.items()
+                        if not key.startswith("default_") and key not in {"forced_code", "forced_reason"}}
+            resolved.update(
+                sod=sod, amount_orig=source["amount_orig"], amount_local=source["amount_local"],
+                deliver_local=source["delivery_local"], so_delivery_local=source["delivery_local"],
+                cumulative_received_local=source.get("cumulative_local"),
+                currency=source.get("currency") or rec.get("currency"),
+                itemized_cumulative_authoritative=source.get("itemized_cumulative_authoritative", False),
+                all_sods=sorted(source_sods), sod_delivery_local=amounts,
+                writeoff_sequence_key=source.get("writeoff_sequence_key"),
+                receivable_group_scope={"basis": "so_latest_delivery", "so": so,
+                                        "ledger_sod": sod, "source_sods": sorted(source_sods),
+                                        "baseline_receivable": baseline / 100},
+                match_basis="SO 最新交付额/盈亏既有原始应收组",
+            )
+            return [resolved]
+
+    if not rec.get("default_first_sod"):
+        return [rec]
+
+    import receipt_history
+    existing_slices = receipt_history.existing_sod_slices(rec, ledger)
+    if existing_slices:
+        return existing_slices
+
+    allocation = rec.get("parent_allocation_audit") or {}
+    applied_cases = allocation.get("applied_cases") or {}
+    if applied_cases and not rec.get("_replayed_applied_cases"):
+        # Replay verified SOD slices before considering only the unpaid portion
+        # of this SO's fixed allocation. Never move this money to another SO.
+        total = float(rec.get("default_amount_local") or 0.0)
+        original = float(rec.get("default_amount_orig") or 0.0)
+        paid = round(sum(case["amount_local"] for case in applied_cases.values()), 2)
+        if total <= TOL or paid > total + TOL:
+            failed = dict(rec)
+            failed.update(forced_code="E_PARENT_ALLOCATION_HISTORY_MISSING",
+                          forced_reason="已写 SOD 金额超过本 SO 原分配或原分配金额缺失，禁止重新分配。")
+            failed.pop("default_first_sod", None)
+            return [failed]
+        replayed = []
+        for case in applied_cases.values():
+            resolved = {key: value for key, value in rec.items()
+                        if not key.startswith("default_") and key not in {"forced_code", "forced_reason"}}
+            resolved.update(
+                sod=case["sod"], amount_local=case["amount_local"],
+                amount_orig=round(case["amount_local"] * original / total, 2),
+                deliver_local=case.get("delivery_local"),
+                cumulative_received_local=case.get("cumulative_local"),
+                fallback_allocation_reused=True,
+            )
+            replayed.append(resolved)
+        remaining = round(total - paid, 2)
+        if remaining > TOL:
+            pending = {**rec, "_replayed_applied_cases": True,
+                       "default_amount_local": remaining,
+                       "default_amount_orig": round(original * remaining / total, 2)}
+            replayed.extend(_expand_ambiguous_sod_waterfall(pending, ledger, tolerance))
+        return replayed
+
     so = str(rec.get("so") or "").strip()
+    if ledger.so_settlement(so)["all_settled"]:
+        return [rec]
     total_local = common.to_number(rec.get("default_amount_local"))
     total_orig = common.to_number(rec.get("default_amount_orig"))
     if total_local is None:
@@ -3302,6 +3916,7 @@ def _expand_ambiguous_sod_waterfall(
         if str(line.get("sod") or "").strip()
     }
     candidates: List[dict] = []
+    capacity_details: List[dict] = []
     seen_sods = set()
     for row_no in sorted(ledger.so_index.get(so, [])):
         snap = ledger.row_snapshot.get(row_no) or {}
@@ -3333,7 +3948,9 @@ def _expand_ambiguous_sod_waterfall(
                 "但盈亏行缺少应收金额，无法验证拆分守恒。"
             )
             return [failed]
+        existing_received = round(float(existing_received) + float((rec.get("_batch_sod_reserved") or {}).get(sod, 0)), 2)
         capacity = round(float(delivery) - float(existing_received), 2)
+        capacity_details.append({"sod": sod, "rows": business_rows, "delivery": float(delivery), "history": float(existing_received), "capacity": capacity})
         if capacity <= tolerance:
             continue
         candidates.append({
@@ -3351,11 +3968,23 @@ def _expand_ambiguous_sod_waterfall(
     if float(total_local) > available + tolerance:
         failed = dict(rec)
         failed.pop("default_first_sod", None)
-        failed["forced_code"] = "E4"
-        failed["forced_reason"] = (
-            f"同 SO 未结清 SOD 可承接金额合计 {available:.2f}，"
-            f"小于本次核销 {float(total_local):.2f}，剩余金额无法安全落表。"
+        missing_sods = sorted(set(line_by_sod) - {
+            str((ledger.row_snapshot.get(row) or {}).get("sod") or "").strip()
+            for row in ledger.so_index.get(so, [])
+        })
+        history_conflict = any(item["capacity"] < -tolerance for item in capacity_details)
+        failed["forced_code"] = "E_SOD_HISTORY_MISMATCH" if history_conflict or missing_sods else "E4"
+        detail = "；".join(
+            f"SOD={item['sod']}（行 {','.join(map(str, item['rows']))}）：交付 {item['delivery']:.2f} − 历史已填 {item['history']:.2f} = 可承接 {item['capacity']:.2f}"
+            for item in capacity_details
         )
+        failed["forced_reason"] = (
+            f"SO={so} 未结清 SOD 可承接金额合计 {available:.2f}，小于本次核销 {float(total_local):.2f}。"
+            + (detail or "未找到同时满足已登记 SOD、未结账且无已填回款的承接行")
+            + (f"；来源 SOD 在盈亏表缺行：{','.join(missing_sods)}" if missing_sods else "")
+            + "；当前无法将回款安全分配到 SOD。请核对历史回款的 SOD 归属和缺失业务行；SO 总额对平不能证明逐 SOD 归属正确。"
+        )
+        failed["sod_capacity_audit"] = capacity_details
         return [failed]
 
     remaining = round(float(total_local), 2)
@@ -3447,6 +4076,8 @@ def _expand_ambiguous_sod_waterfall(
 
 def _clear_new_accrual(result: dict) -> None:
     """SO 尚未全部结清时，只撤销本批将要新增的计提，不改历史已填值。"""
+    if (result.get("baseline_receipt_audit") or {}).get("disposition") in {"skip", "conflict"}:
+        return
     if result.get("code") != "OK_ALREADY_SETTLED":
         five = result.get("five_cols") or {}
         if five:
@@ -3455,7 +4086,7 @@ def _clear_new_accrual(result: dict) -> None:
 
     op = result.get("row_operation") or {}
     op_type = op.get("type")
-    if op_type == "split_payment_chain":
+    if op_type in {"split_payment_chain", BR.OPERATION}:
         for step in op.get("steps") or []:
             (step.get("five_cols") or {})["计提"] = None
             step["derived_cols"] = {}
@@ -3470,11 +4101,28 @@ def _planned_settled_sods(result: dict) -> set[str]:
         return set()
     op = result.get("row_operation") or {}
     op_type = op.get("type")
+    scope = (result.get("split_payment_source") or {}).get("receivable_group_scope") or {}
+    represented_sods = set(scope.get("source_sods") or []) if scope else {str(result.get("sod") or "")}
+    if op_type == BR.OPERATION:
+        return represented_sods if op.get("settled") else set()
+    if result.get("baseline_receipt_audit"):
+        audit = result["baseline_receipt_audit"]
+        return (represented_sods if audit["disposition"] == "skip" and
+                all(row["是否结账"] == "是" for row in audit["before_rows"].values()) else set())
+    history = result.get("receipt_correction") or {}
+    if history.get("history_mode") and history.get("kind") == "existing":
+        before = history.get("before_rows") or {}
+        ref = str(result.get("ledger_row_ref"))
+        if (history.get("current_remaining", 0) > float(amount_policy.BUSINESS_SETTLEMENT_TOLERANCE)
+                or any(row["是否结账"] != "是" for key,row in before.items() if key != ref)):
+            return set()
     if op_type == "split_below":
         return set()
     if op_type == "split_payment_chain":
         if op.get("final_unpaid"):
             return set()
+        if scope and any(step.get("settled") for step in (op.get("steps") or [])):
+            return represented_sods
         return {
             str(step.get("sod") or result.get("sod") or "").strip()
             for step in (op.get("steps") or [])
@@ -3491,7 +4139,7 @@ def _planned_settled_sods(result: dict) -> set[str]:
         return set()
     if (result.get("five_cols") or {}).get("是否结账") == "是":
         sod = str(result.get("sod") or "").strip()
-        return {sod} if sod else set()
+        return represented_sods if sod else set()
     return set()
 
 
@@ -3499,8 +4147,14 @@ def _has_new_planned_accrual(result: dict, sod: str) -> bool:
     """历史幂等行不算“本批会写计提”；它可能正是需要补填的旧行。"""
     if result.get("bucket") != "auto" or result.get("code") == "OK_ALREADY_SETTLED":
         return False
+    if (result.get("baseline_receipt_audit") or {}).get("disposition") in {"skip", "conflict"}:
+        return False
     op = result.get("row_operation") or {}
-    if op.get("type") == "split_payment_chain":
+    scope = (result.get("split_payment_source") or {}).get("receivable_group_scope") or {}
+    if scope and sod in scope.get("source_sods", []):
+        return (common.to_number((result.get("five_cols") or {}).get("计提")) is not None or
+                any(common.to_number((step.get("five_cols") or {}).get("计提")) is not None for step in op.get("steps") or []))
+    if op.get("type") in {"split_payment_chain", BR.OPERATION}:
         return any(
             str(step.get("sod") or result.get("sod") or "").strip() == sod
             and common.to_number((step.get("five_cols") or {}).get("计提")) is not None
@@ -3534,10 +4188,16 @@ def _apply_so_accrual_gate(
             by_so.setdefault(so, []).append(result)
 
     for so, group in by_so.items():
+        if ledger.so_settlement(so)["all_settled"]:
+            continue  # 已整单结账不清空计提、不生成历史补填。
         all_sods: set[str] = set()
         delivery_by_sod: Dict[str, float] = {}
+        group_delivery_sods: set[str] = set()
         for result in group:
             source = result.get("split_payment_source") or {}
+            scope = source.get("receivable_group_scope") or {}
+            if scope:
+                group_delivery_sods.update(scope.get("source_sods") or [])
             all_sods.update(
                 str(sod or "").strip() for sod in (source.get("all_sods") or [])
                 if str(sod or "").strip()
@@ -3563,13 +4223,15 @@ def _apply_so_accrual_gate(
             planned_settled.update(_planned_settled_sods(result))
 
         unsettled: List[str] = []
-        missing_delivery = sorted(sod for sod in all_sods if sod not in delivery_by_sod)
+        missing_delivery = sorted(sod for sod in all_sods if sod not in delivery_by_sod and sod not in group_delivery_sods)
         for sod in sorted(all_sods):
             same_sod_results = [
                 result for result in group
                 if str(result.get("sod") or "").strip() == sod
             ]
-            if any(result.get("bucket") != "auto" for result in same_sod_results):
+            if any(result.get("bucket") != "auto" or
+                   (result.get("baseline_receipt_audit") or {}).get("disposition") == "conflict"
+                   for result in same_sod_results):
                 unsettled.append(sod)
                 continue
             if sod in planned_settled:
@@ -3610,6 +4272,8 @@ def _apply_so_accrual_gate(
         aggregate_sods: set[str] = set()
         for result in group:
             op = result.get("row_operation") or {}
+            scope = (result.get("split_payment_source") or {}).get("receivable_group_scope") or {}
+            aggregate_sods.update(scope.get("source_sods") or [])
             if op.get("type") == "same_so_multi_sod_aggregate":
                 aggregate_sods.update(str(x or "").strip() for x in op.get("member_sods") or [])
 
@@ -3672,6 +4336,7 @@ def _apply_so_accrual_gate(
         carriers = [
             result for result in group
             if result.get("bucket") == "auto" and result.get("ledger_row_ref") is not None
+            and (result.get("baseline_receipt_audit") or {}).get("disposition") not in {"skip", "conflict"}
             and not result.get("same_so_multi_sod_absorbed")
             and not result.get("tail_tolerance_absorbed")
         ]
@@ -3822,18 +4487,62 @@ def classify_records(
     records: List[dict],
     ledger: Optional[LedgerIndex] = None,
     rates: Optional[Dict[str, float]] = None,
+    *, defer_sequence_guard: bool = False,
 ) -> dict:
     rates = rates or {}
     thr = common.tail_threshold()
     year_now = common.current_year()
     resolved_records: List[dict] = []
+    resolved_groups = {}
+    sod_reservations = {}
+    expanded_fallback_sos = set()
     for rec in records:
-        resolved_records.extend(
-            _expand_ambiguous_sod_waterfall(rec, ledger, max(thr, TOL))
-        )
+        source = rec.get("so_receipt_source") or {}
+        if (rec.get("fallback_batch_ars") and rec.get("fallback_sequence_key")
+                and not (rec.get("parent_allocation_audit") or {}).get("reused")
+                and len(source.get("all_sods") or []) > 1
+                and (not rec.get("forced_code") or rec.get("default_first_sod"))):
+            identity = (rec.get("ar"), rec.get("so"))
+            if identity in expanded_fallback_sos:
+                continue
+            expanded_fallback_sos.add(identity)
+            rec = {**rec, "default_first_sod": True, "default_amount_local": source.get("amount_local"),
+                   "default_amount_orig": source.get("amount_orig"),
+                   "default_sod_lines": [{"sod": sod, "deliver_local": amount, "currency": source.get("currency")}
+                                         for sod, amount in (source.get("sod_delivery_local") or {}).items()]}
+        rec = {**rec, "_batch_sod_reserved": {sod: amount for (so, sod), amount in sod_reservations.items() if so == rec.get("so")} if rec.get("fallback_sequence_key") else {}}
+        for resolved in _expand_ambiguous_sod_waterfall(rec, ledger, max(thr, TOL)):
+            if resolved.get("receivable_group_scope"):
+                identity = BR.event_key(resolved)
+                # SOD subset expansion may repeat one SO receipt. Collapse only
+                # identical, source-bound slices of that same event.
+                prior = resolved_groups.get(identity) if identity else None
+                if prior is not None and prior.get("so_receipt_source") == resolved.get("so_receipt_source"):
+                    continue
+                if identity:
+                    resolved_groups[identity] = resolved
+            resolved_records.append(resolved)
+            if (resolved.get("fallback_sequence_key") and resolved.get("sod")
+                    and not resolved.get("forced_code") and not resolved.get("fallback_allocation_reused")):
+                key = (resolved.get("so"), resolved.get("sod"))
+                sod_reservations[key] = round(sod_reservations.get(key, 0) + float(resolved.get("amount_local") or 0), 2)
+    # Later receipts in this batch must not switch the same SOD's split mode.
+    batch_cumulative = {}
+    batch_first_cumulative = {}
+    for rec in resolved_records:
+        value = common.to_number(rec.get("cumulative_received_local"))
+        key = (rec.get("so"), rec.get("sod"))
+        if value is not None:
+            batch_cumulative[key] = max(batch_cumulative.get(key, 0.0), float(value))
+            batch_first_cumulative[key] = min(batch_first_cumulative.get(key, float(value)), float(value))
     results = []
     for rec in resolved_records:
+        key = (rec.get("so"), rec.get("sod"))
+        rec = {**rec, "_baseline_batch_cumulative": batch_cumulative.get(key),
+               "_baseline_batch_first_cumulative": batch_first_cumulative.get(key)}
         result = classify_one(rec, ledger, rates, thr, year_now)
+        if rec.get("_execution_source_lineage"):
+            result["source_lineage"] = rec["_execution_source_lineage"]
         audit = rec.get("ambiguous_sod_waterfall") or {}
         if audit:
             result["reason"] = (
@@ -3842,13 +4551,27 @@ def classify_records(
             )
         results.append(result)
 
+    BR.combine(results)
+
     # 同一 SO/SOD 被不同父 AR 依次核销时，通常保留每一笔父回款并建立连续拆行链。
     # 已有完整聚合结清行且小额父回款尾差合计不超过 1 元时，保留聚合行并幂等跳过。
+    # 已按本批回款证据幂等确认的记录不再参与当前批次的多父回款重组；
+    # 只把尚未覆盖的本批记录交给分笔/合并判断，避免把已写行再次算进链。
     # 不同 SO/SOD、同一父 AR、缺记录号或运行累计不守恒时继续 E8 挂起。
     by_row: Dict[int, List[dict]] = {}
     for r in results:
         ref = r.get("ledger_row_ref")
-        if r["bucket"] == "auto" and ref is not None:
+        if (
+            r["bucket"] == "auto"
+            and ref is not None
+            and not r.get("baseline_receipt_audit")
+            and r.get("code") not in {
+                "OK_ALREADY_SETTLED",
+                settlement_status.SO_ALREADY_SETTLED,
+                "OK_FALLBACK_ALLOCATION_ALREADY_APPLIED",
+                "OK_ITEMIZED_CUMULATIVE_ALREADY_APPLIED",
+            }
+        ):
             by_row.setdefault(int(ref), []).append(r)
 
     for ref, group in by_row.items():
@@ -3990,7 +4713,7 @@ def classify_records(
                 r["warning_codes"] = warnings
                 r["reason"] = (
                     f"{r.get('reason') or '核销命中'}；同一 SO/SOD 的 {len(operation['steps'])} 行业务回款"
-                    f"按核销记录顺序逐笔拆行，本笔序号 {int(step['index']) + 1}"
+                    f"按{'到账日期及AR单号' if step.get('sequence_basis') == FS.RULE else '核销记录'}顺序逐笔拆行，本笔序号 {int(step['index']) + 1}"
                 )
             continue
 
@@ -4009,7 +4732,11 @@ def classify_records(
     # 行冲突、分笔链和同 SO 多 SOD 合并均已定型后，再执行 SO 级计提闸。
     # 这样判断依据是本批最终会落表的状态，不会被单条 classify_one 的中间态误导。
     _apply_so_accrual_gate(results, ledger, max(thr, TOL))
+    import receipt_correction
+    receipt_correction.finalize_plans(results)
 
+    if not defer_sequence_guard:
+        FS.guard(results)
     auto = [r for r in results if r["bucket"] == "auto"]
     hold = [r for r in results if r["bucket"] == "hold"]
     exc = [r for r in results if r["bucket"] == "exception"]
@@ -4064,14 +4791,15 @@ def classify_records_by_year(
 
     all_results: List[dict] = []
     if unrouted:
-        part = classify_records(unrouted, None, rates)
+        part = classify_records(unrouted, None, rates, defer_sequence_guard=True)
         for bucket in ("auto", "hold", "exception"):
             all_results.extend(part.get(bucket) or [])
     for year, year_records in grouped.items():
-        part = classify_records(year_records, ledgers.get(year), rates)
+        part = classify_records(year_records, ledgers.get(year), rates, defer_sequence_guard=True)
         for bucket in ("auto", "hold", "exception"):
             all_results.extend(part.get(bucket) or [])
 
+    FS.guard(all_results)
     all_results.sort(key=lambda item: int(item.pop("_year_route_order", 0) or 0))
     auto = [r for r in all_results if r.get("bucket") == "auto"]
     hold = [r for r in all_results if r.get("bucket") == "hold"]
@@ -4094,7 +4822,7 @@ def classify_records_by_year(
 
 # 「没交付进表」的挂起码：只有这些才让一笔到账的流转状态掉到「部分」。
 # E5（部分核销）不在内 —— 钱已全核落地、她拆行即算更新（2026-07-24 明妹口径）。
-_FLOW_WAIT_CODES = {"E2", "E3", "E_DELIVERY_DATE_MISSING", "E_DELIVERY_DATE_CONFLICT"}
+_FLOW_WAIT_CODES = {"E2", "E3", "E_DELIVERY_DATE_MISSING", "E_DELIVERY_DATE_CONFLICT", "E_PARENT_ALLOCATION_HISTORY_MISSING", "E_PARENT_ALLOCATION_BASELINE_CHANGED"}
 
 
 def _flow_ready(item: dict) -> str:
@@ -4203,6 +4931,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--rate", action="append", default=[], help="外币汇率 美元USD=7.0")
     ap.add_argument("--out", default="", help="判定结果 json 路径")
     ap.add_argument("--flow", default="", help="到账流转表副本（只读）；不给则扫 02_我的表副本/")
+    ap.add_argument("--flow-source-workspace", default="", help="优化测试的只读流转材料目录")
     ap.add_argument(
         "--name-map", action="append", default=[],
         help="名称对照表路径（表头为到账名称/系统客户名称），可重复；默认按表头自动识别",
@@ -4248,18 +4977,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             payments = load_exports(ws, target_date=requested_date)
         allocation_state = FAL.load(ws)
+        for ledger in ledgers.values():
+            ledger.baseline_receipt_state = allocation_state.get("baseline_receipts") or {}
         for payment in payments:
             payment.setdefault("_fallback_allocation_state", allocation_state)
             if ledgers:
+                payment["_ledger_received_local_by_so"] = {
+                    str(order["so"]).strip(): ledgers[delivery_date.year].so_totals(order["so"])[1]
+                    for order in (payment.get("orders") or [])
+                    for delivery_date in [common.norm_date(order.get("delivery_date"))]
+                    if order.get("so") and delivery_date is not None and delivery_date.year in ledgers
+                }
                 payment["_ledger_settled_sos"] = sorted({
                     str(order.get("so") or "").strip()
                     for order in (payment.get("orders") or [])
-                    if order.get("so") and any(
-                        index.settled_without_open_row(
-                            str(order.get("so") or "").strip()
-                        ) is not None
-                        for index in ledgers.values()
-                    )
+                    for delivery_date in [common.norm_date(order.get("delivery_date"))]
+                    if order.get("so") and delivery_date is not None
+                    and delivery_date.year in ledgers
+                    and ledgers[delivery_date.year].so_settlement(order["so"])["all_settled"]
                 })
         records = expand_payments(payments, rates)
     except (InputError, ValueError) as e:
@@ -4275,7 +5010,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     flow = (
         FL.FlowLedger.from_paths([Path(args.flow)], name_map_paths=name_map_paths)
         if args.flow
-        else FL.FlowLedger.from_workspace(ws, name_map_paths=name_map_paths)
+        else FL.FlowLedger.from_workspace(Path(args.flow_source_workspace) if args.flow_source_workspace else ws,
+                                         name_map_paths=name_map_paths)
     )
     if flow.rows:
         FL.annotate_records(records, flow, complete=args.flow_complete)
@@ -4335,13 +5071,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result["duplicate_writeoff_audit_sha256"] = WDA.audit_fingerprint(duplicate_audits)
     result["flow_sources"] = flow.sources
     result["business_rules"] = {
-        "parent_receipt_basis": "net_arrival_plus_explicit_fees_taxes",
-        "whole_parent_conservation_gate": "effective_details_required_and_abs_delta_lte_1",
+        "parent_receipt_basis": "zhiyun_total_received_without_fee_tax_deduction",
+        "whole_parent_conservation_gate": "actual_details_or_verified_parent_allocation",
         "itemized_fee_policy": "whole_parent_conservation_then_no_double_allocation",
         "writeoff_basis": "zhiyun_current_writeoff_direct",
-        "parent_fallback_allocation": "non_whole_only_delivery_amount_ascending_outstanding_waterfall",
+        "parent_fallback_allocation": "missing_itemized_amount_delivery_ascending_outstanding_waterfall",
         "parent_fallback_state": FAL.LEDGER_NAME,
-        "ledger_settled_precheck": "settled_row_exists_and_no_open_split_row",
+        "ledger_settled_precheck": (
+            "all_so_business_rows_settled_skip_without_financial_write_else_current_event_signature"
+        ),
+        "settled_event_uncovered": (
+            "open_so_closed_sod_without_current_event_evidence_is_"
+            "E_SETTLED_CURRENT_EVENT_UNCOVERED"
+        ),
         "ledger_year_routing": "zhiyun_project_delivery_date_to_matching_annual_ledger_no_number_inference",
         "missing_rate_policy": "use_writeoff_amount_directly",
         "technical_amount_tolerance": TOL,

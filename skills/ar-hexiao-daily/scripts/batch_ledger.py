@@ -5,7 +5,8 @@
 
 为什么必须有它（2026-07-25 立）：
   旧版取数写死 `--date yesterday`，"昨天"是相对**运行那天**算的。
-  → 核销可能发生在周末；如果漏天只检查工作日，周六、周日的数据会永远没人管。
+  → 她周一跑，取的是周日（销售周末不核销，必空批）；周二再跑取周一，
+    **周六、周日、周一之间漏掉的核销日永远没人管，程序一声不吭**。
   → 她请假两天、出差一周、系统故障没跑，同理静默漏。
   漏一天 = 那天的到账永远不会回填进盈亏表，而且**没有任何地方看得出来**。
 
@@ -33,7 +34,6 @@ from typing import Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import atomic_json_store  # noqa: E402
 import common  # noqa: E402
 
 try:
@@ -53,19 +53,6 @@ STAGE_CN = {
 }
 
 
-def _empty_ledger() -> dict:
-    return {"start_date": None, "runs": {}}
-
-
-def _validate_ledger(data: dict) -> None:
-    if not isinstance(data, dict):
-        raise TypeError("跑批台账必须是对象")
-    if data.get("start_date") is not None and not isinstance(data.get("start_date"), str):
-        raise TypeError("start_date 必须是日期文本或空值")
-    if not isinstance(data.get("runs", {}), dict):
-        raise TypeError("runs 必须是对象")
-
-
 def ledger_path(workspace: Path) -> Path:
     d = Path(workspace) / "03_台账"
     d.mkdir(parents=True, exist_ok=True)
@@ -74,11 +61,12 @@ def ledger_path(workspace: Path) -> Path:
 
 def load(workspace: Path) -> dict:
     p = ledger_path(workspace)
-    data = atomic_json_store.load_json(
-        p,
-        default_factory=_empty_ledger,
-        validate=_validate_ledger,
-    )
+    if not p.is_file():
+        return {"start_date": None, "runs": {}}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {"start_date": None, "runs": {}}
     data.setdefault("runs", {})
     data.setdefault("start_date", None)
     return data
@@ -86,12 +74,7 @@ def load(workspace: Path) -> dict:
 
 def save(workspace: Path, data: dict) -> Path:
     p = ledger_path(workspace)
-    atomic_json_store.update_json(
-        p,
-        default_factory=_empty_ledger,
-        validate=_validate_ledger,
-        mutate=lambda current: current.clear() or current.update(data),
-    )
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return p
 
 
@@ -108,40 +91,32 @@ def record(
     """登记一次跑批。同一天可多次登记，stage 只前进不后退。"""
     if stage not in STAGES:
         raise ValueError(f"stage 只能是 {STAGES}，收到 {stage!r}")
+    data = load(workspace)
     key = hexiao_date.isoformat()
     now = dt.datetime.now().isoformat(timespec="seconds")
-
-    def mutate(data: dict) -> dict:
-        data.setdefault("runs", {})
-        rec = data["runs"].get(key) or {"hexiao_date": key, "first_run_at": now}
-        old = rec.get("stage")
-        # 只前进不后退：重跑判定不该把「已写表」降级成「判过了」
-        if old is None or STAGES.index(stage) >= STAGES.index(old):
-            rec["stage"] = stage
-        rec["last_run_at"] = now
-        if payments is not None:
-            rec["payment_count"] = int(payments)
-            rec["empty_batch"] = int(payments) == 0
-        if counts is not None:
-            rec["counts"] = counts
-        if written is not None:
-            rec["written"] = written
-        if note:
-            rec["note"] = note
-        if stage == "applied":
-            rec["applied_at"] = now
-        data["runs"][key] = rec
-        if not data.get("start_date"):
-            # 第一次用 = 起点。之前的历史不算漏（否则会从年初开始报一堆空档）
-            data["start_date"] = key
-        return dict(rec)
-
-    return atomic_json_store.update_json(
-        ledger_path(workspace),
-        default_factory=_empty_ledger,
-        validate=_validate_ledger,
-        mutate=mutate,
-    )
+    rec = data["runs"].get(key) or {"hexiao_date": key, "first_run_at": now}
+    old = rec.get("stage")
+    # 只前进不后退：重跑判定不该把「已写表」降级成「判过了」
+    if old is None or STAGES.index(stage) >= STAGES.index(old):
+        rec["stage"] = stage
+    rec["last_run_at"] = now
+    if payments is not None:
+        rec["payment_count"] = int(payments)
+        rec["empty_batch"] = int(payments) == 0
+    if counts is not None:
+        rec["counts"] = counts
+    if written is not None:
+        rec["written"] = written
+    if note:
+        rec["note"] = note
+    if stage == "applied":
+        rec["applied_at"] = now
+    data["runs"][key] = rec
+    if not data.get("start_date"):
+        # 第一次用 = 起点。之前的历史不算漏（否则会从年初开始报一堆空档）
+        data["start_date"] = key
+    save(workspace, data)
+    return rec
 
 
 def done_dates(data: dict) -> set:
@@ -160,14 +135,14 @@ def done_dates(data: dict) -> set:
 def find_gaps(
     workspace: Path,
     through: Optional[dt.date] = None,
-    include_weekend: bool = True,
+    include_weekend: bool = False,
 ) -> Dict[str, object]:
     """
     从起点到 through 之间，**没被处理过**的核销日。
-    默认包含周末；只有明确传入 include_weekend=False 时才只检查工作日。
+    默认只报工作日（销售周末基本不核销）；要连周末一起补加 --all-days。
     """
     data = load(workspace)
-    through = through or (dt.date.today() - dt.timedelta(days=1))
+    through = through or common.prev_workday()
     start = common.norm_date(data.get("start_date"))
     done = done_dates(data)
     if start is None:
@@ -201,10 +176,10 @@ def find_gaps(
 def suggest_date(workspace: Path, today: Optional[dt.date] = None) -> Dict[str, object]:
     """
     建议这次该跑哪个核销日 = **最早那个没跑过的**（有空档就先补最早的），
-    否则 = 昨天。附上理由，供编排器直接执行。
+    否则 = 上一个工作日。附上理由，供编排器直接执行。
     """
     today = today or dt.date.today()
-    default = today - dt.timedelta(days=1)
+    default = common.prev_workday(today)
     info = find_gaps(workspace, through=default)
     gaps = info["gaps"]
     if gaps:
@@ -219,7 +194,7 @@ def suggest_date(workspace: Path, today: Optional[dt.date] = None) -> Dict[str, 
         }
     return {
         "date": default,
-        "reason": "没有漏掉的天，按常规跑昨天",
+        "reason": "没有漏掉的天，按常规跑上一个工作日",
         "gaps": [],
         "info": info,
     }
@@ -292,21 +267,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="跑批台账（哪天跑过 / 哪天漏了）")
     ap.add_argument("action", choices=["gaps", "record", "show"])
     ap.add_argument("--workspace", default=str(common.WORK))
-    ap.add_argument("--through", default="", help="查到哪天为止（默认昨天）")
-    date_scope = ap.add_mutually_exclusive_group()
-    date_scope.add_argument(
-        "--all-days",
-        dest="all_days",
-        action="store_true",
-        default=True,
-        help="周末也算该跑的日子（当前默认行为，保留参数兼容旧调用）",
-    )
-    date_scope.add_argument(
-        "--workdays-only",
-        dest="all_days",
-        action="store_false",
-        help="只检查周一至周五",
-    )
+    ap.add_argument("--through", default="", help="查到哪天为止（默认上一个工作日）")
+    ap.add_argument("--all-days", action="store_true", help="周末也算该跑的日子")
     ap.add_argument("--hexiao-date", default="", help="record：这批的核销日期")
     ap.add_argument("--stage", default="classified", choices=list(STAGES))
     ap.add_argument("--payments", type=int, default=None, help="record：这批到账笔数")

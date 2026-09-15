@@ -26,6 +26,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 import amount_policy  # noqa: E402
+import settlement_status  # noqa: E402
+import baseline_receipts as BR  # noqa: E402
+import fallback_sequence as FS
+import fallback_allocation_ledger as FAL  # noqa: E402
 import writeoff_duplicate_audit as WDA  # noqa: E402
 
 try:
@@ -42,8 +46,29 @@ BUSINESS_SETTLEMENT_TOL = float(amount_policy.BUSINESS_SETTLEMENT_TOLERANCE)
 
 
 def _whole_parent_gate_error(audit: dict) -> str:
+    try:
+        return _whole_parent_gate_error_checked(audit)
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return "父回款金额审计字段无效，不能进入写入"
+
+
+def _whole_parent_gate_error_checked(audit: dict) -> str:
     """不只信任 status；按审计事实重算整笔回款的父 AR 守恒闸。"""
     if not audit.get("is_whole_payment"):
+        return ""
+    if audit.get("status") == "parent_allocation_required":
+        basis = audit.get("comparison_basis")
+        records = audit.get("order_records") or []
+        capacities = [BR.cents(row.get("capacity")) for row in records]
+        parent = BR.cents(audit.get("parent_total_local" if basis == "parent_allocation_local" else "parent_total_orig"))
+        if (basis not in {"parent_allocation_local", "parent_allocation_original"}
+                or not records or len({row.get("so") for row in records}) != len(records)
+                or not all(row.get("so") and row.get("source") == "delivery_capacity" for row in records)
+                or any(value is None or value < 0 for value in capacities)
+                or parent is None or parent <= 0 or audit.get("raw_record_count")
+                or audit.get("effective_order_amount_count") != 0
+                or sum(capacities) != BR.cents(audit.get("order_capacity_total"))):
+            return "无明细父回款的交付容量或实际金额来源核验失败"
         return ""
     try:
         detail_count = int(
@@ -58,6 +83,7 @@ def _whole_parent_gate_error(audit: dict) -> str:
     basis = audit.get("comparison_basis")
     allowed = {
         "order_written_off_local", "order_written_off_original",
+        "single_order_parent_local", "single_order_parent_original",
         "delivery_fallback_local", "delivery_fallback_original",
         # 兼容修复前已生成、但仍可能被只读复核的旧计划。
         "detail_local", "detail_original",
@@ -73,7 +99,7 @@ def _whole_parent_gate_error(audit: dict) -> str:
     threshold = BUSINESS_SETTLEMENT_TOL if threshold is None else abs(float(threshold))
     if delta is None:
         return "整笔回款缺少父总到账与订单金额的差额审计"
-    if basis.startswith("order_written_off") or basis.startswith("delivery_fallback"):
+    if basis.startswith(("order_written_off", "delivery_fallback", "single_order_parent")):
         order_total = common.to_number(audit.get("order_amount_total"))
         parent_total = common.to_number(
             audit.get("parent_total_local")
@@ -85,10 +111,33 @@ def _whole_parent_gate_error(audit: dict) -> str:
         expected_delta = round(float(parent_total) - float(order_total), 2)
         if abs(expected_delta - float(delta)) > 0.01:
             return "整笔回款审计中的父总到账、订单金额合计与差额不守恒"
+        if basis.startswith("single_order_parent"):
+            records = audit.get("order_records") or []
+            if len(records) != 1 or records[0].get("source") != "single_order_parent" or BR.cents(records[0].get("basis_amount")) != BR.cents(parent_total):
+                return "唯一订单的实际核销金额与父总到账不一致"
         if basis.startswith("delivery_fallback") and not audit.get("fallback_used"):
             return "整笔回款使用交付额兜底但缺少兜底审计标记"
-    if abs(float(delta)) > threshold:
-        return f"整笔回款的父总到账与订单金额合计差额超过{threshold:g}元"
+    if float(delta) < -threshold:
+        return f"整笔回款的父总到账低于订单金额合计超过{threshold:g}元"
+    return ""
+
+
+def _delivery_fallback_local_error(audit: dict, item: dict) -> str:
+    """外币交付额兜底只能凭智云本币交付额或订单汇率进入写入。"""
+    if item.get("code") == settlement_status.SO_ALREADY_SETTLED:
+        return ""  # 整单跳过没有本币写入；父 AR 守恒及禁止携带写入指令另行复核。
+    if not str(audit.get("comparison_basis") or "").startswith("delivery_fallback"):
+        return ""
+    evidence = item.get("write_currency_audit") or item
+    if common.is_cny(evidence.get("currency") or ""):
+        return ""
+    amount_local = common.to_number(evidence.get("amount_local"))
+    deliver_local = common.to_number(evidence.get("deliver_local"))
+    basis = str(evidence.get("local_amount_basis") or "")
+    if basis not in {"zhiyun_delivery_local", "order_exchange_rate"}:
+        return "外币交付额兜底缺少本币金额来源，禁止写入原币金额"
+    if amount_local is None or deliver_local is None:
+        return "外币交付额兜底缺少本币回款额或本币交付额，禁止写入"
     return ""
 
 
@@ -116,6 +165,11 @@ def duplicate_audit_error(plan: dict, item: Optional[dict] = None) -> str:
         gate_error = _whole_parent_gate_error(audit)
         if gate_error:
             return f"父回款 {ar} 未通过父AR金额守恒检查：{gate_error}"
+        if status == "parent_allocation_required" and not current.get("parent_allocation_audit"):
+            return f"父回款 {ar} 缺少顺序分配审计，不能按交付额直接写入"
+        local_error = _delivery_fallback_local_error(audit, current)
+        if local_error:
+            return f"父回款 {ar} 未通过写入币种检查：{local_error}"
         if status == "recovered":
             if "W_SYSTEM_DUPLICATE_WRITEOFF_COLLAPSED" not in warnings:
                 return f"父回款 {ar} 已做系统重复纠正，但auto缺少警告码"
@@ -138,24 +192,12 @@ def _norm(v) -> str:
         return s
 
 
-def _optional_number_equal(left, right, tolerance: float = 0.011) -> bool:
-    if left is None or right is None:
-        return left is None and right is None
-    return abs(float(left) - float(right)) <= tolerance
-
-
 def read_ledger_rows(path: Path) -> Dict[int, dict]:
     """把盈亏『明细』整表读成 {行号: {列名: 值}}，用于逐条复核。"""
-    import openpyxl
+    from workbook_read_cache import read_rows
 
-    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-    if "明细" not in wb.sheetnames:
-        wb.close()
-        raise ValueError(f"盈亏表无『明细』sheet：{wb.sheetnames}")
-    ws = wb["明细"]
     aliases = common.load_aliases()
-    all_rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    all_rows = read_rows(path, "明细")
     hrow, headers = common.find_header_row(
         all_rows, "盈亏明细", ["SO", "SOD", "计提", "回款明细", "是否结账"], aliases
     )
@@ -317,7 +359,6 @@ def resolve_same_so_multi_sod_row(
 def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> Optional[dict]:
     """复核逐笔分笔链的结构、金额守恒及完整幂等状态。"""
     op = item.get("row_operation") or {}
-    special_mode = op.get("receivable_mode") == "preserve_baseline_blank_carry"
     steps = op.get("steps") or []
     if len(steps) < 2:
         return {"verdict": "conflict", "reason": "分笔回款链至少需要两笔不同父回款"}
@@ -325,25 +366,9 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
         source = round(float(op["source_receivable"]), 2)
         initial = round(float(op["initial_cumulative"]), 2)
         latest = round(float(op["latest_delivery"]), 2)
-        if special_mode:
-            baseline = round(float(op["baseline_receivable"]), 2)
-            opening_unreceived = round(float(op["opening_unreceived"]), 2)
-            source_row_receivable = common.to_number(op.get("source_row_receivable"))
-        else:
-            baseline = opening_unreceived = source_row_receivable = None
     except (KeyError, TypeError, ValueError):
         return {"verdict": "conflict", "reason": "分笔回款链基线参数缺失或不是数字"}
-    if special_mode:
-        if (
-            source != baseline
-            or latest <= baseline
-            or initial < 0
-            or abs((latest - initial) - opening_unreceived) > 0.011
-            or source_row_receivable is not None
-            and abs(float(source_row_receivable) - baseline) > 0.011
-        ):
-            return {"verdict": "conflict", "reason": "特殊分笔链基线或内部未收金额不成立"}
-    elif source < 0 or initial < 0 or latest <= 0 or abs((latest - initial) - source) > 0.011:
+    if source < 0 or initial < 0 or latest <= 0 or abs((latest - initial) - source) > 0.011:
         return {"verdict": "conflict", "reason": "分笔链起点不守恒：最新交付额-历史累计必须等于当前应收"}
 
     tail_error = _tail_tolerance_audit_error(op, source)
@@ -360,15 +385,15 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
     if any(len(key) < 2 or not key[1] for key in order_keys) or order_keys != sorted(order_keys):
         return {"verdict": "conflict", "reason": "分笔链缺少或打乱核销记录顺序"}
 
-    previous_remaining = opening_unreceived if special_mode else source
+    previous_remaining = source
     expected_cumulative = initial
     for index, step in enumerate(steps):
         five = step.get("five_cols") or {}
         try:
             current = round(float(step["current_received"]), 2)
             cumulative = round(float(step["cumulative_received"]), 2)
+            receivable = round(float(step["receivable"]), 2)
             remaining = round(float(step["remaining_after"]), 2)
-            receivable = common.to_number(step.get("receivable"))
         except (KeyError, TypeError, ValueError):
             return {"verdict": "conflict", "reason": "分笔链步骤金额缺失或不是数字"}
         expected_cumulative = round(expected_cumulative + current, 2)
@@ -378,18 +403,9 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
         if abs(remaining - expected_remaining) > 0.011:
             return {"verdict": "conflict", "reason": "分笔链剩余应收公式不成立"}
         settled = bool(step.get("settled"))
-        if special_mode:
-            expected_receivable = source_row_receivable if index == 0 else None
-            if (
-                (receivable is None) != (expected_receivable is None)
-                or receivable is not None
-                and abs(float(receivable) - float(expected_receivable)) > 0.011
-            ):
-                return {"verdict": "conflict", "reason": "特殊分笔链只能在原行保留原始应收"}
-        else:
-            expected_receivable = previous_remaining if settled else round(previous_remaining - remaining, 2)
-            if receivable is None or receivable < 0 or abs(receivable - expected_receivable) > 0.011:
-                return {"verdict": "conflict", "reason": "分笔链拆行后的单步应收不守恒"}
+        expected_receivable = previous_remaining if settled else round(previous_remaining - remaining, 2)
+        if receivable < 0 or abs(receivable - expected_receivable) > 0.011:
+            return {"verdict": "conflict", "reason": "分笔链拆行后的单步应收不守恒"}
         if settled and index != len(steps) - 1:
             return {"verdict": "conflict", "reason": "只有分笔链最后一笔允许结清"}
         if not settled and five.get("计提") is not None:
@@ -402,14 +418,8 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
 
     final_unpaid = op.get("final_unpaid")
     if previous_remaining > 0.011:
-        final_remaining = common.to_number(
-            (final_unpaid or {}).get("remaining_unreceived")
-            if special_mode else (final_unpaid or {}).get("receivable")
-        )
-        if not final_unpaid or final_remaining is None or abs(float(final_remaining) - previous_remaining) > 0.011:
+        if not final_unpaid or abs(float(final_unpaid.get("receivable") or 0) - previous_remaining) > 0.011:
             return {"verdict": "conflict", "reason": "分笔链未结清但缺少最终未回款承接行"}
-        if special_mode and common.to_number(final_unpaid.get("receivable")) is not None:
-            return {"verdict": "conflict", "reason": "特殊分笔链最终未回款行应收必须留空"}
         unpaid_five = final_unpaid.get("five_cols") or {}
         if unpaid_five.get("是否结账") != "否" or any(
             unpaid_five.get(key) is not None for key in ("计提", "回款明细", "收款时间", "收款方式")
@@ -420,28 +430,15 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
 
     row = rows.get(ref)
     current_receivable = common.to_number((row or {}).get("应收金额"))
-    first_receivable = common.to_number(steps[0].get("receivable"))
-    current_matches_first = (
-        current_receivable is None and first_receivable is None
-    ) or (
-        current_receivable is not None
-        and first_receivable is not None
-        and abs(float(current_receivable) - float(first_receivable)) <= 0.011
-    )
-    first_fields_match = _matches_planned_fields(
-        rows.get(ref), steps[0].get("five_cols") or {}
-    )
-    if current_matches_first and first_fields_match:
+    if current_receivable is not None and abs(float(current_receivable) - float(steps[0]["receivable"])) <= 0.011:
         so = str(item.get("so") or "").strip()
         sod = str(item.get("sod") or "").strip()
         for offset, step in enumerate(steps):
             actual = rows.get(ref + offset)
             if (
                 not _matches_identity(actual, so, sod)
-                or not _optional_number_equal(
-                    common.to_number((actual or {}).get("应收金额")),
-                    common.to_number(step.get("receivable")),
-                )
+                or common.to_number((actual or {}).get("应收金额")) is None
+                or abs(float(actual["应收金额"]) - float(step["receivable"])) > 0.011
                 or not _matches_planned_fields(actual, step.get("five_cols") or {})
             ):
                 return {"verdict": "conflict", "reason": "分笔回款链看似已写入，但某个父回款行不完整或被改动"}
@@ -450,16 +447,13 @@ def _check_split_payment_chain(item: dict, rows: Dict[int, dict], ref: int) -> O
             expected = final_unpaid.get("five_cols") or {}
             if (
                 not _matches_identity(actual, so, sod)
-                or not _optional_number_equal(
-                    common.to_number((actual or {}).get("应收金额")),
-                    common.to_number(final_unpaid.get("receivable")),
-                )
+                or common.to_number((actual or {}).get("应收金额")) is None
+                or abs(float(actual["应收金额"]) - float(final_unpaid["receivable"])) > 0.011
                 or not _matches_planned_fields(actual, expected)
             ):
                 return {"verdict": "conflict", "reason": "分笔回款链最终未回款行不完整或被改动"}
         return {"verdict": "skip", "reason": "分笔回款链全部父回款行已完整写入，幂等跳过"}
-    expected_source_row = source_row_receivable if special_mode else source
-    if not _optional_number_equal(current_receivable, expected_source_row):
+    if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
         return {"verdict": "conflict", "reason": f"分笔链源行应收已变化：表里={current_receivable} 计划基线={source}"}
 
     source_five = op.get("source_five_cols") or {}
@@ -864,6 +858,19 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     - skip     ：已经填过且与计划一致 → 幂等跳过（重复跑不重复写）
     - conflict ：行号对不上 / 已填但不一致 / 值不合法 → 不写，交给人看
     """
+    import receipt_history
+    zero = receipt_history.check_zero(item, rows)
+    if zero is not None:
+        return zero
+    import receipt_correction
+    correction = receipt_correction.check(item, rows)
+    if correction is not None:
+        return correction
+    scope_error = BR.check_scope(item, rows)
+    if scope_error:
+        return scope_error
+    if item.get("baseline_receipt_audit"):
+        return BR.check(item, rows)
     ref = item.get("ledger_row_ref")
     five = item.get("five_cols") or {}
     derived = item.get("derived_cols") or {}
@@ -934,38 +941,20 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
                 ),
             }
         if op.get("type") == "split_below":
-          receivable_mode = op.get("receivable_mode") or "conserve_receivable"
           try:
             source = round(float(op["source_receivable"]), 2)
+            paid = round(float(op["paid_receivable"]), 2)
+            unpaid = round(float(op["unpaid_receivable"]), 2)
             latest = round(float(op["latest_delivery"]), 2)
             cumulative = round(float(op["cumulative_received"]), 2)
-            if receivable_mode == "preserve_baseline_blank_carry":
-              baseline = round(float(op["baseline_receivable"]), 2)
-              remaining = round(float(op["remaining_unreceived"]), 2)
-              planned_current = common.to_number(
-                  op.get("source_row_receivable", source)
-              )
-              paid = unpaid = None
-            else:
-              paid = round(float(op["paid_receivable"]), 2)
-              unpaid = round(float(op["unpaid_receivable"]), 2)
-              baseline = remaining = planned_current = None
           except (KeyError, TypeError, ValueError):
             return {"verdict": "conflict", "reason": "部分回款拆行参数缺失或不是数字"}
-          if receivable_mode == "preserve_baseline_blank_carry":
-            if latest <= baseline or source != baseline:
-              return {"verdict": "conflict", "reason": "特殊拆行必须满足交付额大于原始应收且保留原始应收基线"}
-            if planned_current is not None and abs(float(planned_current) - baseline) > 0.011:
-              return {"verdict": "conflict", "reason": "特殊拆行首行的非空应收必须等于原始应收基线"}
-            if remaining <= 0 or abs((latest - cumulative) - remaining) > 0.011:
-              return {"verdict": "conflict", "reason": f"特殊拆行内部未收公式不成立：{latest}-{cumulative}!={remaining}"}
-          else:
-            if paid < 0 or unpaid <= 0:
-              return {"verdict": "conflict", "reason": f"拆行应收异常：已收侧={paid} 未收侧={unpaid}"}
-            if abs((paid + unpaid) - source) > 0.011:
-              return {"verdict": "conflict", "reason": f"拆行不守恒：{paid}+{unpaid}!={source}"}
-            if abs((latest - cumulative) - unpaid) > 0.011:
-              return {"verdict": "conflict", "reason": f"未回款公式不成立：{latest}-{cumulative}!={unpaid}"}
+          if paid < 0 or unpaid <= 0:
+            return {"verdict": "conflict", "reason": f"拆行应收异常：已收侧={paid} 未收侧={unpaid}"}
+          if abs((paid + unpaid) - source) > 0.011:
+            return {"verdict": "conflict", "reason": f"拆行不守恒：{paid}+{unpaid}!={source}"}
+          if abs((latest - cumulative) - unpaid) > 0.011:
+            return {"verdict": "conflict", "reason": f"未回款公式不成立：{latest}-{cumulative}!={unpaid}"}
           inserted = op.get("inserted_five_cols") or {}
           if inserted.get("是否结账") != "否":
             return {"verdict": "conflict", "reason": "拆出的未回款行必须是否结账=否"}
@@ -976,24 +965,10 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
         # 写后重跑：原行已变成已收侧、下一行已是未收侧时，识别为完整幂等状态。
         # 不能继续拿拆前 source_receivable 要求当前行，否则受控拆行必然假报冲突。
           current_receivable = common.to_number(row.get("应收金额"))
-          special_mode = receivable_mode == "preserve_baseline_blank_carry"
-          special_current_matches = special_mode and (
-            (current_receivable is None and planned_current is None)
-            or (
-              current_receivable is not None
-              and planned_current is not None
-              and abs(float(current_receivable) - float(planned_current)) <= 0.011
-            )
-          )
-          current_matches_written = (
-            special_current_matches
-            or (
-              not special_mode
-              and current_receivable is not None
-              and abs(float(current_receivable) - paid) <= 0.011
-            )
-          )
-          if current_matches_written:
+          if (
+            current_receivable is not None
+            and abs(float(current_receivable) - paid) <= 0.011
+          ):
             next_row = rows.get(int(ref) + 1)
             next_receivable = (
                 common.to_number(next_row.get("应收金额"))
@@ -1011,12 +986,8 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
             )
             if (
                 same_next_identity
-                and (
-                    next_receivable is None
-                    if special_mode
-                    else next_receivable is not None
-                    and abs(float(next_receivable) - unpaid) <= 0.011
-                )
+                and next_receivable is not None
+                and abs(float(next_receivable) - unpaid) <= 0.011
                 and paid_matches
                 and unpaid_matches
             ):
@@ -1024,24 +995,14 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
                     "verdict": "skip",
                     "reason": "部分回款拆行已完整写入（已收行+紧邻未收行），幂等跳过",
                 }
-            if paid_matches:
-              return {
-                  "verdict": "conflict",
-                  "reason": "当前行看似已拆分，但已收行或紧邻未收行与计划不一致",
-              }
-          source_matches = (
-              special_current_matches
-              if special_mode
-              else current_receivable is not None
-              and abs(float(current_receivable) - source) <= 0.011
-          )
-          if not source_matches:
             return {
                 "verdict": "conflict",
-                "reason": (
-                    f"当前行应收已变化：表里={current_receivable} "
-                    f"计划目标={planned_current if special_mode else source}"
-                ),
+                "reason": "当前行看似已拆分，但已收行或紧邻未收行与计划不一致",
+            }
+          if current_receivable is None or abs(float(current_receivable) - source) > 0.011:
+            return {
+                "verdict": "conflict",
+                "reason": f"当前行应收已变化：表里={current_receivable} 计划基线={source}",
             }
 
     # ③ 目标格现在是什么
@@ -1123,10 +1084,58 @@ def check_one(item: dict, rows: Dict[int, dict]) -> dict:
     raise AssertionError("不可达")
 
 
+def parent_allocation_history_errors(plan: dict, rows: Dict[int, dict]) -> Dict[str, str]:
+    """Independently reject fresh parent allocations that erase paid workbook history."""
+    received_by_so: Dict[str, float] = {}
+    for row in rows.values():
+        so = str(row.get("SO") or "").strip()
+        amount = common.to_number(row.get("回款明细"))
+        if so and amount is not None:
+            received_by_so[so] = round(received_by_so.get(so, 0.0) + float(amount), 2)
+    errors = {}
+    active_parents = {
+        item.get("ar") for item in plan.get("auto") or []
+        if item.get("code") != settlement_status.SO_ALREADY_SETTLED
+    }
+    for ar, audit in (plan.get("parent_fallback_allocations") or {}).items():
+        if ar not in active_parents:
+            continue
+        reused = bool(audit.get("reused_successful_allocation"))
+        if reused and "applied_sos" not in audit:
+            continue
+        allocations = audit.get("allocations") or []
+        if not any(float(row.get("allocated") or 0.0) > float(amount_policy.TECHNICAL_EPSILON) for row in allocations):
+            continue
+        for allocation in allocations:
+            # A reused zero assignment has no pending money on this SO.
+            # Fresh allocation capacity and all positive assignments remain checked.
+            if reused and allocation.get("allocated_local") == 0 and allocation.get("allocated") == 0:
+                continue
+            so = str(allocation.get("so") or "").strip()
+            if reused and so in audit["applied_sos"]:
+                continue
+            current_applied = sum(
+                case["amount_local"] for case in (audit.get("applied_cases") or {}).values()
+                if case["so"] == so
+            )
+            error = FAL.unexplained_receipts(
+                ar, so, received_by_so.get(so, 0.0),
+                float(allocation.get("historical_received_local") or 0.0) + current_applied,
+                reused_allocation=reused, current_applied=current_applied,
+            )
+            if error:
+                errors[ar] = error
+                break
+    return errors
+
+
 def validate(
     plan: dict,
     rows: Dict[int, dict],
     ledger_path: Optional[Path] = None,
+    *,
+    allocation_errors: Optional[Dict[str, str]] = None,
+    defer_sequence_guard: bool = False,
 ) -> dict:
     items = [dict(it) for it in (plan.get("auto") or [])]
     by_case_id = {
@@ -1135,8 +1144,23 @@ def validate(
     }
     checked: List[dict] = []
     seen_rows: Dict[int, str] = {}
+    if allocation_errors is None:
+        allocation_errors = parent_allocation_history_errors(plan, rows)
     for it in items:
-        audit_error = duplicate_audit_error(plan, it)
+        audit_error = duplicate_audit_error(plan, it) or allocation_errors.get(it.get("ar"))
+        scope_error = BR.check_scope(it, rows)
+        if it.get("code") == FS.ZERO:
+            audit = it.get("parent_allocation_audit") or {}
+            basis = it.get("zero_allocation_basis") or {}
+            actual = {str(ref): BR.normalized(row) for ref, row in rows.items() if row.get("SO") == it.get("so")}
+            received = sum(float(row.get("回款明细") or 0) for row in actual.values())
+            delivery = common.to_number(basis.get("delivery_local"))
+            valid = (not audit_error and not scope_error and bool(actual)
+                and actual == basis.get("before_rows") and delivery is not None
+                and abs(received + float(basis.get("reserved_local") or 0) - delivery) <= 0.011
+                and audit.get("allocated_local") == 0 and (it.get("fallback_batch_cases") or audit.get("reused")))
+            checked.append({**it, "_check": {"verdict": "skip" if valid else "conflict", "reason": audit_error or (scope_error or {}).get("reason") or ("核实本笔零分配及前序依赖" if valid else "零分配订单及前序回款基线不一致")}})
+            continue
         original_ref = it.get("ledger_row_ref")
         operation_type = (it.get("row_operation") or {}).get("type")
         is_split_chain = operation_type == "split_payment_chain"
@@ -1152,6 +1176,23 @@ def validate(
         settled_ref = None if (is_split_chain or is_guarded_aggregate) else settled_without_open_row(it, rows)
         if audit_error:
             res = {"verdict": "conflict", "reason": audit_error}
+        elif scope_error:
+            res = scope_error
+        elif it.get("receipt_correction") or it.get("zero_delivery_audit") or it.get("baseline_receipt_audit"):
+            res = check_one(it, rows)
+        elif it.get("code") == settlement_status.SO_ALREADY_SETTLED:
+            settlement = settlement_status.inspect_so(it.get("so"), (
+                {"row": row_no, "so": row.get("SO"), "sod": row.get("SOD"), "settled": row.get("是否结账")}
+                for row_no, row in rows.items()
+            ))
+            if not settlement["all_settled"]:
+                res = {"verdict": "conflict", "reason": "整单跳过的写前复核失败：" + settlement["reason"] + "请重新判定。"}
+            elif any(it.get(key) for key in ("five_cols", "derived_cols", "row_operation", "so_accrual_backfills")):
+                res = {"verdict": "conflict", "reason": "整 SO 已结账跳过项含写入或计提补填指令；拒绝执行，请重新生成计划。"}
+            else:
+                it["ledger_row_ref"] = settlement["rows"][0]["row"]
+                it["so_settlement_audit"] = settlement
+                res = {"verdict": "skip", "reason": settlement["reason"]}
         elif multi_sod_marker:
             target = by_case_id.get(str(multi_sod_marker.get("target_case_id") or ""))
             marker_error = _absorbed_multi_sod_error(it, target)
@@ -1180,7 +1221,7 @@ def validate(
             it["ledger_row_ref"] = int(settled_ref)
             res = {
                 "verdict": "skip",
-                "reason": "订单已写入/已结账，且不存在拆分未结账行（幂等跳过）",
+                "reason": f"SO={it.get('so')}、SOD={it.get('sod') or '全部'} 的目标业务行全部已结账，无未结账拆分行；写前按现有结账状态跳过，保留历史值。",
             }
         else:
             if is_split_chain:
@@ -1224,7 +1265,12 @@ def validate(
         cur = rows.get(int(ref)) if ref else None
         if cur is not None:
             item["_identity"] = {"row": int(ref), "SO": cur["SO"], "SOD": cur["SOD"]}
+        import flow_monthly
+        item['flow_receipt_proof'] = flow_monthly.checked_receipt_proof(
+            item, rows, plan.get('hexiao_date'), plan.get('parent_fallback_allocations') or {})
         checked.append(item)
+    if not defer_sequence_guard:
+        FS.guard(checked, checked=True)
     buckets = {"write": [], "skip": [], "conflict": []}
     for c in checked:
         buckets[c["_check"]["verdict"]].append(c)
@@ -1249,6 +1295,33 @@ def validate(
         out["ledger_path"] = str(ledger_path)
         out["ledger_sha256"] = common.sha256_file(ledger_path)
     return out
+
+
+
+def recheck_so_skips(plan: dict, ledger_path: Path) -> List[str]:
+    """执行前复核本年度整单跳过；即使没有财务 write 也要检查。"""
+    items = [it for it in (plan.get("skip") or [])
+             if it.get("code") == settlement_status.SO_ALREADY_SETTLED]
+    if not items:
+        return []
+    expected = plan.get("ledger_sha256")
+    if not expected or common.sha256_file(ledger_path) != expected:
+        return [f"{ledger_path.name} 整单跳过计划缺少指纹或当前指纹已变化；请重新校验全部 SO 业务行。"]
+    if plan.get("ledger_path") and Path(plan["ledger_path"]).resolve() != ledger_path.resolve():
+        return ["整单跳过计划的盈亏表路径与当前表不同；请重新校验。"]
+    # Recheck this year's settled rows, then evaluate their dependencies against
+    # the complete checked batch. A skip-only subset is not a complete component.
+    checked = validate({**plan, "auto": items}, read_ledger_rows(ledger_path),
+                       defer_sequence_guard=True)
+    refreshed = [it for bucket in ("write", "skip", "conflict") for it in checked[bucket]]
+    refreshed_ids = {it.get("case_id") for it in refreshed}
+    context = plan.get("_sequence_checked_items")
+    if context is None:
+        context = [it for bucket in ("write", "skip", "conflict") for it in (plan.get(bucket) or [])]
+    universe = [dict(it) for it in context if it.get("case_id") not in refreshed_ids] + refreshed
+    FS.guard(refreshed, checked=True, universe=universe)
+    return [f"{it.get('case_id')}: {it['_check']['reason']}" for it in refreshed
+            if it["_check"]["verdict"] == "conflict"]
 
 
 def validate_by_year(
@@ -1276,6 +1349,11 @@ def validate_by_year(
         },
     } for item in missing_year_items)
     checks = {}
+    # A parent's orders may span years. A conflict in one year blocks the same
+    # parent in every year, without mixing row numbers or unrelated orders.
+    allocation_errors: Dict[str, str] = {}
+    for year_rows in rows_by_year.values():
+        allocation_errors.update(parent_allocation_history_errors(plan, year_rows))
     for year, items in grouped.items():
         if year not in rows_by_year:
             merged["conflict"].extend({
@@ -1288,7 +1366,7 @@ def validate_by_year(
             continue
         subplan = {**plan, "auto": items}
         path = ledger_paths.get(year)
-        checked = validate(subplan, rows_by_year[year], ledger_path=path)
+        checked = validate(subplan, rows_by_year[year], ledger_path=path, allocation_errors=allocation_errors, defer_sequence_guard=True)
         for bucket in merged:
             merged[bucket].extend(checked.get(bucket) or [])
         if path is not None:
@@ -1297,6 +1375,9 @@ def validate_by_year(
                 "sha256": common.sha256_file(path),
             }
 
+    sequence_items = [item for bucket in merged.values() for item in bucket]
+    FS.guard(sequence_items, checked=True)
+    merged = {key: [item for item in sequence_items if item["_check"]["verdict"] == key] for key in merged}
     out = {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "hexiao_date": plan.get("hexiao_date") or "",
@@ -1383,7 +1464,7 @@ def main(argv=None) -> int:
         rows_by_year = {
             year: read_ledger_rows(path)
             for year, path in ledger_paths.items()
-            if year in needed_years
+            if year in needed_years or plan.get("parent_fallback_allocations")
         }
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)

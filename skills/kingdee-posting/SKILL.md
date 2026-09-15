@@ -1,5 +1,6 @@
 ---
 name: kingdee-posting
+version: "1.0"
 description: >-
   把销项发票簿、供应商付款台账+发票PDF、或收款表，按技能自带的金蝶凭证引入空模填好。
   销项发票和付款不要登录智云、不要读 zhiyun.local.json；智云失败也必须出表。

@@ -10,9 +10,9 @@
 
 | 用途 | 地址 |
 |------|------|
-| **主仓（开发 push / fetch）** | GitHub **https://github.com/EvanLee2004/finance-skills** |
-| **国内镜像（同事 pull 优先）** | Gitee **https://gitee.com/Lee157/finance-skills** |
-| 分支 | 默认 **`main`**（日常只跟 main） |
+| **发布源（开发 push / 同事 pull）** | Gitee **https://gitee.com/Lee157/finance-skills** |
+| 分支 | 默认 **`main`** |
+| 版本 | 每个 skill 的 `SKILL.md` YAML `version`，2026-09-15 起全员 **1.0**；改哪个 skill 只给那个 +0.1 |
 
 本地开发目录（明昊机器）：
 
@@ -23,7 +23,7 @@
 - 所有业务 skill 都在 **`skills/<技能id>/`**
 - **不是**每个 skill 一个仓库；**一个仓装全部**
 - 应收核销日清 `ar-hexiao-daily`、九点下单、部门费用……全部在本 monorepo 里；**没有**单独平行仓库要同步
-- 开发改完：测绿 → **`git push origin main`**（一键双端 GitHub+Gitee）→ 云端即最新；**不必再打 zip**
+- 开发改完：测绿 → **`git push gitee main`** → 云端即最新；**不必再打 zip**。默认不推 GitHub。
 
 ---
 
@@ -31,7 +31,7 @@
 
 | 角色 | 动作 |
 |------|------|
-| **开发（明昊 / AI）** | 在本仓改码 → 测绿 → `git push origin main`（GitHub+Gitee）。**到此交付完成**；不用再打包 zip、不用飞书发压缩包。 |
+| **开发（明昊 / AI）** | 在本仓改码 → 该 skill `version` +0.1 → 测绿 → `git push gitee main`。**到此交付完成**。 |
 | **同事本机（已装过财务 skills）** | 对 opencode 说一句：**「更新财务skills」**（或「更新财务技能 / 更新财务技能包」）。Agent 从云端 `main` 拉最新 → **只覆盖财务包白名单** → **保留你本地 config** → **不动你自己做的其他 skill**。 |
 | **同事本机（首次安装）** | 说「安装财务skills」或粘手册第三节 A 段；Agent 从 Gitee/GitHub clone 后按白名单装入 opencode。 |
 

@@ -69,21 +69,12 @@ def _group_by_ar(items: List[dict]) -> Dict[str, List[dict]]:
 
 
 def _delivery_amount(item: dict) -> Optional[float]:
-    """取智云本次分类保留下来的 SO 最新本币交付金额。"""
-    source = item.get("split_payment_source") or {}
-    for value in (
-        source.get("so_delivery_local"),
-        item.get("so_delivery_local"),
-        source.get("delivery_local"),
-        item.get("delivery_local"),
-    ):
-        if value is None or value == "":
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
+    """SO delivery amount for display; independent of actual receipt deduction."""
+    import flow_monthly
+    try:
+        return float(flow_monthly.delivery_amount(item))
+    except ValueError:
+        return None
 
 
 def _rich_runs(text: str, red_sos: List[str]) -> List[dict]:
@@ -126,12 +117,17 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
     so_list = []
     so_amounts: Dict[str, Optional[float]] = {}
     so_outcomes: Dict[str, dict] = {}
+    amount_cases = set()
     for it in items:
         so = (it.get("so") or "").strip()
         if so and so not in so_list:
             so_list.append(so)
-        if so and (so not in so_amounts or so_amounts[so] is None):
-            so_amounts[so] = _delivery_amount(it)
+        case = it.get("case_id") or (so, it.get("sod"))
+        if so and case not in amount_cases:
+            amount_cases.add(case)
+            amount = _delivery_amount(it)
+            if so not in so_amounts or so_amounts[so] is None:
+                so_amounts[so] = amount
         if so:
             outcome = so_outcomes.setdefault(
                 so, {"so": so, "buckets": [], "case_ids": [], "codes": []}
@@ -142,7 +138,7 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
             if it.get("code"):
                 outcome["codes"].append(it["code"])
     existing = (best.get("flow_order_existing") or "").strip()
-    # 取数后先写「SO + 最新交付金额」，一个 SO 一行；表内其它已有订单保持不动。
+    # 单号展示SO交付金额；预收扣减由月度写入器另取实际核销金额。
     order_suggest = FlowLedger.suggest_order_amount_cell(
         [(so, so_amounts.get(so)) for so in so_list], existing
     )
@@ -190,7 +186,7 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
         return {**base, "verdict": "hand", "reason": matched_by or "流转表未命中"}
 
     if hits and int(hits) > 1:
-        return {**base, "verdict": "hand", "reason": f"多命中 hits={hits}，须人工指定行"}
+        return {**base, "verdict": "hand", "reason": f"按{matched_by or '当前匹配条件'}多命中 hits={hits}，须人工指定行"}
 
     # hits == 1：准入必须是精确强三键集合（禁止 startswith 放宽）
     if matched_by not in STRONG:
@@ -201,17 +197,6 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
     if not file_ or not sheet or row_no is None:
         return {**base, "verdict": "hand", "reason": "强命中但无法解析 file/sheet/row"}
 
-    missing_delivery = [
-        entry["so"] for entry in base["so_entries"]
-        if entry.get("delivery_amount") is None
-    ]
-    if missing_delivery:
-        return {
-            **base,
-            "verdict": "hand",
-            "reason": "SO交付金额缺失，不能自动前置写入：" + "、".join(missing_delivery),
-        }
-
     # 至少要写单号或是否更新之一；单号空则只写是否更新
     if not base["write_order"] and not base["write_updated"]:
         return {**base, "verdict": "skip", "reason": "无可写字段"}
@@ -219,7 +204,7 @@ def plan_item_for_ar(ar: str, items: List[dict], summary_row: Optional[dict]) ->
     return {**base, "verdict": "write", "reason": ""}
 
 
-def finalize_plan_after_ledger(flow_plan: dict, checked_plan: dict) -> dict:
+def finalize_plan_after_ledger(flow_plan: dict, checked_plan: dict, *, workspace: Optional[Path] = None) -> dict:
     """根据盈亏表实际可写/已写结果回填“是/部分/空白”和未核销红字。"""
     good = {
         ((x.get("ar") or "").strip(), (x.get("so") or "").strip())
@@ -274,6 +259,14 @@ def finalize_plan_after_ledger(flow_plan: dict, checked_plan: dict) -> dict:
         item["red_sos"] = incomplete if status == "部分" else []
         item["order_rich_runs"] = _rich_runs(item.get("order_suggest") or "", item["red_sos"])
         item["phase"] = "post_ledger"
+    import flow_monthly
+    flow_monthly.finalize(finalized.get("items") or [], checked_plan)
+    if workspace is not None:
+        flow_monthly.prepare(workspace, finalized.get("items") or [])
+    finalized["counts"] = {kind: sum(x.get("verdict")==kind for x in finalized.get("items") or [])
+                           for kind in ("write","hand","skip")}
+    finalized["manual_items"] = [{k:x.get(k) for k in ("ar","reason","file","sheet","row_no")}
+                                 for x in finalized.get("items") or [] if x.get("verdict")=="hand"]
     finalized["phase"] = "post_ledger"
     return finalized
 
@@ -284,7 +277,13 @@ def build_plan(result: dict) -> dict:
     summary_by = {s.get("ar") or "-": s for s in (result.get("ar_summary") or [])}
     plan_items = []
     for ar, group in by_ar.items():
-        plan_items.append(plan_item_for_ar(ar, group, summary_by.get(ar)))
+        item = plan_item_for_ar(ar, group, summary_by.get(ar))
+        item["monthly_schema"] = "receipt-monthly-v2"
+        item["monthly_date"] = result.get("hexiao_date") or ""
+        locations = {(x.get("flow_file"),x.get("flow_sheet"),x.get("flow_row_no")) for x in group if x.get("flow_hits")==1}
+        if len(locations)>1:
+            item.update(verdict="hand",reason="同笔到账的分项定位不一致")
+        plan_items.append(item)
     counts = {"write": 0, "hand": 0, "skip": 0}
     for it in plan_items:
         counts[it["verdict"]] = counts.get(it["verdict"], 0) + 1

@@ -14,5 +14,6 @@
 | 收款少问能跑完 `018` | `/Users/evanlee/.grok/worktrees/skills-finance-skills/kingdee-receipt-018` · `kingdee-receipt-018` @ `207f5b2` | 可删 | 已进 GitHub `main` |
 | 月度损益表 `pl-dept-report` `013` | 正式 clone · `main` | 使用中 | 已双端 `40008ff`：先源再核算 + 材料夹/期间不符修补 |
 | 序时账入金蝶 `kingdee-gl-import` `014` | 同上正式 clone · `main` | 使用中 | 湖南分抄作业 |
+| 018 李尚平台并入正本 | 正式 clone · `main`（人要求不开 worktree） | 使用中 | 全员 version 1.0；删 platform-skills；只推 Gitee |
 
 `git worktree list` 本仓三间 fork：`kingdee-posting-unify`、`kingdee-receipt-016`、`kingdee-receipt-018`。

@@ -797,26 +797,44 @@ def _write_pivot_grouped(ws, pivot):
 
 
 def _upgrade_pivot_output(out_path, master_out, pivot):
-    """把静态 S8 汇总升级成可刷新原生透视表；失败时保留静态备份。"""
+    """生成可交互的原生透视表；失败时不交付静态替代品。"""
     if install_native_pivot is None:
-        log("⚠ S8 原生透视表模块缺失，保留静态透视汇总")
-        return
-    try:
-        install_native_pivot(out_path, master_out, pivot)
-        log("· S8 透视汇总：已生成原生可刷新透视表，数据源覆盖主表实际列")
-    except Exception as exc:
-        log(f"⚠ S8 原生透视表生成失败，保留静态透视汇总：{exc}")
+        raise RuntimeError("原生透视表模块缺失，无法生成合并结果")
+    install_native_pivot(out_path, master_out, pivot)
+    log("· S8 透视汇总：已生成按应收金额降序的原生透视表")
+
+
+def _write_collection_reference(writer, master_out):
+    """筛选后按销售和客户合计，仅保留合计金额不少于十万元的组。"""
+    stages = master_out["结算阶段"].fillna("").astype(str)
+    excluded_sales = {"梁玲玲-高美杰", "于占国-高美杰", "史立云"}
+    sales = master_out["销售人员"].fillna("").astype(str).str.strip()
+    eligible = ~stages.str.contains("已回款", regex=False) & ~sales.isin(excluded_sales)
+    selected = master_out.loc[eligible,
+                              ["销售人员", "客户名称", "应收金额"]].copy()
+    selected["应收金额"] = pd.to_numeric(selected["应收金额"], errors="raise")
+    selected = selected.groupby(["销售人员", "客户名称"], sort=False, dropna=False)["应收金额"].sum(min_count=1).reset_index()
+    # 金额按分比较，避免浮点加法把恰好十万元的组误判为不足。
+    selected["应收金额"] = selected["应收金额"].round(2)
+    selected = selected.loc[selected["应收金额"] >= 100000]
+    selected = selected.sort_values("应收金额", ascending=False, kind="stable")
+    selected = selected.rename(columns={
+        "销售人员": "销售", "客户名称": "公司名称", "应收金额": "金额"})
+    _strip_illegal(selected).to_excel(writer, sheet_name="催收参考", index=False)
+    ws = writer.sheets["催收参考"]
+    _style_master_header(ws, 3)
+    _style_master_body(ws, len(selected) + 1, 3, 3)
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 44
+    ws.column_dimensions["C"].width = 20
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:C{len(selected) + 1}"
 
 
 def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unmatched, variants, residual, ycheck, removed, report_df):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    # 先写静态汇总；随后升级为原生透视表，静态版本保留为审计备份。
-    sheets = {
-        "主表": master_out,
-        "认列告警": col_warn, "归属变更": reassign, "归属存疑": suspect,
-        "未匹配复核": unmatched, "名称变体": variants, "离职残留": residual,
-        "年度校验": ycheck, "被删0行": removed, "运行报告": report_df,
-    }
+    # 交付主表、原生透视汇总及催收参考；内部诊断仍用于处理与日志。
+    sheets = {"主表": master_out}
     ncol = len(master_out.columns)
     amount_idx = (list(master_out.columns).index("应收金额") + 1) if "应收金额" in master_out.columns else None
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
@@ -825,12 +843,13 @@ def write_workbook(out_path, master_out, pivot, reassign, suspect, col_warn, unm
         ws_master = w.sheets["主表"]
         _style_master_header(ws_master, ncol)                       # 表头美化（不改数据）
         _style_master_body(ws_master, len(master_out) + 1, ncol, amount_idx)  # 正文加边框 + 应收金额会计格式
-        # 先建静态「透视汇总」，升级步骤会将其改名为「透视汇总_静态备份」。
+        # 先建立汇总显示，随后替换为原生透视表，不保留静态备份。
         wb = w.book
         pv = wb.create_sheet("透视汇总")
         _write_pivot_grouped(pv, pivot)
         wb._sheets.remove(pv)
         wb._sheets.insert(1, pv)
+        _write_collection_reference(w, master_out)
     _upgrade_pivot_output(out_path, master_out, pivot)
     return out_path
 

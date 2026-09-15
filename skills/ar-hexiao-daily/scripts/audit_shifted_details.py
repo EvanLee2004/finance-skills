@@ -22,6 +22,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--workspace", default=str(common.WORK))
     ap.add_argument("--date-from", default="", help="只审计此日及以后；补跑时应明确给出")
     ap.add_argument("--date-to", default="", help="只审计此日及以前；补跑时应明确给出")
+    ap.add_argument("--date", action="append", default=[], help="只保留明确选择的核销日，可重复")
     ap.add_argument("--out", default="", help="可选：写 JSON 报告")
     args = ap.parse_args(argv)
 
@@ -38,7 +39,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("ERROR: --date-from 不能晚于 --date-to", file=sys.stderr)
         return 2
 
+    selected_dates = set()
+    for value in args.date:
+        parsed = common.resolve_batch_date(value)
+        if parsed is None:
+            print(f"ERROR: 认不出 --date {value!r}", file=sys.stderr)
+            return 2
+        selected_dates.add(parsed.isoformat())
+
     found = classify.assess_shifted_detail_dates(ws, date_from=date_from, date_to=date_to)
+    if selected_dates:
+        found = {day: info for day, info in found.items() if day in selected_dates}
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)

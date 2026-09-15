@@ -1,5 +1,6 @@
 ---
 name: ar-hexiao-daily
+version: "1.0"
 description: >-
   应收核销日清：编排出纳李明妹每天回款核销（智云取数、核销判定、核销日清清单、
   日清后统一写盈亏明细 + 流转安全子集、挂账重扫）。必须先生成《核销日清》并通过写前校验，
@@ -291,7 +292,7 @@ python3 scripts/build_task_reports.py --date-from "<开始日期>" --date-to "<�
 python3 scripts/verify_sources.py verify
 ```
 
-多日任务中，`classify_hexiao.py`、`validate_plan.py`、`build_flow_plan.py`、`build_worklist.py` 必须传入当前日期对应的显式输入和输出路径，不得依赖“最新文件”猜测。长期工作副本保留内部公式和历史外链公式；便携版只把历史外链公式转换为缓存值，并按剩余公式重建计算链。交付的所有 Excel 逐个运行 `python D:\BESTEASY\financial_pj\tools\xlsx_lightweight_audit.py <文件路径> --strict`。
+多日任务中，`classify_hexiao.py`、`validate_plan.py`、`build_flow_plan.py`、`build_worklist.py` 必须传入当前日期对应的显式输入和输出路径，不得依赖“最新文件”猜测。长期工作副本保留内部公式和历史外链公式；便携版只把历史外链公式转换为缓存值，并按剩余公式重建计算链。交付的 Excel 用本技能 `scripts/` 写后回读校验；不要调平台仓里的 Windows 绝对路径工具。
 
 `--confirmed` 仅为旧命令兼容参数，不再是写入条件。用户明确说“只出清单/不要写表”时不得 apply；普通核销指令在日清和写前校验通过后直接 apply。
 

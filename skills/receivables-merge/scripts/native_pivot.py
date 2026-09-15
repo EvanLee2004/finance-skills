@@ -45,7 +45,6 @@ PIVOT_CACHE_RECORDS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocumen
 PIVOT_TABLE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"
 
 PIVOT_NAME = "透视汇总"
-STATIC_BACKUP_NAME = "透视汇总_静态备份"
 SOURCE_NAME = "ReceivablesPivotSource"
 ACCT_FMT = '_-* #,##0.00_-;-* #,##0.00_-;_-* "-"??_-;_-@_-'
 ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -209,13 +208,11 @@ def _prepare_workbook(path: Path, pivot: Any) -> None:
     wb = load_workbook(path)
     if PIVOT_NAME not in wb.sheetnames:
         raise RuntimeError(f"工作簿缺少静态透视汇总 sheet：{PIVOT_NAME}")
-    if STATIC_BACKUP_NAME in wb.sheetnames:
-        raise RuntimeError(f"工作簿已存在备份 sheet：{STATIC_BACKUP_NAME}")
-
-    wb[PIVOT_NAME].title = STATIC_BACKUP_NAME
+    wb.remove(wb[PIVOT_NAME])
     pivot_ws = wb.create_sheet(PIVOT_NAME, 1)
     _write_collapsed_display(pivot_ws, pivot)
     wb.save(path)
+    wb.close()
 
 
 def _relationship_id(root: ET.Element) -> str:
@@ -386,6 +383,17 @@ def _pivot_items(field: ET.Element, values: list[str | None], mapping: dict[str,
     ET.SubElement(items, _q("item"), default_attrs)
 
 
+def _sort_by_receivable_amount(field: ET.Element) -> None:
+    """Persist value sorting, rather than sorting row labels on expand/refresh."""
+    scope = ET.SubElement(field, _q("autoSortScope"))
+    area = ET.SubElement(scope, _q("pivotArea"), {"dataOnly": "0", "outline": "0"})
+    references = ET.SubElement(area, _q("references"), {"count": "1"})
+    # OOXML's data-field pseudo-axis (-2 unsigned); item 0 is our sole sum field.
+    reference = ET.SubElement(references, _q("reference"),
+                              {"field": "4294967294", "count": "1", "selected": "0"})
+    ET.SubElement(reference, _q("x"), {"v": "0"})
+
+
 def _build_pivot_xml(
     headers: list[str],
     sales_values: list[str | None],
@@ -428,9 +436,11 @@ def _build_pivot_xml(
         if index == sales_index:
             field = _pivot_field(fields, axis="axisRow")
             _pivot_items(field, sales_values, sales_mapping, collapsed=True)
+            _sort_by_receivable_amount(field)
         elif index == customer_index:
             field = _pivot_field(fields, axis="axisRow")
             _pivot_items(field, customer_values, customer_mapping, collapsed=False)
+            _sort_by_receivable_amount(field)
         elif index == amount_index:
             _pivot_field(fields, data=True)
         else:

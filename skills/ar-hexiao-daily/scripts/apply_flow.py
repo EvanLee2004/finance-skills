@@ -243,6 +243,12 @@ def write_flow_items(
     import openpyxl
     import xlsx_patch
 
+    if any(it.get("monthly_schema") for it in items):
+        if any(not it.get("monthly_schema") for it in items):
+            return [], ["禁止混用月度与旧版流转计划"]
+        import flow_monthly
+        return flow_monthly.write(workspace, items, in_place=in_place, phase=phase)
+
     aliases = common.load_aliases()
     write_items = [it for it in items if (it.get("verdict") or "") == "write"]
 
@@ -265,6 +271,7 @@ def write_flow_items(
     today = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     for fname, group in by_file.items():
+        changes_before_file = len(changes)
         src = _resolve_flow_path(workspace, fname)
         if not src or not src.is_file():
             for it in group:
@@ -342,6 +349,7 @@ def write_flow_items(
                     edits.append((r, col_upd, upd_v))
                 if not did_order and not do_upd:
                     skipped.append(it)
+                    print(f"流转跳过 AR={it.get('ar') or '-'}、{sheet_name} 第 {r} 行：本阶段计划更新的单号、状态或颜色与表内一致，未改动。")
                     continue
                 write_updated = do_upd
                 changes.append(
@@ -450,7 +458,7 @@ def write_flow_items(
                                 local_problems.append(f"{it.get('ar')} {so} 红字回读不符")
             wb2.close()
 
-            n_ok = len(group)
+            n_ok = len(changes) - changes_before_file
             if local_problems:
                 problems.extend(local_problems)
                 print(

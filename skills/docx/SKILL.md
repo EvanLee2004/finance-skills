@@ -1,5 +1,6 @@
 ---
 name: docx
+version: "1.0"
 description: >-
   创建、读取、编辑 Word 文档（.docx）：写报告/备忘录/函件、套格式、改批注与修订、插图、提取正文等。
   当用户说「做 Word / 写 docx / 出一份报告 / 备忘录 / 函 / 改这份 Word」或给到 .docx 要处理时，主动使用本技能。

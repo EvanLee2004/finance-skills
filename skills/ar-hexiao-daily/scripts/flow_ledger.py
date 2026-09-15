@@ -184,6 +184,22 @@ class FlowLedger:
 
         aliases = common.load_aliases()
         inst = cls()
+        # Pin approved payer/customer aliases with the Skill. Workbook mappings
+        # are merged by the existing set-based loader: conflicts stay ambiguous.
+        name_map_file = Path(__file__).resolve().parent.parent / "config" / "到账名称对照.json"
+        name_map_rows = json.loads(name_map_file.read_text(encoding="utf-8"))
+        if (
+            not isinstance(name_map_rows, list)
+            or not name_map_rows
+            or name_map_rows[0] != [_NAME_MAP_SOURCE, _NAME_MAP_TARGET]
+            or any(
+                not isinstance(row, list) or len(row) != 2
+                or any(not isinstance(value, str) or not value.strip() for value in row)
+                for row in name_map_rows[1:]
+            )
+        ):
+            raise ValueError("内置到账名称对照格式无效，不能继续流转匹配")
+        inst._load_name_map_sheet(name_map_rows, "Skill内置到账名称对照")
         flow_paths = [Path(p) for p in paths]
         map_paths = [Path(p) for p in (name_map_paths if name_map_paths is not None else paths)]
         all_paths = list(dict.fromkeys(flow_paths + map_paths))
@@ -198,7 +214,8 @@ class FlowLedger:
                     wb.close()
                 continue
             for ws in wb.worksheets:
-                all_rows = list(ws.iter_rows(values_only=True))
+                from workbook_read_cache import read_rows
+                all_rows = read_rows(p, ws.title, worksheet=ws)
                 if not all_rows:
                     continue
                 if p in map_path_set:

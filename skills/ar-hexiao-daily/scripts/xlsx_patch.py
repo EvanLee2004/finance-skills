@@ -439,6 +439,60 @@ def _validate_shared_formula_integrity(xml: str) -> None:
         raise ValueError("共享公式结构非法：" + "; ".join(problems[:10]))
 
 
+
+def _expand_edited_shared_formulas(xml: str, edited_refs: set[str]) -> str:
+    """Keep each formula and cache when edits detach members of a shared group.
+
+    Coordinates are final worksheet coordinates, after any row insertions. The
+    caller validates the shared groups before this conversion and after edits.
+    Only affected groups lose their shared representation; other XML is kept.
+    """
+    members = {}
+    masters = {}
+    touched = set()
+    for cell_match in _CELL_ELEMENT_RE.finditer(xml):
+        cell_xml = cell_match.group(0)
+        ref_match = re.search(r'\br="([A-Z]{1,3}\d+)"', cell_xml)
+        formula_match = _FORMULA_ELEMENT_RE.search(cell_xml)
+        if not ref_match or not formula_match:
+            continue
+        formula_xml = formula_match.group(0)
+        tag = re.match(r'<f\b[^>]*?/?>', formula_xml).group(0)
+        if not re.search(r'\bt="shared"', tag):
+            continue
+        si = re.search(r'\bsi="([^"]+)"', tag).group(1)
+        ref = ref_match.group(1)
+        members[ref] = si
+        if ref in edited_refs:
+            touched.add(si)
+        if re.search(r'\bref="', tag):
+            body = re.fullmatch(r'<f\b[^>]*>(.*?)</f>', formula_xml, re.S)
+            if not body or not body.group(1).strip():
+                raise ValueError(f"共享主公式缺少表达式：{ref}")
+            masters[si] = (ref, body.group(1))
+    if not touched:
+        return xml
+
+    def expand_cell(cell_match):
+        cell_xml = cell_match.group(0)
+        ref_match = re.search(r'\br="([A-Z]{1,3}\d+)"', cell_xml)
+        if not ref_match:
+            return cell_xml
+        ref = ref_match.group(1)
+        si = members.get(ref)
+        if si not in touched:
+            return cell_xml
+        formula_match = _FORMULA_ELEMENT_RE.search(cell_xml)
+        origin, body = masters[si]
+        translated = _translate_formula_between_cells(body, origin, ref)
+        tag = re.match(r'<f\b([^>]*?)/?>', formula_match.group(0))
+        attrs = re.sub(r'\s+(?:t|si|ref)="[^"]*"', '', tag.group(1))
+        formula = f'<f{attrs}>{translated}</f>'
+        return cell_xml[:formula_match.start()] + formula + cell_xml[formula_match.end():]
+
+    return _CELL_ELEMENT_RE.sub(expand_cell, xml)
+
+
 def _drop_calc_chain(payload: Dict[str, bytes]) -> None:
     """公式/坐标变更后移除可重建的旧计算链，避免 Excel 打开时修复并删公式。"""
     payload.pop("xl/calcChain.xml", None)
@@ -556,6 +610,8 @@ def patch_cells(
         infos = zin.infolist()
         payload = {i.filename: zin.read(i.filename) for i in infos}
         insertion_specs = list(insertions or [])
+        if insertion_specs:
+            _validate_shared_formula_integrity(xml)
         has_calc_chain = "xl/calcChain.xml" in payload
         requires_full_rebuild = bool(insertion_specs) or not has_calc_chain
         if not requires_full_rebuild:
@@ -597,6 +653,10 @@ def patch_cells(
                 )
                 payload[styles_name] = new_styles.encode("utf-8")
 
+        _validate_shared_formula_integrity(xml)
+        xml = _expand_edited_shared_formulas(
+            xml, {f"{col}{row}" for row, cells in by_row.items() for col in cells}
+        )
         for r, cells in sorted(by_row.items()):
             xml = _patch_row(xml, r, cells, date_style=date_style)
         _validate_shared_formula_integrity(xml)

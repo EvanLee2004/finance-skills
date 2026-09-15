@@ -60,9 +60,10 @@ def register_mutable(workspace: Path, path: Path) -> None:
     )
 
 
-def collect(workspace: Path) -> List[dict]:
+def collect(workspace: Path, ignored_paths: set[str] | None = None) -> List[dict]:
     out: List[dict] = []
     mutable = mutable_files(workspace)
+    ignored = ignored_paths or set()
     for d in WATCH_DIRS:
         base = workspace / d
         if not base.is_dir():
@@ -72,7 +73,12 @@ def collect(workspace: Path) -> List[dict]:
             # 纳进来会让 apply 之后的 verify 必然报「新出现」→ 一句吓人的假警报。
             if "备份" in p.parts:
                 continue
-            if p.is_file() and not p.name.startswith("~$") and str(p.resolve()) not in mutable:
+            if (
+                p.is_file()
+                and not p.name.startswith("~$")
+                and str(p.resolve()) not in mutable
+                and str(p.resolve()) not in ignored
+            ):
                 out.append(
                     {
                         "path": str(p),
@@ -111,16 +117,20 @@ def do_snapshot(workspace: Path) -> int:
     return 0
 
 
-def do_verify(workspace: Path) -> int:
+def do_verify(workspace: Path, ignored_paths: set[str] | None = None) -> int:
     mp = manifest_path(workspace)
     if not mp.is_file():
         print(f"ERROR: 找不到清单 {mp}；请先跑 snapshot", file=sys.stderr)
         return 2
     payload = json.loads(mp.read_text(encoding="utf-8"))
     mutable = mutable_files(workspace)
+    ignored = ignored_paths or set()
     recorded: Dict[str, dict] = {
         f["path"]: f for f in payload.get("files", [])
-        if str(Path(f["path"]).resolve()) not in mutable
+        if (
+            str(Path(f["path"]).resolve()) not in mutable
+            and str(Path(f["path"]).resolve()) not in ignored
+        )
     }
     problems: List[str] = []
     for path_s, item in recorded.items():
@@ -130,7 +140,7 @@ def do_verify(workspace: Path) -> int:
             continue
         if sha256(p) != item.get("sha256"):
             problems.append(f"被改动: {p.name}")
-    now = {f["path"] for f in collect(workspace)}
+    now = {f["path"] for f in collect(workspace, ignored)}
     for extra in sorted(now - set(recorded)):
         problems.append(f"新出现（未在清单内，可能是运行时误写）: {Path(extra).name}")
 
@@ -147,9 +157,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="源文件只读保证（sha256）")
     ap.add_argument("action", choices=["snapshot", "verify"])
     ap.add_argument("--workspace", default=str(common.WORK))
+    ap.add_argument(
+        "--ignore-path",
+        action="append",
+        default=[],
+        help="verify 时忽略指定的次要工作副本；可重复传入",
+    )
     args = ap.parse_args(argv)
     ws = common.resolve_workspace(args.workspace)
-    return do_snapshot(ws) if args.action == "snapshot" else do_verify(ws)
+    ignored = {str(Path(item).resolve()) for item in args.ignore_path}
+    return do_snapshot(ws) if args.action == "snapshot" else do_verify(ws, ignored)
 
 
 if __name__ == "__main__":
