@@ -137,21 +137,29 @@ def parse_assist_xlsx_checked(path: Path) -> list[lookup_mod.AssistRow]:
     """解析并把「表不对」说清楚：不是总部账套 / 没有 1131 明细，都停下来问，不要拿空表把每笔都 hold。"""
     rows = parse_assist_xlsx(path)
     company = assist_xlsx_company(path)
-    if company and HQ_NAME not in company and company not in HQ_NAME:
+    if not company or (HQ_NAME not in company and company not in HQ_NAME):
         raise SystemExit(
-            f"网页引出的客户核算项目余额表是「{company}」的，不是总部账套。销项/收款只记总部。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+            f"网页引出的客户核算项目余额表公司名是「{company or '空'}」，不是总部账套。销项/收款只记总部。{MANUAL_EXPORT_STEPS} 未生成引入表。"
         )
     if not rows:
         raise SystemExit(
             f"网页引出的客户核算项目余额表没有 1131 明细行。多半没切到总部，或过滤不是客户+1131+本年。{MANUAL_EXPORT_STEPS} 未生成引入表。"
         )
     span = assist_xlsx_period_span(path)
-    if span and "-" in span:
-        start, end = (x.strip() for x in span.split("-", 1))
-        if not (start.endswith("01") and end.endswith("12")):
-            raise SystemExit(
-                f"网页引出的期间是 {span}，不是本年（01期-12期）。过滤没点上「本年」。{MANUAL_EXPORT_STEPS} 未生成引入表。"
-            )
+    if not span or "-" not in span:
+        raise SystemExit(
+            f"客户核算项目余额表没有「期间：本年01-12」。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+        )
+    start, end = (x.strip() for x in span.split("-", 1))
+    if not (start.endswith("01") and end.endswith("12")):
+        raise SystemExit(
+            f"网页引出的期间是 {span}，不是本年（01期-12期）。过滤没点上「本年」。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+        )
+    months = {lookup_mod._period_key(r.period)[-2:] for r in rows if lookup_mod._period_key(r.period)}
+    if "01" not in months or "12" not in months:
+        raise SystemExit(
+            f"表头写本年，但行里没有 1 月和 12 月（现有 {sorted(months)}）。未生成引入表。"
+        )
     return rows
 
 
@@ -261,11 +269,11 @@ def _rows_from_virtual(data) -> tuple[list[dict], int, int]:
     return out, total, raw_n
 
 
-async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
+async def _fetch_virtual_pages(page, url: str, post_data: str) -> tuple[list[dict], bool]:
     qs = parse_qs(post_data or "")
     raw_params = (qs.get("params") or [""])[0]
     if not raw_params:
-        return []
+        return [], False
     params = json.loads(raw_params)
     page_id = (qs.get("pageId") or [""])[0]
     app_id = (qs.get("appId") or ["gl"])[0]
@@ -273,6 +281,7 @@ async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
     start = 0
     size = 1000
     total = None
+    fetched = 0
     while True:
         if isinstance(params, list) and params and isinstance(params[0], dict):
             params[0]["args"] = [start, size]
@@ -285,7 +294,7 @@ async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
             },
         )
         if not resp.ok:
-            break
+            return all_rows, False
         data = await resp.json()
         chunk, count, raw_n = _rows_from_virtual(data)
         if total is None:
@@ -294,11 +303,13 @@ async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
         if raw_n <= 0:
             break
         start += raw_n
+        fetched += raw_n
         if total is not None and start >= total:
             break
         if start > 200000:
             break
-    return all_rows
+    complete = total is not None and total > 0 and fetched >= total
+    return all_rows, complete
 
 
 def _scrape_is_year(rows: list[dict]) -> bool:
@@ -865,20 +876,20 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
                         break
                     await page.wait_for_timeout(200)
                 virtual_rows: list[dict] = []
-                if cap.get("url") and cap.get("post"):
+                complete = False
+                cap_url, cap_post = cap.get("url"), cap.get("post")
+                if cap_url and cap_post:
                     try:
-                        virtual_rows = await _fetch_virtual_pages(page, cap["url"], cap["post"])
+                        virtual_rows, complete = await _fetch_virtual_pages(page, cap_url, cap_post)
                     except Exception:
-                        virtual_rows = []
-                if _scrape_is_year(virtual_rows):
-                    write_assist_book(dest, HQ_NAME, f"{year}01-{year}12", virtual_rows)
+                        virtual_rows, complete = [], False
+                if complete and _scrape_is_year(virtual_rows):
+                    keys = [lookup_mod._period_key(r.get("period") or "") for r in virtual_rows]
+                    keys = [k for k in keys if len(k) >= 6]
+                    span = f"{min(keys)}-{max(keys)}" if keys else f"{year}01-{year}12"
+                    write_assist_book(dest, HQ_NAME, span, virtual_rows)
                     parse_assist_xlsx_checked(dest)
                     return {"ok": True, "path": str(dest), "mode": mode + "+api"}
-                scraped = await _scrape_assist_rows(page)
-                if _scrape_is_year(scraped):
-                    write_assist_book(dest, HQ_NAME, f"{year}01-{year}12", scraped)
-                    parse_assist_xlsx_checked(dest)
-                    return {"ok": True, "path": str(dest), "mode": mode + "+grid"}
                 if _logged_out(page) or await page.get_by_text("引出", exact=True).count() == 0:
                     return {
                         "ok": False,

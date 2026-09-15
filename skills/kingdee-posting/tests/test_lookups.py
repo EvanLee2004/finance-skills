@@ -496,7 +496,7 @@ def _assist_book(path: Path, company: str, rows):
     wb = Workbook()
     ws = wb.active
     ws.append(["核算项目余额表"])
-    ws.append([f"公司名称：{company}"])
+    ws.append([f"公司名称：{company}", "", "", "", "", "", "", "期间：202601-202612"])
     ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "期初", "期初", "本期", "本期", "本年累计", "本年累计", "期末", "期末"])
     ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "借方", "贷方", "借方", "贷方", "借方", "贷方", "借方", "贷方"])
     for r in rows:
@@ -527,6 +527,27 @@ def test_assist_checked_rejects_empty_1131(tmp_path):
         raise AssertionError("should stop")
 
 
+def test_assist_checked_rejects_missing_period_header(tmp_path):
+    from openpyxl import Workbook
+
+    p = tmp_path / "核算项目余额表_客户.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["核算项目余额表"])
+    ws.append(["公司名称：甲骨易（北京）语言科技股份有限公司"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "期初", "期初", "本期", "本期", "本年累计", "本年累计", "期末", "期末"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "借方", "贷方", "借方", "贷方", "借方", "贷方", "借方", "贷方"])
+    ws.append(["202609", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None])
+    wb.save(p)
+    wb.close()
+    try:
+        assist_xlsx.parse_assist_xlsx_checked(p)
+    except SystemExit as e:
+        assert "期间" in str(e)
+    else:
+        raise AssertionError("should stop")
+
+
 def test_assist_checked_rejects_single_month_not_year(tmp_path):
     from openpyxl import Workbook
 
@@ -550,9 +571,16 @@ def test_assist_checked_rejects_single_month_not_year(tmp_path):
 
 def test_assist_checked_accepts_hq(tmp_path):
     p = tmp_path / "核算项目余额表_客户.xlsx"
-    _assist_book(p, "甲骨易（北京）语言科技股份有限公司", [["2026-08", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None]])
+    _assist_book(
+        p,
+        "甲骨易（北京）语言科技股份有限公司",
+        [
+            ["2026-01", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None],
+            ["2026-12", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None],
+        ],
+    )
     rows = assist_xlsx.parse_assist_xlsx_checked(p)
-    assert len(rows) == 1 and rows[0].account == "113101"
+    assert {r.period for r in rows} >= {"202601", "202612"}
 
 
 def test_rows_from_virtual_keeps_1131_only():

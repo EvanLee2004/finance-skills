@@ -1361,7 +1361,7 @@ def _assist_rows_for_run(input_dir: Path, box, required: bool, ar_xlsx: Path | N
     if box.assist_supplied:
         return list(box.assist_rows or []), ""
     if ar_xlsx:
-        return assist_mod.parse_assist_xlsx_checked(Path(ar_xlsx)), Path(ar_xlsx).name
+        return assist_mod.parse_assist_xlsx(Path(ar_xlsx)), Path(ar_xlsx).name
     if not required:
         try:
             return assist_mod.fetch_hq_assist()
