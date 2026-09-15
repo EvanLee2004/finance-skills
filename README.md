@@ -4,6 +4,8 @@
 
 开口对照：[技能表](#技能表)。源在 Gitee `Lee157/finance-skills` 的 `main`。
 
+本机已经有的账密 json **不要再问**。没有才让她写一次，不要把密码打进对话。
+
 ## 版本
 
 每个 skill 的 `SKILL.md` 里有 `version`。这次起业务 skill 是 **1.1**。
@@ -16,40 +18,40 @@
 
 ### 亮晶
 
-| 名称 | id | version | 简介 |
-|------|----|---------|------|
-| 应收账款合并（亮晶） | receivables-merge | 1.1 | 分年表合成应收 all，带催收参考和透视 |
-| 应收按销售拆分（亮晶） | split-by-sales | 1.1 | 一张 all 拆成一人一份 |
-| 合规文件抽查（亮晶） | compliance-spot-check | 1.1 | 建议本周抽查名单 |
-| 劳务发票核对（亮晶） | labor-invoice-check | 1.1 | 有票 / 800 以下 / 无票 |
-| 九点下单统计（亮晶） | order-daily-summary | 1.1 | 下单数据（万元） |
-| 追觅应收进度对比（亮晶） | dreame-ar-progress-diff | 1.1 | 两版追觅 list 的进度差 |
+| 名称 | id | version | 简介 | 需要提供 |
+|------|----|---------|------|----------|
+| 应收账款合并（亮晶） | receivables-merge | 1.1 | 分年表合成应收 all，带催收参考和透视 | Excel：本周源台账；最好再给上版应收 all |
+| 应收按销售拆分（亮晶） | split-by-sales | 1.1 | 一张 all 拆成一人一份 | Excel：一张应收 all |
+| 合规文件抽查（亮晶） | compliance-spot-check | 1.1 | 建议本周抽查名单 | Excel：应收 all；可选抽查历史 |
+| 劳务发票核对（亮晶） | labor-invoice-check | 1.1 | 有票 / 800 以下 / 无票 | Excel：应发明细 + 当月个人发票汇总 |
+| 九点下单统计（亮晶） | order-daily-summary | 1.1 | 下单数据（万元） | 智云账号密码；或离线：九点下单明细 Excel |
+| 追觅应收进度对比（亮晶） | dreame-ar-progress-diff | 1.1 | 两版追觅 list 的进度差 | Excel：两版追觅应收 list |
 
 ### 明妹
 
-| 名称 | id | version | 简介 |
-|------|----|---------|------|
-| 应收核销日清（明妹） | ar-hexiao-daily | 1.1 | 智云取数、判定、写盈亏和流转副本 |
+| 名称 | id | version | 简介 | 需要提供 |
+|------|----|---------|------|----------|
+| 应收核销日清（明妹） | ar-hexiao-daily | 1.1 | 智云取数、判定、写盈亏和流转副本 | 智云账号密码；Excel：年度盈亏核算表 + 到账流转表 |
 
 ### 斯佳
 
-| 名称 | id | version | 简介 |
-|------|----|---------|------|
-| 金蝶入账（斯佳） | kingdee-posting | 1.1 | 销项 / 付款 / 收款填引入表，人去点引入 |
-| 月度损益表（斯佳） | pl-dept-report | 1.1 | 星辰多账套拼损益表和利润表 |
-| 序时账入金蝶（斯佳） | kingdee-gl-import | 1.1 | 序时账转官方引入表 |
-| 部门费用归集分摊（斯佳） | dept-expense-alloc | 1.1 | 用友按人拆部门费用 |
-| 合并报表（斯佳） | consolidated-statements | 1.1 | 八主体资负利润现金流底稿 |
-| 代扣代缴申报表重命名（斯佳） | withholding-report-rename | 1.1 | 申报 PDF 按公司名+金额改名 |
+| 名称 | id | version | 简介 | 需要提供 |
+|------|----|---------|------|----------|
+| 金蝶入账（斯佳） | kingdee-posting | 1.1 | 销项 / 付款 / 收款填引入表，人去点引入 | 三入口都要金蝶开放平台应用 ID/密钥。销项：发票簿 Excel，另要客户核算项目余额表 Excel 或金蝶网页账密。付款：付款台账 Excel + 各家发票 PDF。收款：中行收款 Excel；表上销售空了才要智云账号。网页账密与余额表只在销项/收款抄 1131 时用 |
+| 月度损益表（斯佳） | pl-dept-report | 1.1 | 星辰多账套拼损益表和利润表 | 金蝶网页账密 + 开放平台应用 ID/密钥。山东/四川/济南：代账利润表 Excel。薪酬台账 Excel 有就给 |
+| 序时账入金蝶（斯佳） | kingdee-gl-import | 1.1 | 序时账转官方引入表 | Excel：序时账。不要金蝶/智云账密 |
+| 部门费用归集分摊（斯佳） | dept-expense-alloc | 1.1 | 用友按人拆部门费用 | Excel：用友余额表、收入底稿、人员归属、按人明细（工资社保有就给） |
+| 合并报表（斯佳） | consolidated-statements | 1.1 | 八主体资负利润现金流底稿 | 会计月份 YYYYMM。从金蝶拉：金蝶网页账密（五个星辰账套）。山东/四川/济南：人放公司报表 Excel |
+| 代扣代缴申报表重命名（斯佳） | withholding-report-rename | 1.1 | 申报 PDF 按公司名+金额改名 | PDF：代扣代缴申报表一夹。不要账密 |
 
 ### 通用
 
-| 名称 | id | version | 简介 |
-|------|----|---------|------|
-| Excel（通用） | xlsx | 1.1 | 读写和整理表格 |
-| Word（通用） | docx | 1.1 | 读写 Word |
-| PPT（通用） | pptx | 1.1 | 读写演示文稿 |
-| PDF（通用） | pdf | 1.1 | 读、拆、合并 PDF |
+| 名称 | id | version | 简介 | 需要提供 |
+|------|----|---------|------|----------|
+| Excel（通用） | xlsx | 1.1 | 读写和整理表格 | 要改的 Excel |
+| Word（通用） | docx | 1.1 | 读写 Word | 要改的 Word |
+| PPT（通用） | pptx | 1.1 | 读写演示文稿 | 要改的 PPT |
+| PDF（通用） | pdf | 1.1 | 读、拆、合并 PDF | 要处理的 PDF |
 
 已下线：`qige-invoice-to-kingdee`（销项已在金蝶入账）、`task-clarifier`、`update-finance-skills`、`env-doctor`。
 
