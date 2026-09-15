@@ -1,6 +1,22 @@
 # 财务部 skills
 
-一件活一个夹，都在 `skills/`。这份 Gitee 仓库是源。同事跑任务只有两条路，不要混：
+一件活一个夹，都在 `skills/`。
+
+## 更新去哪（默认 Gitee）
+
+同事或 Agent 听到 **「更新财务部skills / 更新财务skills / 拉最新财务技能」**，**只从 Gitee 拉，不要去 GitHub。**
+
+| | |
+|--|--|
+| 仓库 | https://gitee.com/Lee157/finance-skills |
+| 分支 | `main` |
+| git | `https://gitee.com/Lee157/finance-skills.git` |
+
+本机已装过：把 opencode 里这份仓 `git fetch` + `git pull` 到 `origin/main`（remote 若不是 Gitee，先改成上面这个地址再 pull）。只更新 `pack.json` 白名单里的技能夹；本机 `config/` 默认留着（核销跟仓库走）。不要清空同事自己装的其它 skill。
+
+没装过：`git clone https://gitee.com/Lee157/finance-skills.git`，再把 `skills/` 拷进 opencode skills 目录。
+
+跑任务只有两条路，不要混：
 
 ```mermaid
 flowchart TD
@@ -13,7 +29,7 @@ flowchart TD
 ```
 
 - **走平台**：李尚那边接这份仓库。同事在平台上点技能、上传表、看结果。不要再在 OpenCode 里跑同一趟。
-- **走 OpenCode**：自己把本仓库 `main` 拉到本机 opencode skills，再按[技能表](#技能表)开口。仓库没拉新，跑的就是旧的。
+- **走 OpenCode**：先按上面从 **Gitee `main`** 拉到最新，再按[技能表](#技能表)开口。没拉新，跑的就是旧的。
 
 本机已经有的账密 json **不要再问**。没有才让她写一次，不要把密码打进对话。
 
@@ -68,6 +84,4 @@ flowchart TD
 
 ## 仓库
 
-Gitee：https://gitee.com/Lee157/finance-skills · 分支 `main`
-
-改完测绿后 `git push gitee main`。真表、口令、客户明细不进仓。
+更新默认仓库就是上面这个 Gitee，不要写 GitHub。开发测绿后 `git push gitee main`。真表、口令、客户明细不进仓。

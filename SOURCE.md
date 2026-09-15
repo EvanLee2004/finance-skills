@@ -32,7 +32,7 @@
 | 角色 | 动作 |
 |------|------|
 | **开发** | 改码 → 该 skill `version` +0.1 → 测绿 → `git push gitee main`。 |
-| **同事本机** | 从 Gitee `main` 拉最新到 opencode skills；只覆盖 `pack.json` 白名单；本机 `config/` 默认保留（核销跟仓库）；不要清空自己另装的技能。 |
+| **同事本机** | 说「更新财务部skills」= 从 **Gitee** `https://gitee.com/Lee157/finance-skills` 的 `main` 拉到 opencode skills（不要 GitHub）。只覆盖 `pack.json` 白名单；本机 `config/` 默认保留（核销跟仓库）；不要清空自己另装的技能。 |
 
 ---
 
