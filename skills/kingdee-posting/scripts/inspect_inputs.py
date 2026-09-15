@@ -46,8 +46,24 @@ def norm_name(name: str) -> str:
     return "".join(s.split())
 
 
-def header_names(path: Path) -> dict[str, list[str]]:
+def find_header_row(ws, alias_map: dict | None, required: list[str], max_scan: int = 20) -> tuple[int, list]:
+    """前几行里找「像表头」的那一行，不假定第 1 行就是列名。"""
+    best_i, best, best_score = 1, [], -1
+    alias_map = alias_map or {}
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_scan, values_only=True), 1):
+        headers = list(row or [])
+        cleaned = _cleaned(headers)
+        score = sum(1 for key in required if field_hit(cleaned, alias_map, key))
+        if score > best_score:
+            best_score, best_i, best = score, i, headers
+        if score >= len(required) and required:
+            return i, headers
+    return best_i, best
+
+
+def header_names(path: Path, aliases: dict | None = None) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
+    aliases = aliases or load_aliases()
     try:
         wb = load_workbook(path, read_only=True, data_only=False)
     except Exception:
@@ -55,8 +71,14 @@ def header_names(path: Path) -> dict[str, list[str]]:
     try:
         for name in wb.sheetnames:
             ws = wb[name]
-            row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-            out[name] = [str(c).strip() for c in (row or []) if c is not None and str(c).strip()]
+            title = str(name or "")
+            if "收款" in title and "付款" not in title:
+                _, headers = find_header_row(ws, aliases.get("收款_列别名"), ["客户名称", "借方（增加）"])
+            elif "付款" in title:
+                _, headers = find_header_row(ws, aliases.get("付款_列别名"), ["供应商", "应付金额本币"])
+            else:
+                _, headers = find_header_row(ws, aliases.get("销项发票_列别名"), ["单位名称", "价税合计"])
+            out[name] = _cleaned(headers)
     finally:
         wb.close()
     return out
@@ -131,8 +153,8 @@ def find_receipt_sheet(wb, aliases: dict | None = None) -> str | None:
     headered = []
     for name in wb.sheetnames:
         ws = wb[name]
-        row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        headers = _cleaned(row)
+        _, raw = find_header_row(ws, (aliases or {}).get("收款_列别名"), ["客户名称", "借方（增加）"])
+        headers = _cleaned(raw)
         if not is_receipt_sheet(name, headers, aliases):
             continue
         if "收款" in str(name) and "流水" not in str(name) and "付款" not in str(name):
@@ -147,8 +169,8 @@ def find_payment_sheet(wb, aliases: dict | None = None) -> str | None:
     headered = []
     for name in wb.sheetnames:
         ws = wb[name]
-        row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        headers = _cleaned(row)
+        _, raw = find_header_row(ws, (aliases or {}).get("付款_列别名"), ["供应商", "应付金额本币"])
+        headers = _cleaned(raw)
         if not is_payment_sheet(name, headers, aliases):
             continue
         if "付款" in str(name) and "中行" not in str(name):

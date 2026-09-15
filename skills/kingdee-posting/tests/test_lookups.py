@@ -527,8 +527,106 @@ def test_assist_checked_rejects_empty_1131(tmp_path):
         raise AssertionError("should stop")
 
 
+def test_assist_checked_rejects_single_month_not_year(tmp_path):
+    from openpyxl import Workbook
+
+    p = tmp_path / "核算项目余额表_客户.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["核算项目余额表"])
+    ws.append(["公司名称：甲骨易（北京）语言科技股份有限公司", "", "", "", "", "", "", "期间：202609-202609"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "期初", "期初", "本期", "本期", "本年累计", "本年累计", "期末", "期末"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "借方", "贷方", "借方", "贷方", "借方", "贷方", "借方", "贷方"])
+    ws.append(["202609", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None])
+    wb.save(p)
+    wb.close()
+    try:
+        assist_xlsx.parse_assist_xlsx_checked(p)
+    except SystemExit as e:
+        assert "不是本年" in str(e)
+    else:
+        raise AssertionError("should stop")
+
+
 def test_assist_checked_accepts_hq(tmp_path):
     p = tmp_path / "核算项目余额表_客户.xlsx"
     _assist_book(p, "甲骨易（北京）语言科技股份有限公司", [["2026-08", "0001", "甲", "113101", "应收账款_多语", None, None, None, None, 1, None, 1, None]])
     rows = assist_xlsx.parse_assist_xlsx_checked(p)
     assert len(rows) == 1 and rows[0].account == "113101"
+
+
+def test_rows_from_virtual_keeps_1131_only():
+    payload = [
+        {
+            "a": "InvokeControlMethod",
+            "p": [
+                {
+                    "key": "reportlistap",
+                    "methodname": "setVirtualData",
+                    "args": [
+                        {
+                            "datacount": 3,
+                            "dataindex": {
+                                "period": 0,
+                                "f0001number": 1,
+                                "f0001name": 2,
+                                "acctnumber": 3,
+                                "ytddebit": 4,
+                                "ytdcredit": 5,
+                                "enddebit": 6,
+                                "endcredit": 7,
+                            },
+                            "rows": [
+                                ["202601", "0001", "甲", "113101", 1, None, 1, None],
+                                ["202601", "0002", "乙", "113312", 1, None, 1, None],
+                                ["202612", "0001", "甲", "113101", 2, None, 2, None],
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    rows, total = assist_xlsx._rows_from_virtual(payload)
+    assert total == 3
+    assert len(rows) == 2
+    assert {r["account"] for r in rows} == {"113101"}
+    assert assist_xlsx._scrape_is_year(rows)
+
+
+def test_scrape_is_year_needs_jan_and_dec():
+    assert not assist_xlsx._scrape_is_year([{"period": "202609"}])
+    assert assist_xlsx._scrape_is_year([{"period": "202601"}, {"period": "202612"}])
+
+
+def test_write_assist_book_roundtrip(tmp_path):
+    p = tmp_path / "grid.xlsx"
+    assist_xlsx.write_assist_book(
+        p,
+        "甲骨易（北京）语言科技股份有限公司",
+        "202601-202612",
+        [
+            {
+                "period": "202601",
+                "code": "0001",
+                "name": "甲",
+                "account": "113101",
+                "ytd_debit": 1,
+                "ytd_credit": None,
+                "end_debit": 1,
+                "end_credit": None,
+            },
+            {
+                "period": "202612",
+                "code": "0001",
+                "name": "甲",
+                "account": "113101",
+                "ytd_debit": 1,
+                "ytd_credit": None,
+                "end_debit": 1,
+                "end_credit": None,
+            },
+        ],
+    )
+    rows = assist_xlsx.parse_assist_xlsx_checked(p)
+    assert {r.period for r in rows} >= {"202601", "202612"}

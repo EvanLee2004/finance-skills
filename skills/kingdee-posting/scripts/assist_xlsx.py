@@ -3,12 +3,15 @@
 """客户核算项目余额表：Playwright 从总部星辰引出。OpenAPI 没有这张表。不捡本地旧 Excel。"""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
+from datetime import date
 from pathlib import Path
+from urllib.parse import parse_qs
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -100,6 +103,21 @@ MANUAL_EXPORT_STEPS = (
 )
 
 
+def assist_xlsx_period_span(path: Path) -> str:
+    """表头「期间：202601-202612」。本年必须 01-12。"""
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        ws = wb[wb.sheetnames[0]]
+        for row in ws.iter_rows(min_row=1, max_row=4, values_only=True):
+            for v in row:
+                t = str(v or "").strip()
+                if t.startswith("期间"):
+                    return t.split("：", 1)[-1].split(":", 1)[-1].strip()
+    finally:
+        wb.close()
+    return ""
+
+
 def assist_xlsx_company(path: Path) -> str:
     """表头「公司名称：xxx」。没有就返回空串。"""
     wb = load_workbook(path, data_only=True, read_only=True)
@@ -127,7 +145,196 @@ def parse_assist_xlsx_checked(path: Path) -> list[lookup_mod.AssistRow]:
         raise SystemExit(
             f"网页引出的客户核算项目余额表没有 1131 明细行。多半没切到总部，或过滤不是客户+1131+本年。{MANUAL_EXPORT_STEPS} 未生成引入表。"
         )
+    span = assist_xlsx_period_span(path)
+    if span and "-" in span:
+        start, end = (x.strip() for x in span.split("-", 1))
+        if not (start.endswith("01") and end.endswith("12")):
+            raise SystemExit(
+                f"网页引出的期间是 {span}，不是本年（01期-12期）。过滤没点上「本年」。{MANUAL_EXPORT_STEPS} 未生成引入表。"
+            )
     return rows
+
+
+_SCRAPE_JS = """() => {
+  function cellsOf(el) {
+    return [...el.querySelectorAll(':scope > td, :scope > th, :scope > [class*="cell"]')]
+      .map(n => (n.innerText || '').replace(/\\s+/g, ' ').trim());
+  }
+  const rowEls = [...document.querySelectorAll('tr, [class*="kd-table-row"], [class*="TableRow"]')];
+  let map = null;
+  const rows = [];
+  for (const el of rowEls) {
+    const cells = cellsOf(el);
+    if (cells.length < 4) continue;
+    if (cells.includes('客户编码') && cells.includes('科目编码') && !cells.includes('借方')) {
+      map = {};
+      cells.forEach((t, i) => { if (t && map[t] === undefined) map[t] = i; });
+      continue;
+    }
+    if (!map || map['科目编码'] === undefined || map['客户编码'] === undefined) continue;
+    const acc = (cells[map['科目编码']] || '').replace(/\\.0$/, '');
+    const code = (cells[map['客户编码']] || '').replace(/\\.0$/, '');
+    if (!code || !String(acc).startsWith('1131')) continue;
+    const ytd = map['本年累计'];
+    const end = map['期末'];
+    rows.push({
+      period: cells[map['期间']] || '',
+      code,
+      name: cells[map['客户名称']] || '',
+      account: acc,
+      ytd_debit: ytd != null ? cells[ytd] : '',
+      ytd_credit: ytd != null ? cells[ytd + 1] : '',
+      end_debit: end != null ? cells[end] : '',
+      end_credit: end != null ? cells[end + 1] : '',
+    });
+  }
+  return rows;
+}"""
+
+
+async def _scrape_assist_rows(page) -> list[dict]:
+    found: list[dict] = []
+    for chunk in await _eval_frames(page, _SCRAPE_JS):
+        if isinstance(chunk, list):
+            found.extend(chunk)
+    return found
+
+
+def _virtual_payload(data):
+    if isinstance(data, list) and data:
+        block = data[0] if isinstance(data[0], dict) else {}
+        params = block.get("p") or []
+        head = params[0] if params and isinstance(params[0], dict) else {}
+        args = head.get("args") or []
+        if args and isinstance(args[0], dict) and "rows" in args[0]:
+            return args[0]
+        if "rows" in head:
+            return head
+    if isinstance(data, dict) and "rows" in data:
+        return data
+    return None
+
+
+def _rows_from_virtual(data) -> tuple[list[dict], int]:
+    payload = _virtual_payload(data)
+    if not payload:
+        return [], 0
+    idx = payload.get("dataindex") or {}
+    rows = payload.get("rows") or []
+    total = int(payload.get("datacount") or 0)
+    pi, ci, ni, ai = idx.get("period"), idx.get("f0001number"), idx.get("f0001name"), idx.get("acctnumber")
+    ytd_d, ytd_c = idx.get("ytddebit"), idx.get("ytdcredit")
+    end_d, end_c = idx.get("enddebit"), idx.get("endcredit")
+    out = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        acc = str(row[ai] if isinstance(ai, int) and ai < len(row) else "").replace(".0", "")
+        if not acc.startswith("1131"):
+            continue
+        code = str(row[ci] if isinstance(ci, int) and ci < len(row) else "").strip()
+        if code.endswith(".0") and code[:-2].isdigit():
+            code = code[:-2]
+        if not code:
+            continue
+        name = str(row[ni] if isinstance(ni, int) and ni < len(row) else "").strip()
+        period = str(row[pi] if isinstance(pi, int) and pi < len(row) else "").strip()
+        def _num(i):
+            if not isinstance(i, int) or i >= len(row):
+                return None
+            return lookup_mod.money(row[i])
+        out.append(
+            {
+                "period": period,
+                "code": code,
+                "name": name,
+                "account": acc,
+                "ytd_debit": _num(ytd_d),
+                "ytd_credit": _num(ytd_c),
+                "end_debit": _num(end_d),
+                "end_credit": _num(end_c),
+            }
+        )
+    return out, total
+
+
+async def _fetch_virtual_pages(page, url: str, post_data: str) -> list[dict]:
+    qs = parse_qs(post_data or "")
+    raw_params = (qs.get("params") or [""])[0]
+    if not raw_params:
+        return []
+    params = json.loads(raw_params)
+    page_id = (qs.get("pageId") or [""])[0]
+    app_id = (qs.get("appId") or ["gl"])[0]
+    all_rows: list[dict] = []
+    start = 0
+    size = 1000
+    total = None
+    while True:
+        if isinstance(params, list) and params and isinstance(params[0], dict):
+            params[0]["args"] = [start, size]
+        resp = await page.request.post(
+            url,
+            form={
+                "pageId": page_id,
+                "appId": app_id,
+                "params": json.dumps(params, ensure_ascii=False, separators=(",", ":")),
+            },
+        )
+        data = await resp.json()
+        chunk, count = _rows_from_virtual(data)
+        if total is None:
+            total = count
+        all_rows.extend(chunk)
+        start += size
+        if total is not None and start >= total:
+            break
+        if not chunk:
+            break
+        if start > 200000:
+            break
+    return all_rows
+
+
+def _scrape_is_year(rows: list[dict]) -> bool:
+    months = set()
+    for row in rows:
+        key = lookup_mod._period_key(row.get("period") or "")
+        if len(key) >= 6 and key[-2:].isdigit():
+            months.add(key[-2:])
+    return "01" in months and "12" in months
+
+
+def write_assist_book(path: Path, company: str, span: str, rows: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "核算项目余额表"
+    ws.append(["核算项目余额表"])
+    ws.append([f"公司名称：{company}", "", "", "", "", "", "", f"期间：{span}"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "期初", "期初", "本期", "本期", "本年累计", "本年累计", "期末", "期末"])
+    ws.append(["期间", "客户编码", "客户名称", "科目编码", "科目名称", "借方", "贷方", "借方", "贷方", "借方", "贷方", "借方", "贷方"])
+    for row in rows:
+        ws.append(
+            [
+                row.get("period"),
+                row.get("code"),
+                row.get("name"),
+                row.get("account"),
+                "",
+                None,
+                None,
+                None,
+                None,
+                row.get("ytd_debit"),
+                row.get("ytd_credit"),
+                row.get("end_debit"),
+                row.get("end_credit"),
+            ]
+        )
+    wb.save(path)
+    wb.close()
+    return path
 
 
 def parse_assist_xlsx(path: Path) -> list[lookup_mod.AssistRow]:
@@ -147,11 +354,11 @@ def parse_assist_xlsx(path: Path) -> list[lookup_mod.AssistRow]:
                 for i, t in enumerate(texts):
                     if t == "期间" and "period" not in col:
                         col["period"] = i
-                    elif t == "客户编码":
+                    elif t in ("客户编码", "客户代码", "核算项目编码"):
                         col["code"] = i
-                    elif t == "客户名称":
+                    elif t in ("客户名称", "核算项目名称"):
                         col["name"] = i
-                    elif t == "科目编码":
+                    elif t in ("科目编码", "科目代码"):
                         col["account"] = i
                     elif t == "本年累计" and ytd_i is None:
                         ytd_i = i
@@ -316,12 +523,47 @@ def _export_mod():
             sys.modules[key] = mod
 
 
+def _logged_out(page) -> bool:
+    url = page.url or ""
+    return "logout" in url or "login" in url
+
+
+async def _wait_assist_form(page) -> None:
+    await page.goto(ASSIST_FORM, wait_until="domcontentloaded")
+    js = """() => [...document.querySelectorAll('input')]
+        .filter(el => el.offsetParent && /年/.test(el.value || '') && /期/.test(el.value || ''))
+        .map(el => el.value)"""
+    for _ in range(30):
+        await _dismiss_overlays(page)
+        if _logged_out(page):
+            return
+        vals = []
+        for chunk in await _eval_frames(page, js):
+            vals.extend(chunk or [])
+        if vals and await page.get_by_text("引出", exact=True).count():
+            return
+        await page.wait_for_timeout(700)
+
+
 async def _ensure_xingchen(page) -> bool:
     login = _login_mod()
     if login is None:
         raise SystemExit(ASK_LOGIN)
     creds = login.load_creds()
-    await login.ensure_login(page, creds)
+    last_err = None
+    for attempt in range(3):
+        try:
+            await login.ensure_login(page, creds)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if "ERR_" not in msg and "Timeout" not in msg and "net::" not in msg:
+                raise
+            await page.wait_for_timeout(2500 * (attempt + 1))
+    if last_err is not None:
+        raise SystemExit("金蝶网页现在连不上（tf.jdy.com / 工作台）。请检查网络后重跑。")
     try:
         await login.save_state(page.context)
     except Exception:
@@ -335,11 +577,81 @@ async def _ensure_xingchen(page) -> bool:
     return bool(await exporter._switch_book(page, HQ_NAME, HQ_SEARCH))
 
 
+async def _eval_frames(page, js, arg=None):
+    out = []
+    for frame in page.frames:
+        try:
+            out.append(await frame.evaluate(js) if arg is None else await frame.evaluate(js, arg))
+        except Exception:
+            continue
+    return out
+
+
+async def _set_this_year_period(page) -> None:
+    """期间必须本年（2026年01期-12期）。默认往往是当期一个月。"""
+    year = date.today().year
+    typed = f"{year}年01期 - {year}年12期"
+    boxes = page.locator("input:visible")
+    n = await boxes.count()
+    for i in range(min(n, 12)):
+        try:
+            value = await boxes.nth(i).input_value()
+        except Exception:
+            continue
+        if "年" not in value or "期" not in value:
+            continue
+        box = boxes.nth(i)
+        try:
+            await box.click(force=True)
+            await page.wait_for_timeout(300)
+            await box.fill(typed)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(400)
+        except Exception:
+            pass
+        if await _period_is_year(page):
+            return
+        loc = page.get_by_text("本年", exact=True)
+        if await loc.count():
+            try:
+                await loc.last.click(force=True)
+                await page.wait_for_timeout(400)
+            except Exception:
+                pass
+        if await _period_is_year(page):
+            return
+        one = page.get_by_text("1期", exact=True)
+        twelve = page.get_by_text("12期", exact=True)
+        if await one.count() and await twelve.count():
+            try:
+                await one.first.click()
+                await page.wait_for_timeout(200)
+                await twelve.last.click()
+                await page.wait_for_timeout(400)
+            except Exception:
+                pass
+        break
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(200)
+    except Exception:
+        pass
+
+
+async def _period_is_year(page) -> bool:
+    js = """() => [...document.querySelectorAll('input')]
+        .filter(el => el.offsetParent)
+        .map(el => el.value || '')
+        .filter(v => v.includes('年') && v.includes('期'))"""
+    for vals in await _eval_frames(page, js):
+        if any("01期" in v and "12期" in v for v in (vals or [])):
+            return True
+    return False
+
+
 async def _set_customer_ar_filters(page) -> None:
     await _click_text(page, "展开过滤")
     await page.wait_for_timeout(400)
-    await _click_text(page, "本年")
-    await page.wait_for_timeout(300)
     box = page.locator(".kd-table-cell-basedata-container").first
     if await box.count():
         await box.click()
@@ -370,41 +682,107 @@ async def _set_customer_ar_filters(page) -> None:
               }
             }"""
         )
+    await _set_this_year_period(page)
     await _click_text(page, "查询")
-    await page.wait_for_timeout(2500)
+    await page.wait_for_timeout(3500)
+    await _set_this_year_period(page)
+    if not await _period_is_year(page):
+        await _click_text(page, "查询")
+        await page.wait_for_timeout(3500)
+        await _set_this_year_period(page)
+    for _ in range(12):
+        body = await page.locator("body").inner_text()
+        if "1131" in body and await page.get_by_text("引出", exact=True).count():
+            break
+        await page.wait_for_timeout(500)
 
 
-async def _export_via_log(page, dest: Path) -> bool:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    mark = time.time()
-    hit = page.get_by_text("引出", exact=True)
-    if await hit.count():
-        await hit.first.click()
+def _assist_export_stamp(name: str) -> str:
+    import re
+
+    hit = re.search(r"核算项目余额表-(\d{14})", name or "")
+    return hit.group(1) if hit else ""
+
+
+_NAME_JS = """() => [...document.querySelectorAll('span,a,div,td')]
+    .map(el => (el.innerText || '').trim())
+    .filter(t => /^核算项目余额表-\\d{14}\\.xlsx$/.test(t))"""
+
+
+async def _export_log_names(page) -> list[str]:
+    found: list[str] = []
+    for frame in page.frames:
+        try:
+            found.extend(await frame.evaluate(_NAME_JS) or [])
+        except Exception:
+            continue
+    return found
+
+
+async def _click_export(page) -> None:
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(200)
+    except Exception:
+        pass
+    js = """() => {
+      const nodes = [...document.querySelectorAll('button,a,span,div,li')];
+      const hits = nodes.filter(el => (el.innerText || '').trim() === '引出' && el.offsetParent);
+      const btn = hits.find(el => el.tagName === 'BUTTON' || (el.className || '').toString().toLowerCase().includes('btn')) || hits[0];
+      if (!btn) return 0;
+      btn.click();
+      return hits.length;
+    }"""
+    for frame in page.frames:
+        try:
+            if int(await frame.evaluate(js) or 0):
+                break
+        except Exception:
+            continue
     else:
-        await _click_text(page, "引出")
-    await page.wait_for_timeout(1000)
+        hit = page.get_by_text("引出", exact=True)
+        if await hit.count():
+            await hit.first.click()
+        else:
+            await _click_text(page, "引出")
+    for _ in range(12):
+        await page.wait_for_timeout(400)
+        bodies = []
+        for frame in page.frames:
+            try:
+                bodies.append(await frame.locator("body").inner_text())
+            except Exception:
+                continue
+        blob = "\n".join(bodies)
+        if "引出结果查询" in blob or "数据文件正在生成" in blob or "正在生成" in blob:
+            break
     if await page.get_by_text("引出结果查询").count():
         await page.get_by_text("引出结果查询").first.click()
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(600)
+
+
+async def _export_via_log(page, dest: Path, before: set[str] | None = None) -> bool:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    mark = time.time()
+    before = before or set()
+    cutoff = time.strftime("%Y%m%d%H%M%S", time.localtime(mark - 5))
+    await _click_export(page)
     await page.goto(EXPORT_LOG, wait_until="domcontentloaded")
-    file_btn = None
-    for _ in range(40):
-        await page.wait_for_timeout(800)
-        loc = page.get_by_text("核算项目余额表-")
-        if await loc.count():
-            file_btn = loc.first
-            body = await page.locator("body").inner_text()
-            if "成功" in body:
-                break
-    if file_btn is None:
-        found = _newest_xlsx(DOWNLOADS, mark - 1)
-        if found:
-            dest.write_bytes(found.read_bytes())
-            return dest.is_file() and dest.stat().st_size > 400
+    newest = None
+    for _ in range(50):
+        await page.wait_for_timeout(1000)
+        names = await _export_log_names(page)
+        fresh = [nm for nm in names if _assist_export_stamp(nm) >= cutoff]
+        if before:
+            fresh = [nm for nm in fresh if nm not in before]
+        if fresh:
+            newest = max(fresh, key=_assist_export_stamp)
+            break
+    if not newest:
         return False
     try:
         async with page.expect_download(timeout=60000) as dl_info:
-            await file_btn.click()
+            await page.get_by_text(newest, exact=True).first.click()
         download = await dl_info.value
         await download.save_as(str(dest))
         if dest.is_file() and dest.stat().st_size > 400:
@@ -433,6 +811,14 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
         async with async_playwright() as p:
             ctx, browser, mode = await _open_context(p)
             page = await ctx.new_page()
+            cap = {"url": None, "post": None}
+
+            def _on_req(req):
+                if "getVirtualData" in req.url and req.method == "POST" and req.post_data:
+                    cap["url"] = req.url
+                    cap["post"] = req.post_data
+
+            page.on("request", _on_req)
             try:
                 if not await _ensure_xingchen(page):
                     return {
@@ -445,19 +831,64 @@ def export_customer_assist_xlsx(dest: Path | None = None) -> dict:
                         "mode": mode,
                     }
                 await _dismiss_overlays(page)
-                await page.goto(ASSIST_FORM, wait_until="domcontentloaded")
-                for _ in range(20):
-                    await _dismiss_overlays(page)
-                    body = await page.locator("body").inner_text()
-                    if "1131" in body or "核算项目余额表" in body or await page.get_by_text("展开过滤").count():
-                        break
-                    await page.wait_for_timeout(700)
-                await _dismiss_overlays(page)
+                await _wait_assist_form(page)
                 await _set_customer_ar_filters(page)
+                if _logged_out(page) or await page.get_by_text("引出", exact=True).count() == 0:
+                    if not await _ensure_xingchen(page):
+                        return {
+                            "ok": False,
+                            "error": "设过滤时金蝶把会话挤掉了，切总部失败。请重跑。",
+                            "path": None,
+                            "mode": mode,
+                        }
+                    await _wait_assist_form(page)
+                    await _set_customer_ar_filters(page)
+                if not await _period_is_year(page):
+                    js = """() => [...document.querySelectorAll('input')].filter(el=>el.offsetParent).map(el=>el.value||'').filter(v=>v.includes('期'))"""
+                    shown = []
+                    for chunk in await _eval_frames(page, js):
+                        shown.extend(chunk or [])
+                    return {
+                        "ok": False,
+                        "error": f"期间没设成本年（01期-12期），当前输入={shown}。未取表。",
+                        "path": None,
+                        "mode": mode,
+                    }
+                year = date.today().year
+                for _ in range(25):
+                    if cap.get("post") and cap.get("url"):
+                        break
+                    await page.wait_for_timeout(200)
+                virtual_rows: list[dict] = []
+                if cap.get("url") and cap.get("post"):
+                    try:
+                        virtual_rows = await _fetch_virtual_pages(page, cap["url"], cap["post"])
+                    except Exception:
+                        virtual_rows = []
+                if _scrape_is_year(virtual_rows):
+                    write_assist_book(dest, HQ_NAME, f"{year}01-{year}12", virtual_rows)
+                    parse_assist_xlsx_checked(dest)
+                    return {"ok": True, "path": str(dest), "mode": mode + "+api"}
+                scraped = await _scrape_assist_rows(page)
+                if _scrape_is_year(scraped):
+                    write_assist_book(dest, HQ_NAME, f"{year}01-{year}12", scraped)
+                    parse_assist_xlsx_checked(dest)
+                    return {"ok": True, "path": str(dest), "mode": mode + "+grid"}
+                if _logged_out(page) or await page.get_by_text("引出", exact=True).count() == 0:
+                    return {
+                        "ok": False,
+                        "error": "页面表格不是本年 1131，也没有「引出」。请重跑。",
+                        "path": None,
+                        "mode": mode,
+                    }
                 ok = await _export_via_log(page, dest)
                 if ok:
+                    try:
+                        parse_assist_xlsx_checked(dest)
+                    except SystemExit as e:
+                        return {"ok": False, "error": str(e), "path": None, "mode": mode}
                     return {"ok": True, "path": str(dest), "mode": mode}
-                return {"ok": False, "error": "引出未拿到核算项目余额表", "path": None, "mode": mode}
+                return {"ok": False, "error": "未能从页面表格或引出拿到本年核算项目余额表", "path": None, "mode": mode}
             finally:
                 await ctx.close()
                 if browser:

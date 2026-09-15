@@ -225,7 +225,18 @@ def header_index(headers: list, aliases: dict) -> dict:
             if h in names:
                 idx[field] = i
                 break
+        if field in idx:
+            continue
+        for i, h in cleaned:
+            compact = "".join(h.split())
+            if any(compact == "".join(str(n).split()) for n in names):
+                idx[field] = i
+                break
     return idx
+
+
+def _sheet_header(ws, aliases: dict, required: list[str]) -> tuple[int, list]:
+    return inspect_mod.find_header_row(ws, aliases, required)
 
 
 def cell_at(row, idx: dict, field: str):
@@ -551,8 +562,9 @@ def sales_sheet(wb) -> str | None:
             return name
     for name in wb.sheetnames:
         ws = wb[name]
-        headers = [str(c.value).strip() for c in next(ws.iter_rows(min_row=1, max_row=1)) if c.value]
-        if "单位名称" in headers and "价税合计" in headers:
+        _, headers = inspect_mod.find_header_row(ws, None, ["单位名称", "价税合计"])
+        cleaned = inspect_mod._cleaned(headers)
+        if "单位名称" in cleaned and "价税合计" in cleaned:
             return name
     return None
 
@@ -616,8 +628,9 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
     ws_f = wb_f[sheet]
     ws_v = wb_v[sheet]
     org_map = inspect_mod.load_org_map(wb_f, aliases)
-    headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
-    idx = header_index(headers, aliases.get("销项发票_列别名") or {})
+    sales_alias = aliases.get("销项发票_列别名") or {}
+    header_r, headers = _sheet_header(ws_f, sales_alias, ["单位名称", "价税合计"])
+    idx = header_index(headers, sales_alias)
     needed = ["单位名称", "价税合计", "申请人"]
     missing = [k for k in needed if k not in idx]
     if missing:
@@ -626,7 +639,7 @@ def convert_sales(path: Path, master: Master, rules: dict, aliases: dict, box, b
         raise SystemExit("发票表缺列：" + "、".join(missing))
     lines: list[VoucherLine] = []
     max_row = ws_f.max_row or 1
-    for r in range(2, max_row + 1):
+    for r in range(header_r + 1, max_row + 1):
         row_f = [ws_f.cell(r, c + 1).value for c in range(len(headers))]
         row_v = [ws_v.cell(r, c + 1).value for c in range(len(headers))]
         unit = str(cell_at(row_f, idx, "单位名称") or "").strip()
@@ -793,8 +806,9 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
         raise SystemExit("找不到付款三列表")
     ws_f = wb_f[sheet]
     ws_v = wb_v[sheet] if sheet in wb_v.sheetnames else wb_v[wb_v.sheetnames[0]]
-    headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
-    idx = header_index(headers, aliases.get("付款_列别名") or {})
+    pay_alias = aliases.get("付款_列别名") or {}
+    header_r, headers = _sheet_header(ws_f, pay_alias, ["供应商", "应付金额本币"])
+    idx = header_index(headers, pay_alias)
     if "供应商" not in idx or "应付金额本币" not in idx:
         wb_f.close()
         wb_v.close()
@@ -802,7 +816,7 @@ def convert_payment(root: Path, ledger: Path, master: Master, rules: dict, alias
     lines: list[VoucherLine] = []
     max_row = ws_f.max_row or 1
     dirs = {p.name: p for p in root.iterdir() if p.is_dir()}
-    for r in range(2, max_row + 1):
+    for r in range(header_r + 1, max_row + 1):
         row_f = [ws_f.cell(r, c + 1).value for c in range(len(headers))]
         row_v = [ws_v.cell(r, c + 1).value for c in range(len(headers))]
         vendor = str(cell_at(row_f, idx, "供应商") or "").strip()
@@ -1028,8 +1042,9 @@ def convert_receipt(
         raise SystemExit("找不到收款 sheet")
     ws_f = wb_f[sheet]
     ws_v = wb_v[sheet] if sheet in wb_v.sheetnames else wb_v[wb_v.sheetnames[0]]
-    headers = [c.value for c in next(ws_f.iter_rows(min_row=1, max_row=1))]
-    idx = header_index(headers, aliases.get("收款_列别名") or {})
+    rec_alias = aliases.get("收款_列别名") or {}
+    header_r, headers = _sheet_header(ws_f, rec_alias, ["客户名称", "借方（增加）"])
+    idx = header_index(headers, rec_alias)
     needed = ["日期", "客户名称", "借方（增加）"]
     missing = [k for k in needed if k not in idx]
     if missing:
@@ -1041,7 +1056,7 @@ def convert_receipt(
     bank = str(cfg.get("bank_account") or "100201")
     lines: list[VoucherLine] = []
     max_row = ws_f.max_row or 1
-    for r in range(2, max_row + 1):
+    for r in range(header_r + 1, max_row + 1):
         row_f = [ws_f.cell(r, c + 1).value for c in range(len(headers))]
         row_v = [ws_v.cell(r, c + 1).value for c in range(len(headers))]
         cust = str(cell_at(row_f, idx, "客户名称") or "").strip()

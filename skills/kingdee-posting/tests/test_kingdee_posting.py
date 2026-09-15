@@ -1453,6 +1453,37 @@ def test_kingdee_api_has_no_assist_balance_openapi_path():
     assert "/jdy/v2/fi/voucher" in text
 
 
+def test_sales_reads_header_below_title_row(tmp_path):
+    p = tmp_path / "发票.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "开票"
+    ws.append(["本表仅供入账，下面才是列名"])
+    ws.append(
+        [
+            "日期",
+            "发票类型",
+            "发票号",
+            "单位名称",
+            "价税合计",
+            "金额",
+            "税额",
+            "申请人",
+            "部门编码",
+            "应收账款编码",
+            "主营业务收入编码",
+        ]
+    )
+    ws.append(_ok_sales())
+    org = wb.create_sheet("组织架构")
+    org.append(["姓名", "部门编码"])
+    org.append(["于占国", "15"])
+    wb.save(p)
+    wb.close()
+    result = _run(tmp_path, "销项发票")
+    assert result["bookable_count"] == 1
+
+
 def test_sales_uses_injected_assist_not_file_in_folder(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     _write_assist(
