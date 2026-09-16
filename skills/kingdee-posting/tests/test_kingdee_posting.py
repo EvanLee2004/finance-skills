@@ -1931,6 +1931,29 @@ def test_cli_mixed_folder_runs_every_module_with_consecutive_voucher_numbers(tmp
     assert not (sales_nos & rec_nos)
 
 
+def test_receipt_asks_sijia_then_flag_books(tmp_path):
+    _write_receipt(tmp_path / "收款.xlsx", [["2026-08-01", "甲科技有限公司", 10, "", "15", "113101"]])
+    empty = _lookups(receipt_sales=[], order_sales={})
+    hold = convert.run_dir(tmp_path, "收款", "2026-08-27", _master(), empty, out_dir=tmp_path / "hold")
+    assert hold["bookable_count"] == 0
+    assert hold["missing_sales"] == ["甲科技有限公司"]
+    note = Path(hold["note_path"]).read_text(encoding="utf-8")
+    assert "甲科技有限公司" in note
+    got = convert.run_dir(
+        tmp_path,
+        "收款",
+        "2026-08-27",
+        _master(),
+        empty,
+        out_dir=tmp_path / "ok",
+        receipt_sales={"甲科技有限公司": "于占国"},
+    )
+    assert got["bookable_count"] == 1
+    assert got["missing_sales"] == []
+    parsed = convert.parse_receipt_sales_flags(["长春国电建设管理有限公司=于占国"])
+    assert "于占国" in parsed.values()
+
+
 def test_cli_single_module_folder_keeps_flat_output(tmp_path):
     _write_sales(tmp_path / "发票.xlsx", [_ok_sales()], with_org=False)
     master = tmp_path / "master.json"

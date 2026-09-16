@@ -1687,6 +1687,39 @@ def test_looks_like_id_or_phone_rejects_digits_not_money():
     assert not looks_like_id_or_phone(None)
 
 
+def test_shanghai_medical_plus_maternity_header_is_one_leaf(tmp_path: Path):
+    """斯佳上海表「医疗+生育」同一列：只进医疗保险，禁止再拆一笔生育。"""
+    sys.path.insert(0, str(SCRIPTS))
+    from payroll_ledger import parse_payroll_file
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "202608上海"
+    ws["A1"] = "姓名"
+    ws["B1"] = "组织架构1"
+    ws["C1"] = "组织架构2"
+    ws["D1"] = "养老(16%)"
+    ws["E1"] = "医疗+生育(9%)"
+    ws["F1"] = "工伤(0.2%)"
+    ws["A2"] = "乙"
+    ws["B2"] = "营销中心"
+    ws["C2"] = "本地化事业部"
+    ws["D2"] = 8
+    ws["E2"] = 3
+    ws["F2"] = 1
+    path = tmp_path / "202608_职工薪酬台账.xlsx"
+    wb.save(path)
+    wb.close()
+    parsed = parse_payroll_file(path, "202608")
+    by_item = {}
+    for row in parsed["rows"]:
+        by_item[row["name"]] = by_item.get(row["name"], 0) + float(row["debit"] or 0)
+    assert by_item.get("养老保险") == 8
+    assert by_item.get("医疗保险") == 3
+    assert by_item.get("工伤保险") == 1
+    assert "生育保险" not in by_item
+
+
 def test_shanghai_payroll_skips_id_row_keeps_money(tmp_path: Path):
     wb = openpyxl.Workbook()
     ws = wb.active

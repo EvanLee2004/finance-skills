@@ -497,6 +497,8 @@ def test_assist_source_does_not_scan_local_excel():
     assert "workspace_assist_dirs" not in src
     assert "KINGDEE_ASSIST_XLSX" not in src
     assert "DOWNLOADS" not in src
+    assert "headless=False" not in src
+    assert "headless=True" in src
 
 
 def test_ensure_assist_xlsx_does_not_pick_folder_excel(monkeypatch, tmp_path):

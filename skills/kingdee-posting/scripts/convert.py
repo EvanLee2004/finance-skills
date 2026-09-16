@@ -1020,6 +1020,47 @@ def deposit_entries(line: VoucherLine, cust: str, cus_code: str, cus_name: str, 
     ]
 
 
+def parse_receipt_sales_flags(items) -> dict[str, str]:
+    """斯佳口头补销售：「客户=人名」。"""
+    out: dict[str, str] = {}
+    for raw in items or []:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        for sep in ("=", "：", ":"):
+            if sep not in s:
+                continue
+            left, right = s.split(sep, 1)
+            cust, person = left.strip(), right.strip()
+            if cust and person:
+                out[names.norm_name(cust)] = person
+            break
+    return out
+
+
+def sales_from_sijia(cust: str, mapping: dict[str, str]) -> str:
+    if not mapping or not str(cust or "").strip():
+        return ""
+    n = names.norm_name(cust)
+    if n in mapping:
+        return mapping[n]
+    for key, person in mapping.items():
+        if lookup_mod.names_overlap(cust, key):
+            return person
+    return ""
+
+
+def missing_sales_names(lines) -> list[str]:
+    out: list[str] = []
+    for line in lines or []:
+        if "找不到销售" not in str(getattr(line, "reason", "") or ""):
+            continue
+        title = str((getattr(line, "extra", None) or {}).get("客户名称") or getattr(line, "key", "") or "").strip()
+        if title and title not in out:
+            out.append(title)
+    return out
+
+
 def convert_receipt(
     path: Path,
     master: Master,
@@ -1030,10 +1071,16 @@ def convert_receipt(
     period_fetch=None,
     assist_rows=None,
     deposit_customers: list[str] | None = None,
+    receipt_sales: dict[str, str] | None = None,
 ) -> list[VoucherLine]:
     cfg = rules.get("receipt") or {}
     deposit_cfg = cfg.get("deposit") or {}
     deposit_names = {names.norm_name(x) for x in (deposit_customers or []) if str(x).strip()}
+    sales_map = {
+        names.norm_name(k): str(v).strip()
+        for k, v in (receipt_sales or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
     alias_map = load_customer_alias()
     hang = load_emp_hang()
     applicant_dept = load_applicant_dept()
@@ -1071,6 +1118,8 @@ def convert_receipt(
         rec_day = as_day(cell_at(row_v, idx, "日期") or cell_at(row_f, idx, "日期"), booking)
         table_dept = pick_code(cell_at(row_f, idx, "部门编码"), cell_at(row_v, idx, "部门编码")) if "部门编码" in idx else ""
         table_sales = str(cell_at(row_f, idx, "销售") or "").strip() if "销售" in idx else ""
+        if not table_sales:
+            table_sales = sales_from_sijia(cust, sales_map)
         table_type = str(cell_at(row_f, idx, "类型") or "").strip() if "类型" in idx else ""
         line = VoucherLine(
             status="可入账",
@@ -1095,6 +1144,8 @@ def convert_receipt(
             lines.append(line)
             continue
         cus_code, cus_name = chit
+        if not table_sales:
+            table_sales = sales_from_sijia(cus_name, sales_map)
         if is_deposit_refund(cust, cus_name, table_type, deposit_cfg, deposit_names):
             dep = deposit_entries(line, cust, cus_code, cus_name, amt, bank, deposit_cfg, master)
             if dep is not None:
@@ -1309,6 +1360,7 @@ def write_outputs(
     )
     src_amt, debit, credit = tieout_amounts(lines)
     voucher_nos = {int(x.voucher_no) for x in lines if x.status == "可入账" and x.voucher_no is not None}
+    missing_sales = missing_sales_names(lines)
     return {
         "scene": scene,
         "source_count": len(lines),
@@ -1323,6 +1375,7 @@ def write_outputs(
         "sheet": sheet,
         "start_voucher_no": start_voucher_no,
         "assist_name": assist_name,
+        "missing_sales": missing_sales,
         "tieout_source": str(src_amt),
         "tieout_debit": str(debit),
         "tieout_credit": str(credit),
@@ -1387,6 +1440,7 @@ def run_dir(
     out_dir: Path | None = None,
     ar_xlsx: Path | None = None,
     deposit_customers: list[str] | None = None,
+    receipt_sales: dict[str, str] | None = None,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir, scene)
     if not report.get("ready"):
@@ -1420,6 +1474,7 @@ def run_dir(
         assist_rows, assist_name = _assist_rows_for_run(input_dir, box, required=True, ar_xlsx=ar_xlsx)
         extras.append("记账日：同当前月最后一张凭证（可 --date 指定）")
         extras.append("表上销售有则用，空则智云回款（名称或到账日+金额）→下单；部门可回退职员档案")
+        extras.append("找不到销售把客户名问斯佳；她补了加 --receipt-sales 客户=人名 或填表上销售列再跑")
         lines = convert_receipt(
             src,
             master,
@@ -1430,7 +1485,11 @@ def run_dir(
             period_fetch=period_fetch,
             assist_rows=assist_rows,
             deposit_customers=deposit_customers,
+            receipt_sales=receipt_sales,
         )
+        miss = missing_sales_names(lines)
+        if miss:
+            extras.append("请斯佳确认销售是谁：" + "、".join(miss))
     shift_voucher_numbers(lines, start_voucher_no)
     prefix = SCENE_DESKTOP.get(scene, "金蝶入账")
     dest = Path(out_dir) if out_dir else default_desktop_dir(prefix)
@@ -1470,7 +1529,18 @@ def _run_scene(root: Path, scene: str, args, master_data: dict | None, start_no:
     """跑一个模块；斯佳点头新增客户时先建档再重跑。SystemExit 由调用方翻成 ask=。"""
     lookups = _lookups_for(scene, args)
     deposits = list(getattr(args, "deposit_customer", None) or [])
-    result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir, deposit_customers=deposits)
+    sales_map = parse_receipt_sales_flags(getattr(args, "receipt_sales", None) or [])
+    result = run_dir(
+        root,
+        scene,
+        args.date,
+        master_data,
+        lookups,
+        start_voucher_no=start_no,
+        out_dir=out_dir,
+        deposit_customers=deposits,
+        receipt_sales=sales_map,
+    )
     if args.create_new_customers:
         need = result.get("new_customer_names") or []
         if need:
@@ -1486,7 +1556,17 @@ def _run_scene(root: Path, scene: str, args, master_data: dict | None, start_no:
                 master_data = reloaded["data"] if reloaded.get("ok") else {**master_data, "customer": created.get("customers") or []}
             nums = [str(x.get("number")) for x in created.get("created") or [] if x.get("number")]
             log(f"已按顺序新建客户档案 {len(need)} 家，编码 {('、'.join(nums)) or '（已有）'}。")
-            result = run_dir(root, scene, args.date, master_data, lookups, start_voucher_no=start_no, out_dir=out_dir, deposit_customers=deposits)
+            result = run_dir(
+                root,
+                scene,
+                args.date,
+                master_data,
+                lookups,
+                start_voucher_no=start_no,
+                out_dir=out_dir,
+                deposit_customers=deposits,
+                receipt_sales=sales_map,
+            )
     return result
 
 
@@ -1515,6 +1595,12 @@ def main(argv=None) -> int:
         action="append",
         default=[],
         help="斯佳点名：这家这笔是投标保证金退回（借银行/贷113312）。表上「类型」列写保证金也行",
+    )
+    parser.add_argument(
+        "--receipt-sales",
+        action="append",
+        default=[],
+        help="斯佳点名销售：客户=人名。找不到销售问她之后加这条再跑；表上销售列填了也行",
     )
     parser.add_argument(
         "--create-new-customers",
@@ -1579,6 +1665,9 @@ def main(argv=None) -> int:
             f"凭证号 {result['start_voucher_no']}–{result.get('last_voucher_no') or result['start_voucher_no']}。"
             f"填好的金蝶表在 {result['kingdee_path']}。请您看待确认，再自己去金蝶引入。我没有点引入。"
         )
+        miss = result.get("missing_sales") or []
+        if miss:
+            log("找不到销售，请斯佳确认这几家的销售是谁：" + "、".join(miss) + "。她说了加 --receipt-sales 客户=人名 再跑，或填表上「销售」列。")
         # 同一天跑多个模块，凭证号接着编，免得两张引入表撞号
         if result.get("last_voucher_no"):
             next_no = int(result["last_voucher_no"]) + 1

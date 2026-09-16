@@ -447,19 +447,22 @@ def parse_wage_sheet(
 
 
 def _si_columns(headers: dict, aliases: dict) -> dict[str, tuple[int, int]]:
+    """一列表头只认一个险种。「医疗+生育」只进医疗保险，不要再进生育保险。"""
     out = {}
+    taken: set[tuple[int, int]] = set()
     pairs = [
         ("养老保险", aliases.get("si_pension") or ["单位部分养老"], True),
         ("医疗保险", aliases.get("si_medical") or ["单位部分医疗"], True),
         ("失业保险", aliases.get("si_unemp") or ["单位部分失业"], True),
         ("工伤保险", aliases.get("si_injury") or ["单位部分工伤"], True),
-        ("生育保险", aliases.get("si_maternity") or ["单位部分生育"], True),
         ("住房公积金", aliases.get("hf_unit") or ["单位月缴存额"], False),
+        ("生育保险", aliases.get("si_maternity") or ["单位部分生育"], True),
     ]
     for item, al, unit in pairs:
         pos = _find_header(headers, al, prefer_unit=unit, skip_id_headers=True)
-        if pos:
+        if pos and pos not in taken:
             out[item] = pos
+            taken.add(pos)
     return out
 
 

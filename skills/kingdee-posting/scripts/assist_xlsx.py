@@ -397,8 +397,12 @@ async def _dismiss_overlays(page) -> None:
 
 
 async def _open_context(p):
-    browser = await p.chromium.launch(headless=False, channel="chrome")
-    kwargs = {"accept_downloads": True, "locale": "zh-CN"}
+    browser = await p.chromium.launch(headless=True)
+    kwargs = {
+        "accept_downloads": True,
+        "locale": "zh-CN",
+        "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"},
+    }
     if STATE.is_file():
         kwargs["storage_state"] = str(STATE)
     ctx = await browser.new_context(**kwargs)
