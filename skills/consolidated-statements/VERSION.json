@@ -1,0 +1,24 @@
+{
+  "name": "consolidated-statements",
+  "version": "2026.09.17.2",
+  "distribution": "platform-native-local-release",
+  "source_tool_version": "1.0.11",
+  "source_tool_hashes": {
+    "tool.yaml": "e90bf7ece5a8af4c37dd317a9949f237a68fd475cae623e2833135ce7f94f41c",
+    "scripts/engine.py": "3a9578d1610c95d0dc487ce6f6f654c4784e6a4b9183fd80acf5c2c7c810b428",
+    "scripts/report_refresh.py": "21211e7573a2908f6927df81202052c0b8df76a8fec13aa598be74f2deae09bd",
+    "scripts/collector.py": "e0d4f6b00f8aada7ff18c391169be2ff869c8f82922c972c06850a9e8f85525f",
+    "scripts/workbook.py": "ba63fa2e916f91a7422e885069885b1d944b142a480f6692f881e3767d1819a3",
+    "scripts/entry.py": "3f04320b84f9381d2a8b84624f73c241446783d905e06b19bae52aa4b5159a55",
+    "templates/period_contracts.json": "fce6cfdff33f24325351ace0c1ed5fe2e7a428fc5d2e3b0dd4f2db1e0487d941",
+    "templates/catalog.json": "0ccf5b36048c5389e0a87d2fb6c706b1ace728fd90a12b2e3cbb0dbfa99dc0e4",
+    "templates/companies.json": "1cd7b184f1f1801ba4fc7502ac4c290a5025860f76c066291be918b86874c68b"
+  },
+  "verification": {
+    "synthetic_tests": 14,
+    "live_kingdee_task_started": false,
+    "cash_flow_method": "out_both",
+    "parent_profit_elimination": false,
+    "ai_interface": "describe/check/run JSON v1"
+  }
+}

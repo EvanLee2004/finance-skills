@@ -1,0 +1,4 @@
+interface:
+  display_name: "甲骨易合并报表与抵销"
+  short_description: "按月份汇总八主体报表，完成总合并和母公司合并抵销，交付六表底稿及分册"
+  default_prompt: "使用 $consolidated-statements 制作指定月份的甲骨易合并报表，按金蝶证据抵销并核验两套范围。"
