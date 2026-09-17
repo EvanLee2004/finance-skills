@@ -346,9 +346,22 @@ def inspect_dir(input_dir: Path, scene: str | None = None) -> dict:
             for kind in classify_xlsx_kinds(p, aliases):
                 if str(p) not in found[kind]:
                     found[kind].append(str(p))
-    hits = [k for k, v in found.items() if v]
-    mixed = len(hits) > 1
-    targets = [scene] if scene else hits
+    posting_hits = [k for k in ("销项发票", "收款") if found.get(k)]
+    mixed = len(posting_hits) > 1
+    if scene is None:
+        if not posting_hits and found.get("付款"):
+            return {
+                "ready": False,
+                "scene": None,
+                "scenes": [],
+                "mixed": False,
+                "missing": ["销项或收款表"],
+                "files": {},
+                "ask": "这是付款材料。请说「付款入金蝶」，走供应商付款技能。本技能只做销项和收款。",
+            }
+        targets = posting_hits
+    else:
+        targets = [scene]
     missing: list[str] = []
     files: dict = {}
     asks: list[str] = []

@@ -1,0 +1,77 @@
+---
+name: kingdee-payment
+version: "1.1"
+description: >
+  供应商付款台账+发票PDF填金蝶凭证引入表。
+  当用户说「付款入金蝶 / 供应商付款入金蝶 / 应付记账」时用。
+  不要用 kingdee-posting（那个只做销项和收款）。
+---
+
+# 供应商付款入金蝶
+
+斯佳每月付款。脚本算金额和科目。你只找文件夹、跑命令、把 `ask=` 原样问她。不点引入、审核、过账。
+
+后台和示意图：同夹 `README.md`。口径：`config/业务规则.md`。
+
+## 0. 本机 json
+
+| 只用 | 禁止 |
+|------|------|
+| `~/.config/finance/kingdee.local.json`（开放平台） | `zhiyun.local.json` |
+| `~/.config/finance/xingchen.local.json`（网页，Playwright 核银行科目） | 把口令打进对话 |
+| 登录截图找不到时看 `~/.config/finance/xingchen_login_liangjing.png` | 去开放平台点重置密钥 |
+
+本机已有 json **不要再问密码**。
+
+## 1. 红线
+
+1. 只准调本技能 `scripts/convert.py`，不要自写 Python 读她的表。
+2. 夹里 Excel 一律忽略，只读 PDF。
+3. 禁止编供应商编码。档案没有的（标黄走中行、没标黄走中信）必须**一次问清**，两路分开写名字。没标黄不要偷偷挂 9999。
+4. 禁止点金蝶「开始引入 / 审核 / 过账」。
+5. 账套总部，不要湖南分公司。
+6. 票大于应付：一批只问一次是/否。不要一家一家问。
+
+## 2. 找文件夹
+
+```bash
+python3 "<本skill目录>/scripts/convert.py" --inspect --input-dir <绝对目录>
+```
+
+缺件退出非 0，stdout 有 `ask=`。原样问她。台账在夹外，一家一个发票夹。
+
+## 3. 跑转换
+
+```bash
+python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录>
+```
+
+系统 python3 没有库就让脚本切仓内 `.venv`。没说输出目录 → 桌面 `金蝶入账_付款_YYYYMMDD/`。
+
+她点头「按应付记」→ 加 `--book-short-pay` 重跑。  
+缺档一次问：标黄（中行）建不建、没标黄（中信）新建还是挂 9999。  
+- 中行新建 → `--create-new-suppliers`  
+- 中信挂 9999 → `--citic-as-other`  
+- 中信也新建 → `--create-new-suppliers-citic`  
+她点名凭证号从 N 起 → `--start-voucher-no N`。点名日期 → `--date`。
+
+## 4. 收尾
+
+- *「这批 N：可入账 X，待确认 Y。表在 \<路径\>。请看待确认，再自己去金蝶引入。我没有点引入。」*
+- 待确认只报原因类别和笔数。缺档必须把 `ask=` 原样问她：标黄（中行）一列、没标黄（中信）一列，一次拍板。金额不要报。
+
+## 5. 会变的在哪
+
+| 文件 | 改什么 |
+|------|--------|
+| `config/rules.json` | 成本/进项/中行/中信/0405 |
+| `config/列名别名.json` | 表头 |
+| `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
+| 本机 `kingdee.local.json` / `xingchen.local.json` | 密钥；不进仓 |
+
+## 本岗位该主动操心啥
+
+- 标黄却走了中信、没色却走了中行 → 填色没读到，停。
+- 专票进项抽不到 → 待确认，不要用税率倒挤。
+- 标题带空格的电子票（「专 用 发 票」）必须能认。
+- 夹里突然又出现别人的 xlsx → 当没看见。

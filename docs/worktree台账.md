@@ -8,7 +8,8 @@
 | 琪哥发票入金蝶 `qige-invoice-to-kingdee` | — | 已下线 | 2026-09-15 源码夹删除；销项走 `kingdee-posting` |
 | 启动话术 + 更新技能 | 同上正式 clone · `main` | 使用中 | 同树 |
 | 合入李尚核销 | 同上正式 clone · `main` | 使用中 | 已 merge `gitee/agent/ar-hexiao-daily-1-3-0` @ `c3ea05f` |
-| 金蝶入账 `kingdee-posting` | 正式 clone · `main`（已含 018 + 拆腿/点头新建） | 使用中 | 本机已含收款找销售 `82d6a26`；推云后同事才能拉到 |
+| 金蝶入账 `kingdee-posting` | 正式 clone · `main`（已含 018 + 拆腿/点头新建） | 使用中 | 付款已拆出；本技能只销项/收款 |
+| 供应商付款 `kingdee-payment` | 正式 clone · `main`（不开新 worktree） | 使用中 | 2026-09-17 新建；未 push |
 | 收款入金蝶 `016` | `~/.grok/worktrees/skills-finance-skills/kingdee-receipt-016` | 可删 | 018 已覆盖收款主路径并进 main |
 | 三模块合一 `017` 后续 | `~/.grok/worktrees/skills-finance-skills/kingdee-posting-unify` detached `9ddbb67` | 可删 | 拆腿/点头新建已并入 main `c7a03c5` |
 | 收款少问能跑完 `018` | `/Users/evanlee/.grok/worktrees/skills-finance-skills/kingdee-receipt-018` · `kingdee-receipt-018` @ `207f5b2` | 可删 | 已进 GitHub `main` |

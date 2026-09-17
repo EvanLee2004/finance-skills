@@ -275,7 +275,7 @@ class VoucherLine:
     entries: list = field(default_factory=list)
 
 
-SCENE_ORDER = ("销项发票", "付款", "收款")
+SCENE_ORDER = ("销项发票", "收款")
 SCENE_SUBDIR = {"销项发票": "销项", "付款": "付款", "收款": "收款"}
 SCENE_DESKTOP = {
     "销项发票": "金蝶入账_销项",
