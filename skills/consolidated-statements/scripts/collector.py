@@ -35,38 +35,14 @@ def query_classified_balance(page, query):
                 raise SourceError("查询后重分类口径不稳定，停止导出") from None
 
 
-def load_xingchen_creds():
-    """OpenCode：读本机星辰网页账密。不打印、不进 git。"""
-    path = Path.home() / ".config" / "finance" / "xingchen.local.json"
-    env_user = os.environ.get("XINGCHEN_USER", "").strip()
-    env_pass = os.environ.get("XINGCHEN_PASSWORD", "").strip()
-    if env_user and env_pass:
-        return {"account": env_user, "password": env_pass}
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    user = str(data.get("username") or data.get("account") or "").strip()
-    password = str(data.get("password") or "").strip()
-    if user and password:
-        return {"account": user, "password": password}
-    return {}
-
-
 def collect(period, output, credentials, existing, emit):
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     files=[];issues=[]
-    credentials = dict(credentials or {})
     if not credentials.get("account") or not credentials.get("password"):
-        credentials.update(load_xingchen_creds())
-    if not credentials.get("account") or not credentials.get("password"):
-        return [],[{"message":"本机没有金蝶网页账密。请写 ~/.config/finance/xingchen.local.json（username/password），或上传报表后不要加 --fetch-kingdee。","status":"needs_auth"}]
+        return [],[{"message":"金蝶账号尚未配置，请安全保存账号后重试或上传报表","status":"needs_auth"}]
     allowed={urlsplit(v).hostname for v in os.environ.get("FINANCIAL_NETWORK_TARGETS","").split(",") if v}
     proxy=os.environ.get("HTTPS_PROXY")
-    # 平台部署才要求代理白名单；OpenCode 本机直连金蝶云。
-    if os.environ.get("FINANCIAL_NETWORK_TARGETS") and (not proxy or not allowed):
+    if not proxy or not allowed:
         return [],[{"message":"平台采集网络尚未配置","status":"network_unavailable"}]
     def visible_matches(page,text):
         loc=page.get_by_text(text,exact=True).filter(visible=True)
