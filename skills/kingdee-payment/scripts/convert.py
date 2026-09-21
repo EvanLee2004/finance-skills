@@ -384,7 +384,7 @@ def reason_counts(lines) -> list[tuple[str, int]]:
     return sorted(c.items(), key=lambda x: (-x[1], x[0]))
 
 
-def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, start_voucher_no, reasons, extras):
+def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, start_voucher_no, voucher_count, reasons, extras):
     lines = [
         "# 付款入金蝶对照说明",
         "",
@@ -393,6 +393,7 @@ def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, s
         f"- 待确认：{hold_count}",
         f"- 读了哪个 sheet：{sheet or '（未记）'}",
         f"- 起始凭证号：{start_voucher_no if start_voucher_no else '（未取）'}",
+        f"- 凭证张数：{voucher_count}",
         "- 原因类别：",
     ]
     if reasons:
@@ -419,6 +420,7 @@ def convert_payment(
     citic: str = "100206",
     boc_as_other: bool = False,
     citic_as_other: bool = False,
+    one_voucher_per_payee: bool = False,
 ) -> list[VoucherLine]:
     cfg = rules.get("payment") or {}
     fallback = rules.get("fallback_supplier") or {"code": "9999", "name": "其他供应商"}
@@ -490,7 +492,7 @@ def convert_payment(
             continue
         kind = kinds.pop()
         sellers = [m.get("seller") or "" for m in metas if m.get("seller")]
-        seller = sellers[0] if sellers else vendor
+        seller = sellers[0] if sellers else ""   # 抽不到就留空，绝不静默降级取台账名
         if payable is None:
             line.status, line.reason = "待确认", "缺应付金额"
             lines.append(line)
@@ -586,8 +588,9 @@ def convert_payment(
     wb_f.close()
     wb_v.close()
     bookable = [x for x in lines if x.status == "可入账"]
+    # 斯佳 2026-09-21：本批全部合一张凭证（同号）。要一家一张加 --one-voucher-per-payee。
     for i, line in enumerate(bookable, start=1):
-        line.voucher_no = i
+        line.voucher_no = i if one_voucher_per_payee else 1
     return lines
 
 
@@ -655,6 +658,7 @@ def run_dir(
     citic: str = "100206",
     boc_as_other: bool = False,
     citic_as_other: bool = False,
+    one_voucher_per_payee: bool = False,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir)
     if not report.get("ready"):
@@ -666,6 +670,7 @@ def run_dir(
     src = Path(report["files"]["ledger"])
     extras = [
         "记账日：当前月最后一张凭证的日期（可 --date）",
+        "凭证号：本批全部合一张凭证（同号；要一家一张加 --one-voucher-per-payee）",
         "黄=中行，白=中信",
         "夹里非 PDF 忽略",
     ]
@@ -686,6 +691,7 @@ def run_dir(
         citic=citic,
         boc_as_other=boc_as_other,
         citic_as_other=citic_as_other,
+        one_voucher_per_payee=one_voucher_per_payee,
     )
     if start_voucher_no and int(start_voucher_no) != 1:
         delta = int(start_voucher_no) - 1
@@ -707,6 +713,7 @@ def run_dir(
         if line.extra.get("sheet"):
             sheet = str(line.extra["sheet"])
             break
+    voucher_nos = {int(x.voucher_no) for x in lines if x.status == "可入账" and x.voucher_no is not None}
     write_note(
         dest / "对照说明_付款.md",
         source_count=len(lines),
@@ -714,10 +721,10 @@ def run_dir(
         hold_count=hold,
         sheet=sheet,
         start_voucher_no=start_voucher_no,
+        voucher_count=len(voucher_nos),
         reasons=reason_counts(lines),
         extras=extras,
     )
-    voucher_nos = {int(x.voucher_no) for x in lines if x.status == "可入账" and x.voucher_no is not None}
     short_n = sum(1 for x in lines if x.reason == "票大于应付")
     new_boc = names_needing_create(lines, yellow=True)
     new_citic = names_needing_create(lines, yellow=False)
@@ -741,6 +748,7 @@ def run_dir(
         "short_pay_count": short_n,
         "boc": boc,
         "citic": citic,
+        "one_voucher_per_payee": one_voucher_per_payee,
     }
 
 
@@ -759,6 +767,7 @@ def main(argv=None) -> int:
     parser.add_argument("--create-new-suppliers-citic", action="store_true", help="斯佳点头：没标黄（中信）缺档也新建")
     parser.add_argument("--citic-as-other", action="store_true", help="斯佳点头：没标黄缺档记其他供应商 9999")
     parser.add_argument("--boc-as-other", action="store_true", help="斯佳点头：标黄缺档也记其他供应商 9999")
+    parser.add_argument("--one-voucher-per-payee", action="store_true", help="一家一张凭证（默认本批全部合一张）")
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
     if args.inspect:
@@ -811,6 +820,7 @@ def main(argv=None) -> int:
         citic=citic,
         boc_as_other=args.boc_as_other,
         citic_as_other=args.citic_as_other,
+        one_voucher_per_payee=args.one_voucher_per_payee,
     )
     try:
         result = run_dir(root, args.date, master_data, **run_kw)

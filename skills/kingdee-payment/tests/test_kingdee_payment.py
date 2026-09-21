@@ -60,7 +60,7 @@ def _dummy_pdf(path: Path):
     path.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n")
 
 
-def _run(tmp_path, monkeypatch, parse_fn, book_short_pay=False, master=None, start=1, citic_as_other=False, boc_as_other=False):
+def _run(tmp_path, monkeypatch, parse_fn, book_short_pay=False, master=None, start=1, citic_as_other=False, boc_as_other=False, one_voucher_per_payee=False):
     monkeypatch.setattr(convert, "parse_invoice_pdf", parse_fn)
     return convert.run_dir(
         tmp_path,
@@ -71,6 +71,7 @@ def _run(tmp_path, monkeypatch, parse_fn, book_short_pay=False, master=None, sta
         book_short_pay=book_short_pay,
         citic_as_other=citic_as_other,
         boc_as_other=boc_as_other,
+        one_voucher_per_payee=one_voucher_per_payee,
     )
 
 
@@ -322,3 +323,139 @@ def test_cli_asks_boc_and_citic_together(tmp_path, monkeypatch, capsys):
     assert "新黄店" in out
     assert "无档店" in out
     assert "一次确认" in out
+
+
+# ---------- 2026-09-21 返工：摘要取开票抬头（销方）+ 全批一张凭证 ----------
+
+def test_seller_gou_xiao_same_line():
+    """2026 版电子发票「购/销 双栏同行」：摘要必须取销方（开票抬头），不许取我方购买方。"""
+    text = (
+        "电子发票（增值税专用发票）\n"
+        "发票号码：00000000000000000000\n"
+        "开票日期：2026年09月07日\n"
+        "购 名称：某（北京）语言科技股份有限公司 销 名称：某翻译店（个体工商户）\n"
+        "买 售\n方 方\n"
+        "信 统一社会信用代码/纳税人识别号：91110000000000000X 信 统一社会信用代码/纳税人识别号：91120000000000000Y\n"
+        "息 息\n"
+        "*生产生活服务*翻译费 无 次 1 6897.0099009901 6897.01 1% 68.97\n"
+        "合 计 ¥6897.01 ¥68.97\n"
+        "价税合计（大写） 陆仟玖佰陆拾伍圆玖角捌分 （小写）¥6965.98\n"
+        "开票人：某甲\n"
+    )
+    got = parse_invoice.parse_invoice_text(text)
+    assert got["seller"] == "某翻译店（个体工商户）"
+    assert "语言科技" not in got["seller"]
+    assert "名称" not in got["seller"]
+    assert got["kind"] == "专票"
+    assert got["total"] == Decimal("6965.98")
+    assert got["tax"] == Decimal("68.97")
+
+
+def test_seller_with_spaced_buyer_name():
+    text = "购 名称：某 （北京）语言科技股份有限公司 销 名称：某翻译工作室\n买 售\n方 方\n"
+    assert parse_invoice.parse_invoice_text(text)["seller"] == "某翻译工作室"
+
+
+def test_seller_despace_broken_name():
+    text = "购 名称：某公司 销 名称：某翻译服务有 限公司\n"
+    assert parse_invoice.parse_invoice_text(text)["seller"] == "某翻译服务有限公司"
+
+
+def test_seller_name_outside_table():
+    """名称被排版挤到表格外、与买家名同一行：左买右销，取最右。"""
+    text = (
+        "电子发票（普通发票）\n购 销\n买 名称： 售 名称：\n方 方\n"
+        "信 信 统一社会信用代码/纳税人识别号： 统一社会信用代码/纳税人识别号：\n息 息\n"
+        "某公司 某信息技术有限公司\n9111 9222\n"
+    )
+    assert parse_invoice.parse_invoice_text(text)["seller"] == "某信息技术有限公司"
+
+
+def test_seller_legacy_standalone_field():
+    text = "电子发票（普通发票）\n价税合计（小写）¥2719.92\n销售方名称：乙店"
+    assert parse_invoice.parse_invoice_text(text)["seller"] == "乙店"
+
+
+def test_seller_empty_when_no_counterparty():
+    """销方抽不到（只剩购买方）→ 留空，由 convert 判待确认；不许拿买方名顶替。"""
+    text = "购 名称：某（北京）语言科技股份有限公司 销 名称：\n买 售\n方 方\n"
+    got = parse_invoice.parse_invoice_text(text)
+    assert got["seller"] == ""
+
+
+def test_empty_seller_holds_the_row(tmp_path, monkeypatch):
+    _write_pay(tmp_path / "付款.xlsx", [["北京某翻译店", 100, "北京某翻译店"]])
+    (tmp_path / "北京某翻译店").mkdir()
+    _dummy_pdf(tmp_path / "北京某翻译店" / "a.pdf")
+    fake = lambda p: {"kind": "普票", "seller": "", "total": Decimal("100.00"), "tax": None}
+    result = _run(tmp_path, monkeypatch, fake)
+    assert result["bookable_count"] == 0
+    assert result["hold_count"] == 1
+
+
+def _three_bookable(tmp_path, monkeypatch, **kw):
+    names = ["甲店", "乙店", "丙店"]
+    _write_pay(tmp_path / "付款.xlsx", [[n, (i + 1) * 100, n] for i, n in enumerate(names)])
+    for i, n in enumerate(names):
+        (tmp_path / n).mkdir()
+        _dummy_pdf(tmp_path / n / f"{i}.pdf")
+    amt = {n: Decimal(str((i + 1) * 100)) for i, n in enumerate(names)}
+
+    def fake(path: Path):
+        n = path.parent.name
+        return {"kind": "普票", "seller": n, "total": amt[n], "tax": None}
+
+    return _run(tmp_path, monkeypatch, fake, citic_as_other=True, **kw)
+
+
+def _read_kingdee(result, label):
+    kd = load_workbook(result["kingdee_path"])
+    ws = kd[convert.KINGDEE_SHEET]
+    col = convert.col_by_label(ws, label)
+    vals = [ws.cell(r, col).value for r in range(4, 60)]
+    kd.close()
+    return [v for v in vals if v not in (None, "")]
+
+
+def test_payment_one_voucher_by_default(tmp_path, monkeypatch):
+    """斯佳 2026-09-21：本批全部合一张凭证。"""
+    result = _three_bookable(tmp_path, monkeypatch, start=123)
+    assert result["bookable_count"] == 3
+    assert result["voucher_count"] == 1
+    assert set(_read_kingdee(result, "凭证号 #")) == {123}
+
+
+def test_payment_one_voucher_per_payee_flag(tmp_path, monkeypatch):
+    result = _three_bookable(tmp_path, monkeypatch, start=123, one_voucher_per_payee=True)
+    assert result["voucher_count"] == 3
+    assert set(_read_kingdee(result, "凭证号 #")) == {123, 124, 125}
+
+
+def test_payment_one_voucher_balances_and_expl(tmp_path, monkeypatch):
+    result = _three_bookable(tmp_path, monkeypatch, start=123)
+    debits = _read_kingdee(result, "借方 #")
+    credits = _read_kingdee(result, "贷方 #")
+    assert abs(sum(debits) - sum(credits)) < 0.005
+    assert abs(sum(debits) - 600.0) < 0.005
+    expl = _read_kingdee(result, "摘要 #")
+    assert set(expl) == {"付：甲店", "付：乙店", "付：丙店"}
+    assert not any("语言科技" in str(e) for e in expl)
+
+
+def test_note_reports_voucher_count(tmp_path, monkeypatch):
+    result = _three_bookable(tmp_path, monkeypatch, start=123)
+    note = Path(result["note_path"]).read_text(encoding="utf-8")
+    assert "凭证张数：1" in note
+
+
+def test_seller_joined_across_lines():
+    """销方名太长被排版折行：名字断在两行，必须接回来。"""
+    text = "购 名称：某公司 销 名称：某翻译服务有\n限公司\n"
+    assert parse_invoice.parse_invoice_text(text)["seller"] == "某翻译服务有限公司"
+
+
+def test_seller_does_not_join_unrelated_next_line():
+    """下一行是买家/销售方栏的断字（「方 方」「买 售」）时，不许当续字拼进摘要。"""
+    text = "购 名称：某公司 销 名称：某翻译服务有\n方 方\n"
+    got = parse_invoice.parse_invoice_text(text)["seller"]
+    assert "方" not in got
