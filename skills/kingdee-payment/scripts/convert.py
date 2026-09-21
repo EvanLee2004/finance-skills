@@ -10,7 +10,7 @@ import shutil
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -394,6 +394,7 @@ def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, s
         f"- 读了哪个 sheet：{sheet or '（未记）'}",
         f"- 起始凭证号：{start_voucher_no if start_voucher_no else '（未取）'}",
         f"- 凭证张数：{voucher_count}",
+        f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "- 原因类别：",
     ]
     if reasons:
@@ -403,6 +404,11 @@ def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, s
         lines.append("  - （无）")
     for extra in extras or []:
         lines.append(f"- {extra}")
+    lines.append("")
+    lines.append(
+        "- ⚠️ 凭证号取的是「生成那一刻」的当月最大 + 1。若出表后隔了时间（期间别人又录了凭证），"
+        "引进前请重跑一次取最新号，不要直接用这张旧表。"
+    )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
@@ -759,7 +765,7 @@ def main(argv=None) -> int:
     parser.add_argument("--date")
     parser.add_argument("--master")
     parser.add_argument("--no-api", action="store_true")
-    parser.add_argument("--skip-browser", action="store_true", help="测试用：不登网页，仍要档案")
+    parser.add_argument("--skip-browser", action="store_true", help="已废弃：付款不再登网页，传了也不起作用（保留兼容老命令）")
     parser.add_argument("--start-voucher-no", type=int, default=None)
     parser.add_argument("--out-dir", "--out", dest="out_dir")
     parser.add_argument("--book-short-pay", action="store_true", help="斯佳点头：票大于应付的一律按应付记")
@@ -782,11 +788,9 @@ def main(argv=None) -> int:
     elif args.no_api:
         return ask_and_stop("本次入账必须先读取总部当前档案；--no-api 只可用于开发排查，未生成引入表。")
     else:
-        if not args.skip_browser:
-            try:
-                kingdee_live.ensure_hq_session()
-            except SystemExit as e:
-                return ask_and_stop(str(e) if str(e) else "金蝶网页未登录总部。未生成引入表。")
+        # 付款只用开放平台：银行科目、供应商档案、凭证号三样都走应用号。
+        # 不再登金蝶网页（2026-09-21 去掉了那一步：网页会话对本技能没有产出，
+        # 失败反而会整批不出表；网页账密是销项/收款与损益表技能的事）。
         try:
             accounts = kingdee_live.fetch_bank_accounts()
             boc, citic = kingdee_live.pick_payment_banks(accounts, rules)

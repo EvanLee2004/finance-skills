@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""总部现网：银行科目、供应商建档、凭证号。Playwright 登亮晶号切总部，科目走 OpenAPI。"""
+"""总部现网：银行科目、供应商建档、凭证号。**全部走开放平台（应用号）**。
+
+2026-09-21 起不再登金蝶网页：那一步对本技能没有产出（返回值被丢弃），
+网页账密失效还会让整批不出表。网页登录只属于销项/收款与损益表技能。
+"""
 from __future__ import annotations
 
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 POSTING_SCRIPTS = HERE.parent.parent / "kingdee-posting" / "scripts"
-PL_SCRIPTS = HERE.parent.parent / "pl-dept-report" / "scripts"
 
 
 def _load_mod(name: str, path: Path):
@@ -23,61 +26,7 @@ def _load_mod(name: str, path: Path):
 
 kingdee_api = _load_mod("kingdee_payment_live_api", POSTING_SCRIPTS / "kingdee_api.py")
 
-HQ_NAME = "甲骨易（北京）语言科技股份有限公司"
-HQ_SEARCH = "语言科技"
 SUPPLIER_SPECIAL_CODES = {999, 9999}
-
-
-def ensure_hq_session() -> str:
-    """Playwright 用 xingchen.local.json 登总部。失败 raise SystemExit 人话。"""
-    login_path = PL_SCRIPTS / "xingchen_login.py"
-    export_path = PL_SCRIPTS / "xingchen_export.py"
-    if not login_path.is_file() or not export_path.is_file():
-        raise SystemExit("找不到月度损益表技能的登录脚本。请把 pl-dept-report 和本技能装在一起。")
-    login = _load_mod("pay_xingchen_login", login_path)
-    exporter = _load_mod("pay_xingchen_export", export_path)
-    creds = login.load_creds()
-    if not creds:
-        raise SystemExit(
-            "本机没有金蝶网页账密。请把亮晶号写进 ~/.config/finance/xingchen.local.json"
-            "（截图在 ~/.config/finance/xingchen_login_liangjing.png）。未生成引入表。"
-        )
-
-    async def _run():
-        from playwright.async_api import async_playwright
-
-        state = login.state_path()
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            kwargs = {"locale": "zh-CN", "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"}}
-            if state.is_file():
-                kwargs["storage_state"] = str(state)
-            ctx = await browser.new_context(**kwargs)
-            page = await ctx.new_page()
-            try:
-                await login.ensure_login(page, creds)
-            except SystemExit:
-                raise
-            except Exception as e:
-                raise SystemExit(f"金蝶网页现在连不上（{type(e).__name__}）。请检查网络后重跑。") from e
-            if await page.get_by_text("进入使用").count():
-                await page.get_by_text("进入使用").first.click()
-                await page.wait_for_timeout(2000)
-            ok = await exporter._switch_book(page, HQ_NAME, HQ_SEARCH)
-            try:
-                await login.save_state(ctx)
-            except Exception:
-                pass
-            await ctx.close()
-            await browser.close()
-            return ok
-
-    import asyncio
-
-    ok = asyncio.run(_run())
-    if not ok:
-        raise SystemExit("金蝶网页登录了但没切到总部。未生成引入表。")
-    return "hq"
 
 
 def fetch_bank_accounts() -> list[dict]:

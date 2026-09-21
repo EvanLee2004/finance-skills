@@ -1,6 +1,6 @@
 ---
 name: kingdee-payment
-version: "1.2"
+version: "1.3"
 description: >
   供应商付款台账+发票PDF填金蝶凭证引入表。
   当用户说「付款入金蝶 / 供应商付款入金蝶 / 应付记账」时用。
@@ -15,13 +15,13 @@ description: >
 
 ## 0. 本机 json
 
-| 只用 | 禁止 |
-|------|------|
-| `~/.config/finance/kingdee.local.json`（开放平台） | `zhiyun.local.json` |
-| `~/.config/finance/xingchen.local.json`（网页，Playwright 核银行科目） | 把口令打进对话 |
-| 登录截图找不到时看 `~/.config/finance/xingchen_login_liangjing.png` | 去开放平台点重置密钥 |
+只用 `~/.config/finance/kingdee.local.json`（金蝶开放平台应用号）。
 
-本机已有 json **不要再问密码**。
+**付款不登金蝶网页**（2026-09-21 起去掉那一步）：银行科目、供应商档案、凭证号三样全部走应用号。
+网页账密 `~/.config/finance/xingchen.local.json` 是销项/收款和损益表技能的事，本技能**不看、不问、不依赖**。
+
+禁止：把口令打进对话；去开放平台点重置密钥；用 `zhiyun.local.json`。
+本机已有 `kingdee.local.json` **不要再问密码**。
 
 ## 1. 红线
 
@@ -57,6 +57,9 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录>
 - 中信也新建 → `--create-new-suppliers-citic`  
 她点名凭证号从 N 起 → `--start-voucher-no N`。点名日期 → `--date`。
 一家一张凭证（她说要拆才用）→ `--one-voucher-per-payee`。
+`--skip-browser` 已废弃（付款不再登网页），传了也不起作用。
+
+**表出完尽快引入。** 凭证号是「跑的那一刻」查的；隔久了别人又录了凭证，号会被占 → 重跑取最新号，不要直接用旧表。
 
 ## 4. 收尾
 
@@ -72,12 +75,13 @@ python3 "<本skill目录>/scripts/convert.py" --input-dir <绝对目录>
 | `config/业务规则.md` | 摘要口径、凭证号（一张还是多家一张） |
 | `config/列名别名.json` | 表头 |
 | `config/凭证引入空模.xlsx` | 金蝶换官方模板时整份替换 |
-| 本机 `kingdee.local.json` / `xingchen.local.json` | 密钥；不进仓 |
+| 本机 `kingdee.local.json` | 开放平台密钥；不进仓 |
 
 ## 本岗位该主动操心啥
 
 - 标黄却走了中信、没色却走了中行 → 填色没读到，停。
 - 摘要里出现我方公司名或夹里人名 / 开户名 → 销方抽错，停，别交表。
+- 表在桌面放久了才引入 → 先重跑确认凭证号没被别人占。
 - 专票进项抽不到 → 待确认，不要用税率倒挤。
 - 标题带空格的电子票（「专 用 发 票」）必须能认。
 - 夹里突然又出现别人的 xlsx → 当没看见。

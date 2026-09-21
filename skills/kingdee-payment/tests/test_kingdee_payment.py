@@ -275,7 +275,6 @@ def test_cli_asks_short_pay(tmp_path, monkeypatch, capsys):
             "1",
             "--out-dir",
             str(tmp_path / "out"),
-            "--skip-browser",
         ]
     )
     assert rc == 2
@@ -313,7 +312,6 @@ def test_cli_asks_boc_and_citic_together(tmp_path, monkeypatch, capsys):
             "1",
             "--out-dir",
             str(tmp_path / "out"),
-            "--skip-browser",
         ]
     )
     assert rc == 2
@@ -446,6 +444,44 @@ def test_note_reports_voucher_count(tmp_path, monkeypatch):
     result = _three_bookable(tmp_path, monkeypatch, start=123)
     note = Path(result["note_path"]).read_text(encoding="utf-8")
     assert "凭证张数：1" in note
+    assert "生成时间：" in note
+    assert "重跑一次取最新号" in note
+
+
+def test_no_browser_login_anymore():
+    """付款不再依赖金蝶网页（2026-09-21）：kingdee_live 里不该再有登网页的函数。"""
+    assert not hasattr(kingdee_live, "ensure_hq_session")
+    assert not hasattr(kingdee_live, "HQ_NAME")
+
+
+def test_cli_accepts_deprecated_skip_browser(tmp_path, monkeypatch):
+    """老命令里的 --skip-browser 已废弃，但传了不能报错。"""
+    _write_pay(tmp_path / "付款.xlsx", [["北京某翻译店", 100, "北京某翻译店"]])
+    (tmp_path / "北京某翻译店").mkdir()
+    _dummy_pdf(tmp_path / "北京某翻译店" / "a.pdf")
+    master = tmp_path / "master.json"
+    master.write_text(json.dumps(_master(), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        convert,
+        "parse_invoice_pdf",
+        lambda p: {"kind": "普票", "seller": "北京某翻译店", "total": Decimal("100.00"), "tax": None},
+    )
+    rc = convert.main(
+        [
+            "--input-dir",
+            str(tmp_path),
+            "--master",
+            str(master),
+            "--date",
+            "2026-09-17",
+            "--start-voucher-no",
+            "1",
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--skip-browser",
+        ]
+    )
+    assert rc == 0
 
 
 def test_seller_joined_across_lines():
