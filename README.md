@@ -49,7 +49,6 @@ flowchart TD
 |------|----|---------|------|----------|
 | 应收账款合并（亮晶） | receivables-merge | 1.1 | 分年表合成应收 all，带催收参考和透视 | Excel：本周源台账；最好再给上版应收 all |
 | 应收按销售拆分（亮晶） | split-by-sales | 1.1 | 一张 all 拆成一人一份 | Excel：一张应收 all |
-| 合规文件抽查（亮晶） | compliance-spot-check | 1.1 | 建议本周抽查名单 | Excel：应收 all；可选抽查历史 |
 | 劳务发票核对（亮晶） | labor-invoice-check | 1.1 | 有票 / 800 以下 / 无票 | Excel：应发明细 + 当月个人发票汇总 |
 | 九点下单统计（亮晶） | order-daily-summary | 1.1 | 下单数据（万元） | 智云账号密码；或离线：九点下单明细 Excel |
 | 追觅应收进度对比（亮晶） | dreame-ar-progress-diff | 1.1 | 两版追觅 list 的进度差 | Excel：两版追觅应收 list |
@@ -81,7 +80,7 @@ flowchart TD
 | PPT（通用） | pptx | 1.1 | 读写演示文稿 | 要改的 PPT |
 | PDF（通用） | pdf | 1.1 | 读、拆、合并 PDF | 要处理的 PDF |
 
-已下线：`qige-invoice-to-kingdee`（销项已在金蝶入账）、`task-clarifier`、`update-finance-skills`、`env-doctor`。
+已下线：`qige-invoice-to-kingdee`（销项已在金蝶入账）、`task-clarifier`、`update-finance-skills`、`env-doctor`、`compliance-spot-check`（合规抽查过期，后续另做）。
 
 ## 仓库
 

@@ -6,7 +6,6 @@
     "split-by-sales",
     "labor-invoice-check",
     "withholding-report-rename",
-    "compliance-spot-check",
     "dreame-ar-progress-diff",
     "dept-expense-alloc",
     "ar-hexiao-daily",
@@ -25,7 +24,8 @@
     "env-doctor",
     "task-clarifier",
     "update-finance-skills",
-    "qige-invoice-to-kingdee"
+    "qige-invoice-to-kingdee",
+    "compliance-spot-check"
   ],
   "overwrite_config": [
     "ar-hexiao-daily"

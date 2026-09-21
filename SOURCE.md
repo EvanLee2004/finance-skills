@@ -46,7 +46,7 @@
 目录里每个官方 skill 一个夹（如 `labor-invoice-check`、`ar-hexiao-daily`）。  
 **更新只动财务包白名单夹**；同事自己装的其他 skill 不许删、不许改、不许挪。
 
-白名单见仓库根 `pack.json`。已下线：`env-doctor`、`qige-invoice-to-kingdee`、`task-clarifier`、`update-finance-skills`。
+白名单见仓库根 `pack.json`。已下线：`env-doctor`、`qige-invoice-to-kingdee`、`task-clarifier`、`update-finance-skills`、`compliance-spot-check`。
 
 核销跟 `main`：更新时覆盖 `ar-hexiao-daily` 的仓内 `config/`。凭据只留 `*.local.json`。
 
