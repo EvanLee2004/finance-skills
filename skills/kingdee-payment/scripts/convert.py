@@ -477,9 +477,16 @@ def convert_payment(
     boc_as_other: bool = False,
     citic_as_other: bool = False,
     one_voucher_per_payee: bool = False,
+    auto_other_below: Decimal | None = None,
 ) -> list[VoucherLine]:
     cfg = rules.get("payment") or {}
     fallback = rules.get("fallback_supplier") or {"code": "9999", "name": "其他供应商"}
+    # 缺档按金额分流（斯佳 2026-09-21）：应付 < auto_other_below 直接记 9999；≥ 则问她是否新建
+    auto_below = (
+        auto_other_below
+        if auto_other_below is not None
+        else Decimal(str(cfg.get("auto_other_supplier_below") or 30000))
+    )
     wb_f = load_workbook(ledger, data_only=False)
     wb_v = load_workbook(ledger, data_only=True)
     sheet = inspect_mod.find_payment_sheet(wb_f, aliases)
@@ -580,21 +587,20 @@ def convert_payment(
             why = "none"
         if hit:
             sup_code, sup_name = hit
-        elif yellow and not boc_as_other:
-            line.status, line.reason = "待确认", "无档是否新建（中行标黄）"
-            lines.append(line)
-            continue
-        elif (not yellow) and not citic_as_other:
-            line.status, line.reason = "待确认", "无档是否新建（中信）"
-            lines.append(line)
-            continue
-        else:
+        elif payable is not None and payable < auto_below:
+            # 斯佳 2026-09-21：小额缺档不问，直接记「其他供应商 9999」，并在明细里标出来
             fallback_hit, fallback_why = master.supplier_fuzzy(str(fallback.get("name") or ""))
             if not fallback_hit or fallback_why:
                 line.status, line.reason = "待确认", "其他供应商档案未核验"
                 lines.append(line)
                 continue
             sup_code, sup_name = fallback_hit
+            line.extra["auto_9999"] = True
+            line.reason = f"缺档→其他供应商 9999（自动：应付 < {int(auto_below)}）"
+        else:
+            line.status, line.reason = "待确认", f"无档是否新建（应付 ≥ {int(auto_below)}）"
+            lines.append(line)
+            continue
         dhit, derr = master.department(str(cfg.get("dept_code") or ""))
         if not dhit:
             line.status, line.reason = "待确认", derr or "付款部门档案未核验"
@@ -720,6 +726,7 @@ def run_dir(
     boc_as_other: bool = False,
     citic_as_other: bool = False,
     one_voucher_per_payee: bool = False,
+    auto_other_below: Decimal | None = None,
 ) -> dict:
     report = inspect_mod.inspect_dir(input_dir)
     if not report.get("ready"):
@@ -729,11 +736,17 @@ def run_dir(
     master = Master(master_data or {})
     day = booking or date.today().isoformat()
     src = Path(report["files"]["ledger"])
+    below = (
+        auto_other_below
+        if auto_other_below is not None
+        else Decimal(str((rules.get("payment") or {}).get("auto_other_supplier_below") or 30000))
+    )
     extras = [
         "记账日：当前月最后一张凭证的日期（可 --date）",
         "凭证号：本批全部合一张凭证（同号；要一家一张加 --one-voucher-per-payee）",
         "黄=中行，白=中信",
         "夹里非 PDF 忽略",
+        f"缺档：应付 < {int(below)} 自动记其他供应商 9999（明细里标出）；≥ {int(below)} 先问是否新建",
     ]
     if book_short_pay:
         extras.append("票大于应付：已按应付记")
@@ -753,6 +766,7 @@ def run_dir(
         boc_as_other=boc_as_other,
         citic_as_other=citic_as_other,
         one_voucher_per_payee=one_voucher_per_payee,
+        auto_other_below=below,
     )
     if start_voucher_no and int(start_voucher_no) != 1:
         delta = int(start_voucher_no) - 1
@@ -829,8 +843,14 @@ def main(argv=None) -> int:
     parser.add_argument("--book-short-pay", action="store_true", help="斯佳点头：票大于应付的一律按应付记")
     parser.add_argument("--create-new-suppliers", action="store_true", help="斯佳点头：标黄（中行）缺档按现网编号新建")
     parser.add_argument("--create-new-suppliers-citic", action="store_true", help="斯佳点头：没标黄（中信）缺档也新建")
-    parser.add_argument("--citic-as-other", action="store_true", help="斯佳点头：没标黄缺档记其他供应商 9999")
-    parser.add_argument("--boc-as-other", action="store_true", help="斯佳点头：标黄缺档也记其他供应商 9999")
+    parser.add_argument("--citic-as-other", action="store_true", help="已废弃：缺档按金额自动分流，传了不起作用（保留兼容老命令）")
+    parser.add_argument("--boc-as-other", action="store_true", help="已废弃：缺档按金额自动分流，传了不起作用（保留兼容老命令）")
+    parser.add_argument(
+        "--auto-other-below",
+        type=float,
+        default=None,
+        help="缺档自动记「其他供应商 9999」的应付上限（默认为 config/rules.json 的 auto_other_supplier_below，30000）",
+    )
     parser.add_argument("--one-voucher-per-payee", action="store_true", help="一家一张凭证（默认本批全部合一张）")
     args = parser.parse_args(argv)
     root = Path(args.input_dir)
@@ -883,6 +903,7 @@ def main(argv=None) -> int:
         boc_as_other=args.boc_as_other,
         citic_as_other=args.citic_as_other,
         one_voucher_per_payee=args.one_voucher_per_payee,
+        auto_other_below=Decimal(str(args.auto_other_below)) if args.auto_other_below is not None else None,
     )
     try:
         result = run_dir(root, args.date, master_data, **run_kw)

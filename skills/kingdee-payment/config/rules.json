@@ -22,6 +22,7 @@
     "dept_name": "项目总监及助理",
     "emp_name": "项目总监",
     "boc_name_must_contain": "中行",
-    "citic_name_must_contain": "中信"
+    "citic_name_must_contain": "中信",
+    "auto_other_supplier_below": 30000
   }
 }

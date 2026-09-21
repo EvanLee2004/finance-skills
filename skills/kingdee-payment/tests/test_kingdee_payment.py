@@ -158,36 +158,48 @@ def test_yellow_uses_boc_white_uses_citic(tmp_path, monkeypatch):
     kd.close()
 
 
-def test_white_missing_supplier_holds_then_9999(tmp_path, monkeypatch):
+def test_small_missing_supplier_auto_9999(tmp_path, monkeypatch):
+    """斯佳 2026-09-21：缺档且应付 < 3 万 → 直接记 9999，**不问**，并在明细里标出来。"""
     _write_pay(tmp_path / "付款.xlsx", [["无档店", 200, "无档店"]])
     (tmp_path / "无档店").mkdir()
     _dummy_pdf(tmp_path / "无档店" / "a.pdf")
     fake = lambda p: {"kind": "普票", "seller": "无档店", "total": Decimal("200.00"), "tax": None}
-    hold = _run(tmp_path, monkeypatch, fake)
-    assert hold["bookable_count"] == 0
-    assert hold["new_supplier_names_citic"] == ["无档店"]
-    assert hold["new_supplier_names_boc"] == []
-    ok = _run(tmp_path, monkeypatch, fake, citic_as_other=True)
-    kd = load_workbook(ok["kingdee_path"])
-    ws = kd[convert.KINGDEE_SHEET]
-    col = convert.col_by_label(ws, "辅助核算.供应商.编码")
-    codes = [ws.cell(r, col).value for r in range(4, 8)]
-    assert "9999" in codes
-    kd.close()
+    result = _run(tmp_path, monkeypatch, fake)
+    assert result["bookable_count"] == 1
+    assert result["new_supplier_names"] == []
+    assert "9999" in _read_kingdee(result, "辅助核算.供应商.编码")
+    wb = load_workbook(result["detail_path"])
+    ws = wb["明细"]
+    rows = [[c.value for c in r] for r in ws.iter_rows(min_row=2)]
+    wb.close()
+    marked = [r for r in rows if r[0] == "可入账" and r[1] and "9999" in str(r[1])]
+    assert marked, "明细的「原因」列要标出自动记了 9999"
 
 
-def test_yellow_missing_supplier_asks(tmp_path, monkeypatch):
-    _write_pay(tmp_path / "付款.xlsx", [["新黄店", 100, "新黄店"]], yellow_rows={2})
+def test_large_missing_supplier_asks(tmp_path, monkeypatch):
+    """缺档且应付 ≥ 3 万 → 待确认，问她是否新建（ask 报发票公司名）。"""
+    _write_pay(tmp_path / "付款.xlsx", [["新黄店", 50000, "新黄店"]], yellow_rows={2})
     (tmp_path / "新黄店").mkdir()
     _dummy_pdf(tmp_path / "新黄店" / "a.pdf")
     result = _run(
         tmp_path,
         monkeypatch,
-        lambda p: {"kind": "普票", "seller": "新黄店", "total": Decimal("100.00"), "tax": None},
+        lambda p: {"kind": "普票", "seller": "新黄店", "total": Decimal("50000.00"), "tax": None},
     )
     assert result["bookable_count"] == 0
     assert result["new_supplier_names_boc"] == ["新黄店"]
     assert result["new_supplier_names_citic"] == []
+
+
+def test_threshold_boundary_asks(tmp_path, monkeypatch):
+    """正好等于 3 万 → 归到「问」那一侧。"""
+    _write_pay(tmp_path / "付款.xlsx", [["无档店", 30000, "无档店"]])
+    (tmp_path / "无档店").mkdir()
+    _dummy_pdf(tmp_path / "无档店" / "a.pdf")
+    fake = lambda p: {"kind": "普票", "seller": "无档店", "total": Decimal("30000.00"), "tax": None}
+    result = _run(tmp_path, monkeypatch, fake)
+    assert result["bookable_count"] == 0
+    assert result["new_supplier_names_citic"] == ["无档店"]
 
 
 def test_ticket_greater_asks_once_then_flag_books(tmp_path, monkeypatch):
@@ -286,7 +298,7 @@ def test_cli_asks_short_pay(tmp_path, monkeypatch, capsys):
 def test_cli_asks_boc_and_citic_together(tmp_path, monkeypatch, capsys):
     _write_pay(
         tmp_path / "付款.xlsx",
-        [["新黄店", 100, "新黄店"], ["无档店", 200, "无档店"]],
+        [["新黄店", 50000, "新黄店"], ["无档店", 40000, "无档店"]],
         yellow_rows={2},
     )
     (tmp_path / "新黄店").mkdir()
@@ -298,7 +310,7 @@ def test_cli_asks_boc_and_citic_together(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         convert,
         "parse_invoice_pdf",
-        lambda p: {"kind": "普票", "seller": p.parent.name, "total": Decimal("100.00") if p.parent.name == "新黄店" else Decimal("200.00"), "tax": None},
+        lambda p: {"kind": "普票", "seller": p.parent.name, "total": Decimal("50000.00") if p.parent.name == "新黄店" else Decimal("40000.00"), "tax": None},
     )
     rc = convert.main(
         [
@@ -509,7 +521,7 @@ def test_supplier_matched_by_invoice_seller_not_ledger_name(tmp_path, monkeypatc
 
 def test_missing_supplier_ask_reports_invoice_seller(tmp_path, monkeypatch):
     """缺档名单要报发票销方名（新建也用它），不能报台账里的人名。"""
-    _write_pay(tmp_path / "付款.xlsx", [["张三", 100, "张三"]])
+    _write_pay(tmp_path / "付款.xlsx", [["张三", 50000, "张三"]])
     (tmp_path / "张三").mkdir()
     _dummy_pdf(tmp_path / "张三" / "a.pdf")
     master = {
@@ -517,7 +529,7 @@ def test_missing_supplier_ask_reports_invoice_seller(tmp_path, monkeypatch):
         "department": [{"code": "0405", "name": "项目总监及助理"}],
         "supplier": [{"code": "9999", "name": "其他供应商"}],
     }
-    fake = lambda p: {"kind": "普票", "seller": "某某科技发展有限公司", "total": Decimal("100.00"), "tax": None}
+    fake = lambda p: {"kind": "普票", "seller": "某某科技发展有限公司", "total": Decimal("50000.00"), "tax": None}
     result = _run(tmp_path, monkeypatch, fake, master=master)
     assert result["bookable_count"] == 0
     assert result["new_supplier_names_citic"] == ["某某科技发展有限公司"]
