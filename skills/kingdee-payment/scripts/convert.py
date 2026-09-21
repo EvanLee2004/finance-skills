@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from collections import Counter
@@ -384,7 +385,42 @@ def reason_counts(lines) -> list[tuple[str, int]]:
     return sorted(c.items(), key=lambda x: (-x[1], x[0]))
 
 
-def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, start_voucher_no, voucher_count, reasons, extras):
+# 票面自带的资质括号，档案名带这些不算错（王启莲 2026-09-21）
+QUALIFIER_PARENS = ("个体工商户", "个人独资企业")
+
+
+def supplier_name_mismatches(lines) -> list[dict]:
+    """自检：档案名 ≠ 发票销方名 的（编码 / 档案名 / 应改成）。
+
+    只报**麻烦的**：档案名里有多出来的括号备注（人名、「个人团体」这类）。
+    档案名比发票名少一个「（个体工商户）」的历史档案不报（她说「可以保留」，不是必须加）。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for line in lines or []:
+        if getattr(line, "status", "") != "可入账":
+            continue
+        extra = getattr(line, "extra", None) or {}
+        code = str(extra.get("sup_code") or "")
+        sup_name = str(extra.get("sup_name") or "")
+        seller = str(extra.get("seller") or "")
+        if not (sup_name and seller) or sup_name == seller:
+            continue
+        extra_parens = [
+            x for x in re.findall(r"[（(]([^）)]*)[）)]", sup_name)
+            if x not in seller and x not in QUALIFIER_PARENS
+        ]
+        if not extra_parens:
+            continue
+        key = (code, sup_name, seller)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"code": code, "档案名": sup_name, "应改成": seller, "多出": "、".join(extra_parens)})
+    return out
+
+
+def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, start_voucher_no, voucher_count, reasons, extras, mismatches=None):
     lines = [
         "# 付款入金蝶对照说明",
         "",
@@ -404,6 +440,20 @@ def write_note(path: Path, *, source_count, bookable_count, hold_count, sheet, s
         lines.append("  - （无）")
     for extra in extras or []:
         lines.append(f"- {extra}")
+    lines.append("")
+    lines.append("## 档案名自检")
+    if mismatches:
+        lines.append("")
+        lines.append(f"- ⚠️ **{len(mismatches)} 家供应商档案名与发票名不一致**（档案名里多了括号备注）。")
+        lines.append("- 表已经按发票名挂对了；但建议在**金蝶档案里改名**成右边那个，下一批才干净：")
+        lines.append("")
+        lines.append("| 编码 | 现在的档案名 | 改成（= 发票销方名） | 多出来的 |")
+        lines.append("|------|------------|-------------------|---------|")
+        for m in mismatches:
+            lines.append(f"| {m['code']} | {m['档案名']} | {m['应改成']} | {m['多出']} |")
+    else:
+        lines.append("")
+        lines.append("- 档案名与发票名逐行一致，无需改名。")
     lines.append("")
     lines.append(
         "- ⚠️ 凭证号取的是「生成那一刻」的当月最大 + 1。若出表后隔了时间（期间别人又录了凭证），"
@@ -570,6 +620,8 @@ def convert_payment(
         bank_acc = boc if yellow else citic
         tax_acc = str(cfg.get("input_tax_account") or "21710101")
         line.expl = f"付：{seller}"
+        line.extra["sup_code"] = sup_code
+        line.extra["sup_name"] = sup_name
         line.extra["bank"] = bank_acc
         if kind == "普票":
             line.entries = [
@@ -723,6 +775,7 @@ def run_dir(
             sheet = str(line.extra["sheet"])
             break
     voucher_nos = {int(x.voucher_no) for x in lines if x.status == "可入账" and x.voucher_no is not None}
+    mismatches = supplier_name_mismatches(lines)
     write_note(
         dest / "对照说明_付款.md",
         source_count=len(lines),
@@ -733,6 +786,7 @@ def run_dir(
         voucher_count=len(voucher_nos),
         reasons=reason_counts(lines),
         extras=extras,
+        mismatches=mismatches,
     )
     short_n = sum(1 for x in lines if x.reason == "票大于应付")
     new_boc = names_needing_create(lines, yellow=True)
@@ -758,6 +812,7 @@ def run_dir(
         "boc": boc,
         "citic": citic,
         "one_voucher_per_payee": one_voucher_per_payee,
+        "supplier_name_mismatches": mismatches,
     }
 
 
@@ -866,9 +921,16 @@ def main(argv=None) -> int:
         asks.append(missing_supplier_ask(boc_need, citic_need))
 
     log(
-        f"付款这批 {result['source_count']}：可入账 {result['bookable_count']}，待确认 {result['hold_count']}。"
+        f"付款这批 {result['source_count']}：可入账 {result['bookable_count']}，待确认 {result['hold_count']}，"
+        f"合 {result['voucher_count']} 张凭证（号 {result['start_voucher_no']}）。"
         f"填好的金蝶表在 {result['kingdee_path']}。请您看待确认，再自己去金蝶引入。我没有点引入。"
     )
+    mism = result.get("supplier_name_mismatches") or []
+    if mism:
+        log(
+            f"自检：{len(mism)} 家供应商档案名与发票名不一致（档案名里多了括号备注）。"
+            "表已按发票名挂对，但建议在金蝶改档案名 —— 清单见同夹对照说明。"
+        )
     if asks:
         print("ask=" + " ".join(asks), flush=True)
     print(json.dumps({k: v for k, v in result.items() if k != "lines"}, ensure_ascii=False, indent=2))

@@ -523,6 +523,52 @@ def test_missing_supplier_ask_reports_invoice_seller(tmp_path, monkeypatch):
     assert result["new_supplier_names_citic"] == ["某某科技发展有限公司"]
 
 
+def test_note_lists_supplier_name_mismatch(tmp_path, monkeypatch):
+    """自检：档案名带多余括号备注时，表仍按发票名挂对，但对照说明要列出来提醒改名。"""
+    _write_pay(tmp_path / "付款.xlsx", [["某翻译店（张三）", 100, "某翻译店（张三）"]])
+    (tmp_path / "某翻译店（张三）").mkdir()
+    _dummy_pdf(tmp_path / "某翻译店（张三）" / "a.pdf")
+    master = {
+        "employee": [{"code": "113", "name": "项目总监"}],
+        "department": [{"code": "0405", "name": "项目总监及助理"}],
+        "supplier": [
+            {"code": "8001", "name": "某翻译店（张三）"},
+            {"code": "9999", "name": "其他供应商"},
+        ],
+    }
+    fake = lambda p: {"kind": "普票", "seller": "某翻译店", "total": Decimal("100.00"), "tax": None}
+    result = _run(tmp_path, monkeypatch, fake, master=master)
+    assert result["bookable_count"] == 1
+    mism = result["supplier_name_mismatches"]
+    assert len(mism) == 1
+    assert mism[0]["code"] == "8001"
+    assert mism[0]["应改成"] == "某翻译店"
+    note = Path(result["note_path"]).read_text(encoding="utf-8")
+    assert "档案名自检" in note
+    assert "某翻译店（张三）" in note
+
+
+def test_note_no_mismatch_when_names_align(tmp_path, monkeypatch):
+    """档案名与发票名一致（含票面自带的「（个体工商户）」）→ 自检不报。"""
+    _write_pay(tmp_path / "付款.xlsx", [["某翻译店", 100, "某翻译店"]])
+    (tmp_path / "某翻译店").mkdir()
+    _dummy_pdf(tmp_path / "某翻译店" / "a.pdf")
+    master = {
+        "employee": [{"code": "113", "name": "项目总监"}],
+        "department": [{"code": "0405", "name": "项目总监及助理"}],
+        "supplier": [
+            {"code": "8001", "name": "某翻译店（个体工商户）"},
+            {"code": "9999", "name": "其他供应商"},
+        ],
+    }
+    fake = lambda p: {"kind": "普票", "seller": "某翻译店（个体工商户）", "total": Decimal("100.00"), "tax": None}
+    result = _run(tmp_path, monkeypatch, fake, master=master)
+    assert result["bookable_count"] == 1
+    assert result["supplier_name_mismatches"] == []
+    note = Path(result["note_path"]).read_text(encoding="utf-8")
+    assert "逐行一致" in note
+
+
 def test_seller_joined_across_lines():
     """销方名太长被排版折行：名字断在两行，必须接回来。"""
     text = "购 名称：某公司 销 名称：某翻译服务有\n限公司\n"
