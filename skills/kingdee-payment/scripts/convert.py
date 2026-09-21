@@ -499,6 +499,7 @@ def convert_payment(
         kind = kinds.pop()
         sellers = [m.get("seller") or "" for m in metas if m.get("seller")]
         seller = sellers[0] if sellers else ""   # 抽不到就留空，绝不静默降级取台账名
+        line.extra["seller"] = seller            # 缺档 branch 会提前 continue，先存下销方名
         if payable is None:
             line.status, line.reason = "待确认", "缺应付金额"
             lines.append(line)
@@ -518,11 +519,12 @@ def convert_payment(
             line.status, line.reason = "待确认", "票大于应付"
             lines.append(line)
             continue
-        hit, why = master.supplier_fuzzy(vendor)
-        if why == "none":
-            hit, why = master.supplier_fuzzy(strip_ge(vendor))
-        if why == "none":
-            hit, why = master.supplier_fuzzy(seller)
+        # 斯佳 2026-09-21：挂档与新建一律**按发票销方名**（开票抬头公司名）。
+        # 台账「供应商」列在个人转对公时写的是人名（如「胡继成」），拿它挂会挂错档案；
+        # 所以**不拿台账名兜底** —— 发票名找不到就判缺档，让她按发票公司名建。
+        hit, why = master.supplier_fuzzy(seller)
+        if why == "none" and seller:
+            hit, why = master.supplier_fuzzy(strip_ge(seller))
         if why == "many":
             hit = None
             why = "none"
@@ -611,7 +613,8 @@ def names_needing_create(lines, yellow: bool | None = None) -> list[str]:
             continue
         if yellow is False and is_yellow:
             continue
-        title = str(extra.get("供应商") or line.key or "").strip()
+        # 缺档名单要报**发票销方名**（新建也用它），不报台账里的人名
+        title = str(extra.get("seller") or extra.get("供应商") or line.key or "").strip()
         if title and title not in out:
             out.append(title)
     return out

@@ -484,6 +484,45 @@ def test_cli_accepts_deprecated_skip_browser(tmp_path, monkeypatch):
     assert rc == 0
 
 
+# ---------- 2026-09-21 王启莲返工：挂档按发票销方名，不按台账里的人名 ----------
+
+def test_supplier_matched_by_invoice_seller_not_ledger_name(tmp_path, monkeypatch):
+    """个人转对公：台账「供应商」列写人名，档案要挂发票销方（开票抬头）那家，不能挂人名档案。"""
+    _write_pay(tmp_path / "付款.xlsx", [["胡某某", 100, "胡某某"]])
+    (tmp_path / "胡某某").mkdir()
+    _dummy_pdf(tmp_path / "胡某某" / "a.pdf")
+    master = {
+        "employee": [{"code": "113", "name": "项目总监"}],
+        "department": [{"code": "0405", "name": "项目总监及助理"}],
+        "supplier": [
+            {"code": "8001", "name": "胡某某"},
+            {"code": "8010", "name": "某文化有限公司"},
+            {"code": "9999", "name": "其他供应商"},
+        ],
+    }
+    fake = lambda p: {"kind": "普票", "seller": "某文化有限公司", "total": Decimal("100.00"), "tax": None}
+    result = _run(tmp_path, monkeypatch, fake, master=master)
+    assert result["bookable_count"] == 1
+    assert "8010" in _read_kingdee(result, "辅助核算.供应商.编码")
+    assert "8001" not in _read_kingdee(result, "辅助核算.供应商.编码")
+
+
+def test_missing_supplier_ask_reports_invoice_seller(tmp_path, monkeypatch):
+    """缺档名单要报发票销方名（新建也用它），不能报台账里的人名。"""
+    _write_pay(tmp_path / "付款.xlsx", [["张三", 100, "张三"]])
+    (tmp_path / "张三").mkdir()
+    _dummy_pdf(tmp_path / "张三" / "a.pdf")
+    master = {
+        "employee": [{"code": "113", "name": "项目总监"}],
+        "department": [{"code": "0405", "name": "项目总监及助理"}],
+        "supplier": [{"code": "9999", "name": "其他供应商"}],
+    }
+    fake = lambda p: {"kind": "普票", "seller": "某某科技发展有限公司", "total": Decimal("100.00"), "tax": None}
+    result = _run(tmp_path, monkeypatch, fake, master=master)
+    assert result["bookable_count"] == 0
+    assert result["new_supplier_names_citic"] == ["某某科技发展有限公司"]
+
+
 def test_seller_joined_across_lines():
     """销方名太长被排版折行：名字断在两行，必须接回来。"""
     text = "购 名称：某公司 销 名称：某翻译服务有\n限公司\n"
