@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import sys
 
-VERSION = "2026.09.17.2"
+VERSION = "2026.09.21.1"
 
 def check(request, evidence):
     from eliminations import validate_evidence

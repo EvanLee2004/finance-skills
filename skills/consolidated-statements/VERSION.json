@@ -1,7 +1,7 @@
 {
   "name": "consolidated-statements",
-  "version": "2026.09.17.2",
-  "distribution": "platform-native-local-release",
+  "version": "2026.09.21.1",
+  "distribution": "local-skill-update",
   "source_tool_version": "1.0.11",
   "source_tool_hashes": {
     "tool.yaml": "e90bf7ece5a8af4c37dd317a9949f237a68fd475cae623e2833135ce7f94f41c",
