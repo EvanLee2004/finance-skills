@@ -11,7 +11,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from common import detect_period_text, load_json, money
+from common import detect_period_text, load_json, money, period_ambiguous
 from layout import dept_col_letter, direct_children, load_layout
 
 
@@ -193,11 +193,14 @@ def parse_agency_file(path: Path) -> dict:
                 break
         blob = "\n".join(blob_parts)
         entity = match_offline_entity(blob, path.name, rules)
-        period = detect_period_text(blob + "\n" + path.name)
+        period_text = blob + "\n" + path.name
+        conflict = period_ambiguous(period_text)
+        period = None if conflict else detect_period_text(period_text)
         return {
             "path": str(path),
             "entity": entity,
             "period": period,
+            "conflict": conflict,
             "sheet": chosen,
             "lines": {k: str(v) for k, v in lines.items()},
             "values": lines,

@@ -975,6 +975,11 @@ def collect_offline_records(
         if not ent or not rec.get("values"):
             continue
         per = rec.get("period")
+        if rec.get("conflict"):
+            note = "期间冲突=" + path.name
+            if note not in notes:
+                notes.append(note)
+            continue
         if not per:
             note = "期间未写明=" + path.name
             if note not in notes:
@@ -1594,6 +1599,13 @@ def run(
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
         asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
+    conflict_bits = [n.split("=", 1)[1] for n in notes if n.startswith("期间冲突=")]
+    if conflict_bits:
+        asks.append(
+            "这些表里有不止一个月份，没有拿来填本期："
+            + "、".join(dict.fromkeys(conflict_bits))
+            + "。请斯佳按单月重新引出。"
+        )
     undated_bits = [n.split("=", 1)[1] for n in notes if n.startswith("期间未写明=")]
     if undated_bits:
         asks.append(

@@ -2689,6 +2689,40 @@ def test_parent_left_formula_except_hq(tmp_path: Path):
     assert "甲骨易:5502" not in report
 
 
+def test_cross_month_sheet_does_not_inherit_sibling_period(tmp_path: Path):
+    path = tmp_path / "文化_一本.xlsx"
+    wb = openpyxl.Workbook()
+    profit = wb.active
+    profit.title = "利润表"
+    profit["A1"] = "2026年7期利润表（月报）"
+    profit["A2"] = "公司名称：北京甲骨易文化传媒有限公司"
+    profit["A3"] = "项目"
+    profit["B3"] = "本月金额"
+    profit["A4"] = "一、营业收入"
+    profit["B4"] = 70
+    acct = wb.create_sheet("科目余额表")
+    acct["A1"] = "科目余额表"
+    acct["A2"] = "北京甲骨易文化传媒有限公司"
+    acct["A3"] = "2026年7期至2026年8期"
+    acct["A4"] = "科目编码"
+    acct["B4"] = "科目名称"
+    acct["C4"] = "本期发生借方"
+    acct["D4"] = "本期发生贷方"
+    acct["A5"] = "5101"
+    acct["B5"] = "主营业务收入"
+    acct["D5"] = 9
+    wb.save(path)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert "不止一个月份" in r.stdout
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    assert openpyxl.load_workbook(out)["损益表"][f"F{row}"].value in (None, "")
+    labels = [item["label"] for item in layout["profit_rows"]]
+    income = 2 + labels.index("收入")
+    assert openpyxl.load_workbook(out)["利润表"].cell(income, 3).value == 70
+
+
 def test_unclear_period_does_not_fall_back_to_another_month(tmp_path: Path):
     out = tmp_path / "out.xlsx"
     r = _run(["--period", "7月", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])

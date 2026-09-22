@@ -15,7 +15,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from common import detect_period_text, load_json, money
+from common import detect_period_text, load_json, money, period_ambiguous
 from layout import dept_col_letter, direct_children, load_layout
 
 CONFIG_NAME = "薪酬台账.json"
@@ -755,8 +755,12 @@ def parse_payroll_file(path: Path, period: str) -> dict:
         sheet_kinds: dict[str, str] = {}
         for title in wb.sheetnames:
             if title == SPLIT_SHEET:
-                per = detect_period_text(title + "\n" + path.name)
+                per_text = title + "\n" + path.name
+                per = detect_period_text(per_text)
                 sheet_kinds[title] = "split_table"
+                if period_ambiguous(per_text):
+                    notes.append(f"期间冲突={path.name}/{title}")
+                    continue
                 if not per:
                     notes.append(f"期间未写明={path.name}/{title}")
                     continue
@@ -774,7 +778,11 @@ def parse_payroll_file(path: Path, period: str) -> dict:
             if not spec:
                 continue
             sheet_kinds[title] = f"{spec['entity']}/{spec.get('kind') or 'si'}"
-            per = detect_period_text(title + "\n" + path.name)
+            per_text = title + "\n" + path.name
+            per = detect_period_text(per_text)
+            if period_ambiguous(per_text):
+                notes.append(f"期间冲突={path.name}/{title}")
+                continue
             if not per:
                 notes.append(f"期间未写明={path.name}/{title}")
                 continue

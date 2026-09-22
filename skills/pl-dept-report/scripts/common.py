@@ -64,11 +64,10 @@ def _yyyy_mm(year: str, month: int) -> str | None:
     return None
 
 
-def detect_period_text(text: str) -> str | None:
-    """只认一个会计期间。起止跨月、打印日期、导出时间戳都不算。多个月并存则当没写。"""
-    blob = str(text or "")
+def _collect_periods(blob: str) -> list[str] | None:
+    """抽出会计期间。起止两个月不一样时返回 None，表示这张表不能用。"""
     if not blob.strip():
-        return None
+        return []
     found: list[str] = []
 
     for m in re.finditer(rf"(\d{{6}})\s*{_RANGE}\s*(\d{{6}})", blob):
@@ -113,11 +112,26 @@ def detect_period_text(text: str) -> str | None:
             found.append(value)
     for m in re.finditer(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", blob):
         found.append(f"{m.group(1)}{m.group(2)}")
+    return found
 
+
+def detect_period_text(text: str) -> str | None:
+    """只认一个会计期间。起止跨月、打印日期、导出时间戳都不算。多个月并存则当没写。"""
+    found = _collect_periods(str(text or ""))
+    if not found:
+        return None
     uniq = list(dict.fromkeys(found))
     if len(uniq) == 1:
         return uniq[0]
     return None
+
+
+def period_ambiguous(text: str) -> bool:
+    """表里出现了两个不同月份，或起止跨月。这种表不能跟着同文件的单月 sheet 继承。"""
+    found = _collect_periods(str(text or ""))
+    if found is None:
+        return True
+    return len(dict.fromkeys(found)) > 1
 
 
 def clean_header(text: str) -> str:

@@ -20,7 +20,7 @@ def inherit_file_periods(items: list[dict]) -> list[dict]:
             continue
         only = next(iter(periods))
         for item in group:
-            if item.get("period"):
+            if item.get("period") or item.get("period_conflict"):
                 continue
             if item.get("kind") not in {"account", "assist", "profit"}:
                 continue
@@ -37,6 +37,7 @@ def bind_sources(items: list[dict], period: str) -> tuple[list[dict], list[str]]
     notes: list[str] = []
     undated: list[str] = []
     foreign: list[str] = []
+    conflicts: list[str] = []
     inherited: list[str] = []
     for item in items:
         kind = item.get("kind")
@@ -48,6 +49,9 @@ def bind_sources(items: list[dict], period: str) -> tuple[list[dict], list[str]]
         label = f"{name}/{sheet}" if sheet else name
         who = item.get("entity") or name
         per = item.get("period")
+        if item.get("period_conflict"):
+            conflicts.append(label)
+            continue
         if item.get("period_from") == "同文件" and name not in inherited:
             inherited.append(name)
         if kind in {"account", "assist"}:
@@ -68,6 +72,8 @@ def bind_sources(items: list[dict], period: str) -> tuple[list[dict], list[str]]
             foreign.append(f"{label}:{per}")
     if inherited:
         notes.append("期间随同文件=" + "、".join(dict.fromkeys(inherited)))
+    if conflicts:
+        notes.append("期间冲突=" + "、".join(dict.fromkeys(conflicts)))
     if undated:
         notes.append("期间未写明=" + "、".join(dict.fromkeys(undated)))
     if foreign:

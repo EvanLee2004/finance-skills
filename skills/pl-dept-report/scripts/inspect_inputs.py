@@ -14,7 +14,7 @@ if str(HERE) not in sys.path:
 
 from openpyxl import load_workbook
 
-from common import clean_header, detect_period_text, discover_input_dir
+from common import clean_header, detect_period_text, discover_input_dir, period_ambiguous
 from layout import load_books, load_export_aliases
 from offline_profit import looks_like_agency_profit, match_offline_entity
 
@@ -202,13 +202,15 @@ def inspect_file(path: Path) -> list[dict]:
             if kind == "agency_profit":
                 entity = match_offline_entity(blob + "\n" + path.name, path.name) or entity
             headers = header_map(ws, aliases)
+            period_text = _period_blob(ws) + "\n" + path.name
             found.append(
                 {
                     "path": str(src.resolve()),
                     "sheet": title,
                     "kind": kind,
                     "entity": entity,
-                    "period": detect_period_text(_period_blob(ws) + "\n" + path.name),
+                    "period": detect_period_text(period_text),
+                    "period_conflict": period_ambiguous(period_text),
                     "headers": {k: {"row": v[0], "col": v[1]} for k, v in headers.items()},
                 }
             )
