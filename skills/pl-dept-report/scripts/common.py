@@ -55,33 +55,87 @@ def prev_period(period: str) -> str:
     return f"{y}{m - 1:02d}"
 
 
-def detect_period_text(text: str) -> str | None:
-    blob = str(text or "")
-    m = re.search(r"期间[:：]\s*(\d{6})", blob)
-    if m:
-        return m.group(1)
-    m2 = re.search(r"(20\d{2})年\s*0?(\d{1,2})\s*期", blob)
-    if m2:
-        month = int(m2.group(2))
-        if 1 <= month <= 12:
-            return f"{m2.group(1)}{month:02d}"
-    m3 = re.search(r"月度损益表_(\d{6})", blob)
-    if m3:
-        return m3.group(1)
-    m4 = re.search(r"(20\d{2})年\s*0?(\d{1,2})\s*月", blob)
-    if m4:
-        month = int(m4.group(2))
-        if 1 <= month <= 12:
-            return f"{m4.group(1)}{month:02d}"
-    m5 = re.search(r"(20\d{2})[-/](0?\d{1,2})(?!\d)", blob)
-    if m5:
-        month = int(m5.group(2))
-        if 1 <= month <= 12:
-            return f"{m5.group(1)}{month:02d}"
-    m6 = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", blob)
-    if m6:
-        return f"{m6.group(1)}{m6.group(2)}"
+_RANGE = r"[-~～到至]+"
+
+
+def _yyyy_mm(year: str, month: int) -> str | None:
+    if 1 <= month <= 12:
+        return f"{year}{month:02d}"
     return None
+
+
+def detect_period_text(text: str) -> str | None:
+    """只认一个会计期间。起止跨月、打印日期、导出时间戳都不算。多个月并存则当没写。"""
+    blob = str(text or "")
+    if not blob.strip():
+        return None
+    found: list[str] = []
+
+    for m in re.finditer(rf"(\d{{6}})\s*{_RANGE}\s*(\d{{6}})", blob):
+        if m.group(1) != m.group(2):
+            return None
+        found.append(m.group(1))
+
+    period_re = re.compile(
+        rf"(20\d{{2}})年\s*第?\s*0?(\d{{1,2}})\s*期(?:\s*{_RANGE}\s*(20\d{{2}})年\s*第?\s*0?(\d{{1,2}})\s*期)?"
+    )
+    for m in period_re.finditer(blob):
+        left = _yyyy_mm(m.group(1), int(m.group(2)))
+        if m.group(3):
+            right = _yyyy_mm(m.group(3), int(m.group(4)))
+            if not left or not right or left != right:
+                return None
+            found.append(left)
+        elif left:
+            found.append(left)
+
+    span_re = re.compile(
+        rf"(20\d{{2}})[./-](0?\d{{1,2}})\s*{_RANGE}\s*(20\d{{2}})[./-](0?\d{{1,2}})(?!\d)"
+    )
+    for m in span_re.finditer(blob):
+        left = _yyyy_mm(m.group(1), int(m.group(2)))
+        right = _yyyy_mm(m.group(3), int(m.group(4)))
+        if not left or not right or left != right:
+            return None
+        found.append(left)
+
+    for m in re.finditer(r"期间[:：]\s*(\d{6})(?!\d)", blob):
+        found.append(m.group(1))
+    for m in re.finditer(r"月度损益表_(\d{6})(?!\d)", blob):
+        found.append(m.group(1))
+    for m in re.finditer(r"(20\d{2})年\s*0?(\d{1,2})\s*月(?!\s*\d)", blob):
+        value = _yyyy_mm(m.group(1), int(m.group(2)))
+        if value:
+            found.append(value)
+    for m in re.finditer(r"(20\d{2})[./-](0?\d{1,2})(?!\d)(?![./-]\d)", blob):
+        value = _yyyy_mm(m.group(1), int(m.group(2)))
+        if value:
+            found.append(value)
+    for m in re.finditer(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?!\d)", blob):
+        found.append(f"{m.group(1)}{m.group(2)}")
+
+    uniq = list(dict.fromkeys(found))
+    if len(uniq) == 1:
+        return uniq[0]
+    return None
+
+
+def clean_header(text: str) -> str:
+    """表头统一：去空白、全角括号，去掉金额单位。不改业务含义。"""
+    raw = str(text or "")
+    t = (
+        raw.replace("\xa0", "")
+        .replace("\u3000", "")
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace("（", "(")
+        .replace("）", ")")
+    )
+    for suffix in ("(人民币元)", "(人民币)", "(元)"):
+        if t.endswith(suffix):
+            t = t[: -len(suffix)]
+    return t.strip()
 
 
 def _folder_has_source(folder: Path) -> bool:
@@ -102,36 +156,32 @@ def discover_input_dir(explicit: str = "") -> Path:
     cwd = Path.cwd()
     parts = {p.lower() for p in cwd.parts}
     in_skill_tree = "finance-skills" in parts and "skills" in parts
-    if not in_skill_tree and not cwd.name.startswith(("pytest-", "tmp")) and _folder_has_source(cwd):
-        return cwd
-    root = SKILL
-    homes: list[Path] = []
-    for _ in range(6):
-        workspace = root / "技能" / "金蝶" / "损益表利润表" / "工作区"
-        packed = workspace / "全源_202608"
-        if packed.is_dir():
-            homes.append(packed)
-        cand = workspace / "引出"
-        if cand.is_dir():
-            homes.append(cand)
-            break
-        root = root.parent
     desktop = find_desktop()
-    if desktop:
-        homes.extend(sorted(desktop.glob("月度损益表_*"), reverse=True))
-        homes.append(desktop)
-    homes.append(cwd)
-    for folder in homes:
-        if _folder_has_source(folder):
-            return folder
+    cwd_is_desktop = bool(desktop and cwd.resolve() == desktop.resolve())
+    if (
+        not in_skill_tree
+        and not cwd_is_desktop
+        and not cwd.name.startswith(("pytest-", "tmp"))
+        and _folder_has_source(cwd)
+    ):
+        return cwd
     return default_desktop_dir("月度损益表")
 
 
 def parse_period(raw: str | None) -> str:
-    s = str(raw or "").strip().replace("-", "").replace("/", "")
-    if len(s) >= 6 and s[:6].isdigit():
-        return s[:6]
-    return default_period()
+    """空字符串用上一个已过完的月。写了但认不出，返回空，调用方问人，不要改成别的月。"""
+    s = str(raw or "").strip()
+    if not s:
+        return default_period()
+    found = detect_period_text(s)
+    if found:
+        return found
+    compact = s.replace("-", "").replace("/", "").replace(".", "")
+    if len(compact) == 6 and compact.isdigit() and compact[4:6] != "00":
+        month = int(compact[4:6])
+        if 1 <= month <= 12:
+            return compact
+    return ""
 
 
 def col_idx(letter: str) -> int:

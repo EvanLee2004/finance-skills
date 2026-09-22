@@ -974,7 +974,12 @@ def collect_offline_records(
         ent = rec.get("entity")
         if not ent or not rec.get("values"):
             continue
-        per = rec.get("period") or period
+        per = rec.get("period")
+        if not per:
+            note = "期间未写明=" + path.name
+            if note not in notes:
+                notes.append(note)
+            continue
         if per != period:
             if sibling_period and per == sibling_period:
                 continue
@@ -1025,8 +1030,7 @@ def xingchen_web_gaps(inspected: list[dict], period: str) -> dict[str, list[str]
             if item.get("period") == period:
                 have[ent].add("profit")
         elif kind in {"account", "assist"}:
-            per = item.get("period")
-            if per and per != period:
+            if item.get("period") != period:
                 continue
             have[ent].add(str(kind))
     gaps: dict[str, list[str]] = {}
@@ -1046,8 +1050,7 @@ def xingchen_web_gaps(inspected: list[dict], period: str) -> dict[str, list[str]
         if kind == "profit" and item.get("period") == period:
             hq_have.add("profit")
         elif kind in {"account", "assist"}:
-            per = item.get("period")
-            if per and per != period:
+            if item.get("period") != period:
                 continue
             hq_have.add(str(kind))
     hq_missing = [k for k in ("account", "assist") if k not in hq_have]
@@ -1080,17 +1083,12 @@ def xingchen_prev_profit_gaps(inspected: list[dict], period: str) -> dict[str, l
 
 
 def drop_other_period_balances(inspected: list[dict], period: str, notes: list[str]) -> list[dict]:
-    """9 期科目/核算不当 8 月源，避免和当期叠两份。没有期间头的旧夹仍收。"""
-    out = []
-    for item in inspected:
-        kind = item.get("kind")
-        per = item.get("period")
-        if kind in {"account", "assist"} and per and per != period:
-            who = item.get("entity") or Path(item.get("path") or "").name
-            notes.append(f"过期{kind}跳过={who}:{per}")
-            continue
-        out.append(item)
-    return out
+    """只把对得上本次期间的余额表留下。没写期间、别的月份都不进本期。"""
+    from clean_sources import bind_sources
+
+    kept, extra = bind_sources(inspected, period)
+    notes.extend(extra)
+    return kept
 
 
 def gather_inspected(input_dir: Path, extra_files: list[str], notes: list[str]) -> list[dict]:
@@ -1210,7 +1208,9 @@ def run(
         from dump_api_excel import dump_prev_profit_if_needed
 
         dump_prev_profit_if_needed(period, Path(input_dir) / "API", notes)
-    inspected = gather_inspected(input_dir, extra_files, notes)
+    from clean_sources import inherit_file_periods
+
+    inspected = inherit_file_periods(gather_inspected(input_dir, extra_files, notes))
     note_ignored_finished_pl(input_dir, extra_files, notes)
     inspected = ensure_xingchen_current(period, input_dir, inspected, extra_files, no_api, notes)
     inspected = drop_other_period_balances(inspected, period, notes)
@@ -1379,8 +1379,6 @@ def run(
     by_period = parsed.get("profits_by_period") or {}
     current_profits = by_period.get(period) or {}
     previous_profits = by_period.get(prev_period(period)) or {}
-    if not current_profits and not by_period:
-        current_profits = parsed.get("profits") or {}
     for ent, raw in current_profits.items():
         if hq_from_api and ent == "甲骨易":
             continue
@@ -1596,6 +1594,28 @@ def run(
     hunan_empty = [n for n in notes if n.startswith("已取但无损益科目=") and "湖南" in n]
     if hunan_empty:
         asks.append("湖南分/子引出还是入账前空表。抄进金蝶之后请重新引出科目余额、核算项目、利润表。")
+    undated_bits = [n.split("=", 1)[1] for n in notes if n.startswith("期间未写明=")]
+    if undated_bits:
+        asks.append(
+            "这些表没写会计期间，没有拿来填本期："
+            + "、".join(dict.fromkeys(undated_bits))
+            + f"。请斯佳按 {period} 重新提供，表头或文件名要能看出月份。"
+        )
+    foreign_bits = [n.split("=", 1)[1] for n in notes if n.startswith("期间不符=")]
+    if foreign_bits:
+        asks.append(
+            f"这些表不是本次月份 {period}，没有拿来填本期："
+            + "、".join(dict.fromkeys(foreign_bits))
+            + "。请斯佳提供这个月的科目余额表、核算项目余额表和利润表。上月只要利润表。"
+        )
+    unread = [Path(str(item.get("path") or "")).name for item in inspected if item.get("kind") == "unreadable"]
+    if unread:
+        notes.append("表头认不出=" + "、".join(dict.fromkeys(unread)))
+        asks.append(
+            "这些表像是余额表或利润表，但表头对不上，没有拿来填数："
+            + "、".join(dict.fromkeys(unread))
+            + "。请斯佳发原样引出，或告诉我列表头分别叫什么。"
+        )
     if profit_missing:
         asks.append(
             "利润表无本月源="
@@ -1639,7 +1659,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--payroll-xlsx", action="append", default=[], help="职工薪酬台账（可多次）；亲口指的文件一定吃，夹子里扫到的假数/明昊测试才跳过")
     parser.add_argument("--skip-offline", action="store_true", help="她说这三家先不处理")
     args = parser.parse_args(argv)
-    period = parse_period(args.period)
+    raw_period = str(args.period or "").strip()
+    period = parse_period(raw_period)
+    if raw_period and not period:
+        print(
+            "期间=\n"
+            "材料夹=无\n"
+            "有源账套=无\n"
+            "缺源账套=无\n"
+            "利润表缺源=无\n"
+            "利润表上月缺线下=无\n"
+            "未映射部门个数=0\n"
+            "核对非0科目编码个数=0\n"
+            "核对非0绿行=无\n"
+            "核对非0父行=无\n"
+            "核对非0未映射=无\n"
+            "核对非0其它=无\n"
+            "产物=未生成\n"
+            "status=period_unclear\n"
+            f"ask=没认出月份「{raw_period}」。请说成 202607 或 2026年7月。没有写成别的月份。\n",
+            end="",
+            flush=True,
+        )
+        return 2
     input_dir = discover_input_dir(args.input_dir)
     if args.out:
         out = Path(args.out).expanduser()
@@ -1650,7 +1692,7 @@ def main(argv: list[str] | None = None) -> int:
         input_dir,
         out,
         bool(args.no_api) or os.environ.get("PL_DEPT_SKIP_API") == "1",
-        offline_xlsx=list(args.offline_xlsx or []) + list(args.payroll_xlsx or []),
+        offline_xlsx=list(args.offline_xlsx or []),
         skip_offline=bool(args.skip_offline),
         payroll_xlsx=list(args.payroll_xlsx or []),
     )

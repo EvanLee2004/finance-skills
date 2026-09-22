@@ -14,7 +14,7 @@ if str(HERE) not in sys.path:
 
 from openpyxl import load_workbook
 
-from common import detect_period_text, discover_input_dir
+from common import clean_header, detect_period_text, discover_input_dir
 from layout import load_books, load_export_aliases
 from offline_profit import looks_like_agency_profit, match_offline_entity
 
@@ -48,25 +48,31 @@ def header_map(ws, aliases: dict, max_row: int = 12) -> dict[str, tuple[int, int
         "profit_month",
     ):
         for alias in aliases.get(key) or []:
-            wanted.setdefault(alias, key)
-    found: dict[str, tuple[int, int]] = {}
+            wanted.setdefault(clean_header(alias), key)
+    hits: dict[str, list[tuple[int, int, str]]] = {}
     last_row = min(ws.max_row or 1, max_row)
     last_col = min(ws.max_column or 1, 40)
     for r in range(1, last_row + 1):
         for c in range(1, last_col + 1):
-            t = _cell_text(ws.cell(r, c).value)
-            if t in wanted and wanted[t] not in found:
-                found[wanted[t]] = (r, c)
+            t = clean_header(_cell_text(ws.cell(r, c).value))
+            if t in wanted:
+                hits.setdefault(wanted[t], []).append((r, c, t))
+    found: dict[str, tuple[int, int]] = {}
+    for key, cands in hits.items():
+        best = max(cands, key=lambda item: (("本期" in item[2] or "本月" in item[2]), len(item[2])))
+        found[key] = (best[0], best[1])
+    group_labels = {clean_header(x) for x in (aliases.get("period_group") or [])}
+    group_labels.update({"本期发生额", "本期发生", "本月发生额"})
     if "period_debit" not in found or "period_credit" not in found:
         for r in range(1, last_row + 1):
             for c in range(1, last_col + 1):
-                t = _cell_text(ws.cell(r, c).value)
-                if t not in {"本期发生额", "本期发生"}:
+                t = clean_header(_cell_text(ws.cell(r, c).value))
+                if t not in group_labels:
                     continue
                 if r >= last_row:
                     continue
-                left = _cell_text(ws.cell(r + 1, c).value)
-                right = _cell_text(ws.cell(r + 1, c + 1).value) if c < last_col else ""
+                left = clean_header(_cell_text(ws.cell(r + 1, c).value))
+                right = clean_header(_cell_text(ws.cell(r + 1, c + 1).value)) if c < last_col else ""
                 if left == "借方" and "period_debit" not in found:
                     found["period_debit"] = (r + 1, c)
                 if right == "贷方" and "period_credit" not in found:
@@ -149,6 +155,13 @@ def match_entity(blob: str, filename: str, books: dict) -> str | None:
     return None
 
 
+_SOURCE_HINTS = ("科目余额表", "核算项目余额表", "辅助核算余额表", "利润表")
+
+
+def _period_blob(ws) -> str:
+    return sheet_blob(ws, max_row=20, max_col=40)
+
+
 def inspect_file(path: Path) -> list[dict]:
     aliases = load_export_aliases()
     books = load_books()
@@ -170,12 +183,21 @@ def inspect_file(path: Path) -> list[dict]:
     except Exception:
         return found
     try:
+        hinted = False
+        sheet_hints: list[str] = []
+        for key in ("account_sheet_hints", "assist_sheet_hints", "profit_sheet_hints"):
+            sheet_hints.extend(str(x) for x in (aliases.get(key) or []) if x)
+        sheet_hints.extend(_SOURCE_HINTS)
         for title in wb.sheetnames:
             ws = wb[title]
+            blob = sheet_blob(ws)
             kind = classify_sheet(ws, aliases)
             if not kind:
+                if "客户编码" in blob or "确认情况" in blob:
+                    continue
+                if _has_any(blob, sheet_hints):
+                    hinted = True
                 continue
-            blob = sheet_blob(ws)
             entity = match_entity(blob + "\n" + path.name, path.name, books)
             if kind == "agency_profit":
                 entity = match_offline_entity(blob + "\n" + path.name, path.name) or entity
@@ -186,8 +208,19 @@ def inspect_file(path: Path) -> list[dict]:
                     "sheet": title,
                     "kind": kind,
                     "entity": entity,
-                    "period": detect_period_text(blob + "\n" + path.name),
+                    "period": detect_period_text(_period_blob(ws) + "\n" + path.name),
                     "headers": {k: {"row": v[0], "col": v[1]} for k, v in headers.items()},
+                }
+            )
+        if not found and hinted:
+            found.append(
+                {
+                    "path": str(src.resolve()),
+                    "sheet": "",
+                    "kind": "unreadable",
+                    "entity": None,
+                    "period": detect_period_text(path.name),
+                    "headers": {},
                 }
             )
     finally:
@@ -201,6 +234,9 @@ def inspect_dir(input_dir: Path) -> list[dict]:
         return found
     for path in sorted(input_dir.rglob("*")):
         if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            continue
+        parents = path.relative_to(input_dir).parts[:-1]
+        if any(part.startswith("月度损益表_") or part.startswith("全源_") or part == "引出" for part in parents):
             continue
         found.extend(inspect_file(path))
     return found

@@ -13,6 +13,7 @@ if str(HERE) not in sys.path:
 
 from openpyxl import Workbook
 
+from common import parse_period
 from layout import layout_code_names, load_books, load_layout
 
 
@@ -208,7 +209,7 @@ def dump_prev_profit_if_needed(period: str, out_dir: Path, notes: list[str] | No
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="总部 API 落源 Excel。只报文件名和占用个数。")
-    parser.add_argument("--period", default="202608")
+    parser.add_argument("--period", default="", help="YYYYMM，默认上一个已过完的公历月")
     parser.add_argument("--out-dir", required=True)
     args = parser.parse_args(argv)
     from kingdee_client import load_client
@@ -217,8 +218,9 @@ def main(argv: list[str] | None = None) -> int:
     if not creds:
         print("api=no_creds")
         return 2
-    written = dump_hq_to_dir(args.period, Path(args.out_dir).expanduser(), creds)
-    print(f"period={args.period} files={len(written)} " + ",".join(written))
+    period = parse_period(args.period)
+    written = dump_hq_to_dir(period, Path(args.out_dir).expanduser(), creds)
+    print(f"period={period} files={len(written)} " + ",".join(written))
     return 0 if written else 2
 
 

@@ -755,8 +755,15 @@ def parse_payroll_file(path: Path, period: str) -> dict:
         sheet_kinds: dict[str, str] = {}
         for title in wb.sheetnames:
             if title == SPLIT_SHEET:
-                chunk = parse_split_table(wb[title])
+                per = detect_period_text(title + "\n" + path.name)
                 sheet_kinds[title] = "split_table"
+                if not per:
+                    notes.append(f"期间未写明={path.name}/{title}")
+                    continue
+                if per != period:
+                    notes.append(f"薪酬sheet期间不符={title}:{per}")
+                    continue
+                chunk = parse_split_table(wb[title])
                 if chunk:
                     used.append(title)
                     rows.extend(chunk)
@@ -768,7 +775,10 @@ def parse_payroll_file(path: Path, period: str) -> dict:
                 continue
             sheet_kinds[title] = f"{spec['entity']}/{spec.get('kind') or 'si'}"
             per = detect_period_text(title + "\n" + path.name)
-            if per and per != period:
+            if not per:
+                notes.append(f"期间未写明={path.name}/{title}")
+                continue
+            if per != period:
                 notes.append(f"薪酬sheet期间不符={title}:{per}")
                 continue
             dirty: list[str] = []

@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from common import detect_period_text
+from common import detect_period_text, parse_period
 from inspect_inputs import inspect_file
 from layout import load_books
 from xingchen_login import STATE_PATH as STATE
@@ -813,12 +813,12 @@ async def main_async(period: str, out_dir: Path, keys: list[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--period", default="202608")
+    parser.add_argument("--period", default="", help="YYYYMM，默认上一个已过完的公历月")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--books", default="wenhua,shanghai,hunan_fgs,hunan_zgs")
     args = parser.parse_args()
     keys = [k.strip() for k in args.books.split(",") if k.strip()]
-    return asyncio.run(main_async(args.period, Path(args.out_dir).expanduser(), keys))
+    return asyncio.run(main_async(parse_period(args.period), Path(args.out_dir).expanduser(), keys))
 
 
 if __name__ == "__main__":

@@ -185,6 +185,8 @@ def parse_inspected(items: list[dict]) -> dict:
     layout = load_layout()
     books = load_books()
     for item in items:
+        if item.get("kind") == "unreadable":
+            continue
         path = item["path"]
         data_only = item.get("kind") in {"monthly_overlay", "monthly_profit"}
         wb = load_workbook(path, data_only=data_only)

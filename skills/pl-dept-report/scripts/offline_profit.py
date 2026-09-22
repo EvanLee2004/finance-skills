@@ -193,7 +193,7 @@ def parse_agency_file(path: Path) -> dict:
                 break
         blob = "\n".join(blob_parts)
         entity = match_offline_entity(blob, path.name, rules)
-        period = detect_period_text(blob)
+        period = detect_period_text(blob + "\n" + path.name)
         return {
             "path": str(path),
             "entity": entity,
@@ -252,9 +252,14 @@ def apply_offline_profit(
         ent = rec.get("entity")
         if not ent:
             continue
-        per = rec.get("period") or period
+        per = rec.get("period")
         if per != period:
-            notes.append(f"线下利润表期间不符={ent}:{per}")
+            if not per:
+                note = "期间未写明=" + Path(str(rec.get("path") or ent)).name
+                if note not in notes:
+                    notes.append(note)
+            else:
+                notes.append(f"线下利润表期间不符={ent}:{per}")
             continue
         values: dict[str, Decimal] = rec.get("values") or {}
         if not values:

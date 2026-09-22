@@ -90,7 +90,7 @@ def _write_account(
     path: Path,
     company: str,
     rows: list[tuple[str, str, float | None, float | None]],
-    period: str | None = None,
+    period: str | None = "202608",
 ) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -112,13 +112,20 @@ def _write_account(
     wb.save(path)
 
 
-def _write_assist(path: Path, company: str, rows: list[tuple[str, str, str, float | None, float | None]]) -> None:
+def _write_assist(
+    path: Path,
+    company: str,
+    rows: list[tuple[str, str, str, float | None, float | None]],
+    period: str | None = "202608",
+) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "核算项目余额表"
     ws["A1"] = "核算项目余额表"
     ws["B1"] = "核算项目类别：部门"
     ws["A2"] = company
+    if period:
+        ws["C2"] = f"期间：{period}-{period}"
     ws["A3"] = "科目编码"
     ws["B3"] = "科目名称"
     ws["C3"] = "核算项目名称"
@@ -134,11 +141,16 @@ def _write_assist(path: Path, company: str, rows: list[tuple[str, str, str, floa
     wb.save(path)
 
 
-def _write_profit(path: Path, company: str, items: list[tuple[str, float]]) -> None:
+def _write_profit(
+    path: Path,
+    company: str,
+    items: list[tuple[str, float]],
+    banner: str = "2026年8期利润表（月报）",
+) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "利润表"
-    ws["A1"] = "2026年8期利润表（月报）"
+    ws["A1"] = banner
     ws["A2"] = f"公司名称：{company}"
     ws["A3"] = "项目"
     ws["B3"] = "本月金额"
@@ -215,6 +227,23 @@ def test_filename_timestamp_is_not_report_period():
     assert detect_period_text("2026年7期利润表") == "202607"
     assert detect_period_text("文化_利润表_202608.xlsx") == "202608"
     assert detect_period_text("核算项目余额表-20260901190115.xlsx") is None
+    assert detect_period_text("会计期间：2026.07") == "202607"
+    assert detect_period_text("2026年7月份") == "202607"
+    assert detect_period_text("2026年第8期") == "202608"
+    assert detect_period_text("期间：202608-202608") == "202608"
+    assert detect_period_text("期间：202607-202608") is None
+    assert detect_period_text("会计期间：2026.07-2026.08") is None
+    assert detect_period_text("2026年7期至2026年8期") is None
+    assert (
+        detect_period_text("打印时间 2026-08-01\n文化_科目余额表_202607.xlsx")
+        == "202607"
+    )
+    assert detect_period_text("2026-07-01") is None
+    from common import default_period, parse_period
+
+    assert parse_period("") == default_period()
+    assert parse_period("7月") == ""
+    assert parse_period("2026.07") == "202607"
 
 
 def test_xingchen_profit_is_not_agency(tmp_path: Path):
@@ -683,6 +712,7 @@ def test_fetched_book_without_pl_codes_counts_as_source(tmp_path: Path):
     ws.title = "科目余额表"
     ws["A1"] = "科目余额表"
     ws["A2"] = "公司名称：甲骨易（北京）语言科技股份有限公司湖南分公司"
+    ws["B2"] = "期间：202608-202608"
     ws["A3"] = "科目编码"
     ws["B3"] = "科目名称"
     ws["C3"] = "本期发生借方"
@@ -2657,3 +2687,227 @@ def test_parent_left_formula_except_hq(tmp_path: Path):
     report = out.with_name(out.stem + "_运行报告.txt").read_text(encoding="utf-8")
     assert "父行发生额未落叶子=文化:5502" in report
     assert "甲骨易:5502" not in report
+
+
+def test_unclear_period_does_not_fall_back_to_another_month(tmp_path: Path):
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "7月", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert r.returncode == 2
+    assert not out.is_file()
+    assert "没认出月份" in r.stdout
+    assert "期间=202608" not in r.stdout
+    assert "产物=未生成" in r.stdout
+
+
+def test_undated_agency_profit_is_not_used(tmp_path: Path):
+    _write_agency_profit(
+        tmp_path / "sd.xlsx",
+        "甲骨易（北京）语言科技股份有限公司山东分公司",
+        "",
+        88.0,
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert "没写会计期间" in r.stdout
+    assert "sd.xlsx" in r.stdout
+    layout = load_layout()
+    labels = [row["label"] for row in layout["profit_rows"]]
+    row = 2 + labels.index("管理费用")
+    assert openpyxl.load_workbook(out)["利润表"].cell(row, 5).value in (None, "")
+
+
+def test_july_uses_july_files_and_drops_august(tmp_path: Path):
+    _write_account(
+        tmp_path / "文化_科目余额表_202607.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 7.0)],
+        period="202607",
+    )
+    _write_account(
+        tmp_path / "文化_科目余额表_202608.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 8.0)],
+        period="202608",
+    )
+    _write_profit(
+        tmp_path / "文化_利润表_202607.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("一、营业收入", 70.0)],
+        banner="2026年7期利润表（月报）",
+    )
+    _write_profit(
+        tmp_path / "文化_利润表_202608.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("一、营业收入", 80.0)],
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "期间=202607" in r.stdout
+    assert "不是本次月份 202607" in r.stdout
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    ws = openpyxl.load_workbook(out)["损益表"]
+    assert ws[f"F{row}"].value == 7
+    profit = openpyxl.load_workbook(out)["利润表"]
+    labels = [item["label"] for item in layout["profit_rows"]]
+    income_row = 2 + labels.index("收入")
+    assert profit.cell(income_row, 3).value == 70
+    assert profit.cell(income_row, 11).value in (None, "")
+
+
+def test_undated_balance_is_not_used_and_asks(tmp_path: Path):
+    _write_account(
+        tmp_path / "文化_科目余额表.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 9.0)],
+        period=None,
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "没写会计期间" in r.stdout
+    assert "文化_科目余额表.xlsx" in r.stdout
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    ws = openpyxl.load_workbook(out)["损益表"]
+    assert ws[f"F{row}"].value in (None, "")
+
+
+def test_variant_header_and_dotted_period(tmp_path: Path):
+    path = tmp_path / "文化_变体.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "发生额及余额表"
+    ws["A1"] = "科目余额表"
+    ws["A2"] = "北京甲骨易文化传媒有限公司"
+    ws["C2"] = "会计期间：2026.07"
+    ws["A4"] = "科目代码"
+    ws["B4"] = "科目名称"
+    ws["C4"] = "本期发生额（借方）"
+    ws["D4"] = "本期发生额（贷方）"
+    ws["A5"] = "5101"
+    ws["B5"] = "主营业务收入"
+    ws["D5"] = 7
+    wb.save(path)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "2026.07", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "期间=202607" in r.stdout
+    assert "没写会计期间" not in r.stdout
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    ws = openpyxl.load_workbook(out)["损益表"]
+    assert ws[f"F{row}"].value == 7
+
+
+def test_period_inherits_from_sibling_sheet(tmp_path: Path):
+    path = tmp_path / "文化_一本.xlsx"
+    wb = openpyxl.Workbook()
+    profit = wb.active
+    profit.title = "利润表"
+    profit["A1"] = "2026年7期利润表（月报）"
+    profit["A2"] = "公司名称：北京甲骨易文化传媒有限公司"
+    profit["A3"] = "项目"
+    profit["B3"] = "本月金额"
+    profit["A4"] = "一、营业收入"
+    profit["B4"] = 70
+    acct = wb.create_sheet("科目余额表")
+    acct["A1"] = "科目余额表"
+    acct["A2"] = "北京甲骨易文化传媒有限公司"
+    acct["A3"] = "科目编码"
+    acct["B3"] = "科目名称"
+    acct["C3"] = "本期发生借方"
+    acct["D3"] = "本期发生贷方"
+    acct["A4"] = "5101"
+    acct["B4"] = "主营业务收入"
+    acct["D4"] = 7
+    wb.save(path)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    assert "期间随同文件=文化_一本.xlsx" in (out.with_name("out_运行报告.txt").read_text(encoding="utf-8"))
+    assert "没写会计期间" not in r.stdout
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    assert openpyxl.load_workbook(out)["损益表"][f"F{row}"].value == 7
+
+
+def test_unreadable_header_asks_without_filling(tmp_path: Path):
+    path = tmp_path / "文化_利润表_坏表头.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "利润表"
+    ws["A1"] = "利润表"
+    ws["A2"] = "公司名称：北京甲骨易文化传媒有限公司"
+    ws["A3"] = "栏次"
+    ws["B3"] = "发生"
+    ws["A4"] = "收入"
+    ws["B4"] = 70
+    wb.save(path)
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert "表头对不上" in r.stdout
+    assert "文化_利润表_坏表头.xlsx" in r.stdout
+    layout = load_layout()
+    labels = [item["label"] for item in layout["profit_rows"]]
+    income_row = 2 + labels.index("收入")
+    assert openpyxl.load_workbook(out)["利润表"].cell(income_row, 3).value in (None, "")
+
+
+def test_nested_old_run_is_not_mixed_in(tmp_path: Path):
+    _write_account(
+        tmp_path / "文化_科目余额表_202607.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 7.0)],
+        period="202607",
+    )
+    old = tmp_path / "月度损益表_202608"
+    old.mkdir()
+    _write_account(
+        old / "文化_科目余额表_202608.xlsx",
+        "北京甲骨易文化传媒有限公司",
+        [("5101", "主营业务收入", None, 8.0)],
+        period="202608",
+    )
+    out = tmp_path / "out.xlsx"
+    r = _run(["--period", "202607", "--input-dir", str(tmp_path), "--out", str(out), "--no-api"])
+    assert out.is_file(), r.stdout + r.stderr
+    layout = load_layout()
+    row = account_row_map(layout)["5101"]
+    assert openpyxl.load_workbook(out)["损益表"][f"F{row}"].value == 7
+    assert "202608" not in r.stdout
+
+
+def test_discover_does_not_swallow_desktop_root(tmp_path: Path, monkeypatch):
+    from datetime import date
+
+    import common
+
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    (desktop / "文化_科目余额表_202608.xlsx").write_bytes(b"PK")
+    monkeypatch.setattr(common, "find_desktop", lambda root=None: desktop)
+    monkeypatch.chdir(desktop)
+    got = common.discover_input_dir("")
+    assert got != desktop
+    assert got.name == "月度损益表_" + date.today().strftime("%Y%m%d")
+
+
+def test_discover_skips_old_month_folders(tmp_path: Path, monkeypatch):
+    from datetime import date
+
+    import common
+
+    desktop = tmp_path / "Desktop"
+    old = desktop / "月度损益表_202608"
+    old.mkdir(parents=True)
+    (old / "文化_科目余额表.xlsx").write_bytes(b"PK")
+    monkeypatch.setattr(common, "find_desktop", lambda root=None: desktop)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    got = common.discover_input_dir("")
+    assert got != old
+    assert got.name == "月度损益表_" + date.today().strftime("%Y%m%d")
+    assert "全源_202608" not in str(got)
