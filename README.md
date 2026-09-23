@@ -52,6 +52,7 @@ flowchart TD
 | 劳务发票核对（亮晶） | labor-invoice-check | 1.1 | 有票 / 800 以下 / 无票 | Excel：应发明细 + 当月个人发票汇总 |
 | 九点下单统计（亮晶） | order-daily-summary | 1.1 | 下单数据（万元） | 智云账号密码；或离线：九点下单明细 Excel |
 | 追觅应收进度对比（亮晶） | dreame-ar-progress-diff | 1.1 | 两版追觅 list 的进度差 | Excel：两版追觅应收 list |
+| 应收抽查（亮晶） | ar-spot-check | 1.0 | 待抽、豁免、风险提示、智云核对 | Excel：合规抽查台账（含豁免清单）+ 当期销售反馈。智云用本机已保存的登录 |
 
 ### 明妹
 
@@ -80,7 +81,7 @@ flowchart TD
 | PPT（通用） | pptx | 1.1 | 读写演示文稿 | 要改的 PPT |
 | PDF（通用） | pdf | 1.1 | 读、拆、合并 PDF | 要处理的 PDF |
 
-已下线：`qige-invoice-to-kingdee`（销项已在金蝶入账）、`task-clarifier`、`update-finance-skills`、`env-doctor`、`compliance-spot-check`（合规抽查过期，后续另做）。
+已下线：`qige-invoice-to-kingdee`（销项已在金蝶入账）、`task-clarifier`、`update-finance-skills`、`env-doctor`、`compliance-spot-check`（已由应收抽查 `ar-spot-check` 接上）。
 
 ## 仓库
 
