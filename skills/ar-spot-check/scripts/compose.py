@@ -15,13 +15,22 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 POOL_SHEET = "待抽查清单"
+SUGGEST_SHEET = "建议本次抽"
 EXEMPT_SHEET = "豁免与已回款"
 NEWS_SHEET = "风险提示"
 ZHIYUN_SHEET = "智云核对"
 POOL_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "抽查原因", "已回款笔数", "订单数", "台账确认", "旁注"]
+SUGGEST_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "应收金额", "档", "原因", "旁注"]
 EXEMPT_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "原因", "豁免原因"]
-NEWS_HEADERS = ["客户", "新闻摘要", "链接", "说明", "风险等级", "检索日期"]
-ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"]
+NEWS_HEADERS = ["客户", "新闻摘要", "链接", "说明", "风险等级", "判断原因", "检索日期"]
+ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "回款核对"]
+SUGGEST_ORDER = {"高危": 0, "次危": 1, "延期": 2, "信用期内但要看": 3}
+SUGGEST_REASON = {
+    "高危": "账龄已满24个月",
+    "次危": "账龄已满6个月",
+    "延期": "逾期，账龄3到5个月",
+    "信用期内但要看": "还在信用期，但有经营风险、没合同、季结或预计回款已过",
+}
 RISK_ORDER = {"高": 0, "中": 1, "低": 2, "无": 3}
 RISK_STYLE = {
     "高": ("F4C7C3", "9C1B1B"),
@@ -41,12 +50,16 @@ POOL_WIDTHS = {
     "抽查原因": 16, "已回款笔数": 12, "订单数": 10, "台账确认": 22, "旁注": 28,
 }
 EXEMPT_WIDTHS = {"销售": 12, "客户": 36, "订单号": 28, "交付月份": 12, "账龄": 8, "原因": 12, "豁免原因": 36}
-NEWS_WIDTHS = {"客户": 36, "新闻摘要": 46, "链接": 28, "说明": 28, "风险等级": 10, "检索日期": 14}
+NEWS_WIDTHS = {"客户": 36, "新闻摘要": 46, "链接": 28, "说明": 28, "风险等级": 10, "判断原因": 36, "检索日期": 14}
 SHEET_WIDTHS = {
     POOL_SHEET: POOL_WIDTHS,
     EXEMPT_SHEET: EXEMPT_WIDTHS,
     NEWS_SHEET: NEWS_WIDTHS,
     ZHIYUN_SHEET: ZHIYUN_WIDTHS,
+    SUGGEST_SHEET: {
+        "销售": 12, "客户": 36, "订单号": 28, "交付月份": 12, "账龄": 8,
+        "应收金额": 14, "档": 16, "原因": 28, "旁注": 28,
+    },
 }
 HEADER_NOTES = {
     POOL_SHEET: {
@@ -65,8 +78,18 @@ HEADER_NOTES = {
         "新闻摘要": "近半年公开报道的一句话。没查到就写未查到。",
         "链接": "点蓝色字打开原文。没有链接就是没查到。",
         "风险等级": "只看这条新闻会不会直接影响把这笔钱收回来。",
+        "判断原因": "为什么是这个等级。没查到的不用写。",
     },
-    ZHIYUN_SHEET: ZHIYUN_NOTES,
+    ZHIYUN_SHEET: {
+        **ZHIYUN_NOTES,
+        "销售结算阶段": "这张单在销售反馈里写的结算阶段。",
+        "回款核对": "两边都写了已回款才是一致。只有一边写了就是不一致。不对银行流水。",
+    },
+    SUGGEST_SHEET: {
+        "档": "这周建议抽的短名单。高危要满1000，次危要满100000。延期和不满1000的不在这页。",
+        "应收金额": "这一组销售反馈的应收金额合计。同一档里金额大的在前。",
+        "原因": "这一行为什么进这次建议。",
+    },
 }
 MISS_NOTE = "这期销售反馈里没有对上"
 PAID_NOTE = "这个月每笔都已回款"
@@ -219,7 +242,9 @@ def side_note(row: dict) -> str:
         notes.append("按订单抽")
     orders = as_int(row.get("订单数"))
     paid = as_int(row.get("已回款订单数"))
-    if orders > 0 and paid == orders:
+    if row.get("回款未证实"):
+        notes.append("销售标了已回款，智云没有")
+    elif orders > 0 and paid == orders:
         notes.append(PAID_NOTE)
     elif 0 < paid < orders:
         notes.append(f"已回款{paid}/{orders}")
@@ -293,6 +318,7 @@ def merge_news(fact_names: list[str], news_rows: list[dict], aliases: list[tuple
         items = grouped[key]
         summaries, urls, notes = [], [], []
         risk = "无"
+        judged = []
         for item in items:
             summary = re.sub(r"https?://\S+", "", str(item.get("summary") or "")).strip(" ，,;；")
             url = str(item.get("url") or "").strip()
@@ -302,6 +328,7 @@ def merge_news(fact_names: list[str], news_rows: list[dict], aliases: list[tuple
                 return []
             if RISK_ORDER[item_risk] < RISK_ORDER[risk]:
                 risk = item_risk
+            judged.append((item_risk, str(item.get("reason") or "").strip()))
             if summary and summary not in summaries:
                 summaries.append(summary)
             if url and url not in urls:
@@ -322,6 +349,7 @@ def merge_news(fact_names: list[str], news_rows: list[dict], aliases: list[tuple
                 "链接": "\n".join(urls),
                 "说明": note_text,
                 "风险等级": risk,
+                "判断原因": "" if risk == "无" else "；".join(dict.fromkeys(text for level, text in judged if level == risk and text)),
                 "检索日期": retrieved,
                 "_序": position,
             }
@@ -368,6 +396,10 @@ def write_sheet(ws, header: list[str], rows: list[dict]) -> None:
                 cell.font = Font(name="微软雅黑", color=style[1], bold=True, size=11)
             elif ws.title == ZHIYUN_SHEET and title in {"合同归档号", "订单状态"} and text == "未找到":
                 cell.fill = MISSING_FILL
+            elif ws.title == ZHIYUN_SHEET and title == "回款核对" and text == "不一致":
+                cell.fill = PatternFill("solid", fgColor="F4C7C3")
+            elif ws.title == SUGGEST_SHEET and title == "档" and text == "高危":
+                cell.fill = PatternFill("solid", fgColor="F4C7C3")
     ws.freeze_panes = "B2" if ws.title == NEWS_SHEET else "C2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(header))}{max(1, len(rows) + 1)}"
     widths = SHEET_WIDTHS.get(ws.title, {})
@@ -388,7 +420,141 @@ def match_exemption(name: str, keywords: list[tuple[str, str]]) -> str:
     return "；".join(reasons) or "已确认豁免"
 
 
-def build(facts: list[dict], config: dict, check_month: int, keywords: list[tuple[str, str]]):
+def paid_confirmed(row: dict, pay_index: dict) -> bool:
+    if not fully_paid(row):
+        return False
+    name = str(row.get("客户") or "").strip()
+    sos = [part.strip().upper() for part in str(row.get("订单号") or "").split("；") if part.strip()]
+    if not sos:
+        sos = [part.strip().upper() for part in str(row.get("已回款订单号") or "").split("；") if part.strip()]
+    if not sos:
+        return False
+    return all("已回款" in str(pay_index.get((name, so), "")) for so in sos)
+
+
+def pay_index_from(header: list, rows: list) -> dict:
+    def column(name: str):
+        return header.index(name) if name in header else None
+
+    customer_at = column("客户")
+    order_at = column("订单号")
+    status_at = column("订单状态")
+    found = {}
+    if customer_at is None or order_at is None:
+        return found
+    for row in rows:
+        customer = str(row[customer_at] or "").strip() if customer_at < len(row) else ""
+        order = str(row[order_at] or "").strip().upper() if order_at < len(row) else ""
+        status = ""
+        if status_at is not None and status_at < len(row) and row[status_at] is not None:
+            status = str(row[status_at])
+        if customer and order:
+            found[(customer, order)] = status
+    return found
+
+
+def so_stage_index(facts: list[dict]) -> dict:
+    found = {}
+    for row in facts:
+        customer = str(row.get("客户") or "").strip()
+        packed = str(row.get("单号阶段") or "")
+        if packed:
+            for part in packed.split("；"):
+                if "=" not in part:
+                    continue
+                order, stage = part.split("=", 1)
+                if customer and order.strip():
+                    found[(customer, order.strip().upper())] = stage
+            continue
+        stage = str(row.get("结算阶段") or "")
+        for order in str(row.get("订单号") or "").split("；"):
+            if customer and order.strip():
+                found[(customer, order.strip().upper())] = stage
+    return found
+
+
+def pay_verdict(stage: str, status: str) -> str:
+    sales_paid = "已回款" in stage
+    zhiyun_paid = "已回款" in status and status != "未找到"
+    if sales_paid and zhiyun_paid:
+        return "一致"
+    if sales_paid or zhiyun_paid:
+        return "不一致"
+    return ""
+
+
+def expect_passed(row: dict, check_month: int) -> bool:
+    text = str(row.get("预计回款日") or "")
+    return len(text) >= 6 and text[:6].isdigit() and int(text[:6]) < check_month
+
+
+def suggest_band(row: dict, check_month: int, high_news: set[str]):
+    if row.get("规则") == "已豁免" or row.get("账龄") in (None, ""):
+        return None
+    age = as_int(row.get("账龄"))
+    marks = str(row.get("标记") or "")
+    watched = (
+        str(row.get("客户") or "") in high_news
+        or "没有合同" in marks
+        or "季结" in marks
+        or expect_passed(row, check_month)
+        or row.get("回款未证实")
+    )
+    if age <= 0:
+        return None
+    if age <= 2:
+        return "信用期内但要看" if watched else None
+    if age <= 5:
+        return "延期"
+    if age <= 23:
+        return "次危"
+    return "高危"
+
+
+def on_this_weeks_list(band: str, amount: float) -> bool:
+    if amount < 1000:
+        return False
+    if band == "延期":
+        return False
+    if band == "次危":
+        return amount >= 100000
+    return band in {"高危", "信用期内但要看"}
+
+
+def suggest_rows(pool: list[dict], check_month: int, high_news: set[str]) -> list[dict]:
+    picked = []
+    for row in pool:
+        band = suggest_band(row, check_month, high_news)
+        if not band:
+            continue
+        amount = row.get("应收金额")
+        try:
+            amount = round(float(amount or 0), 2)
+        except (TypeError, ValueError):
+            amount = 0
+        if not on_this_weeks_list(band, amount):
+            continue
+        picked.append(
+            {
+                "销售": row.get("销售") or "",
+                "客户": row.get("客户") or "",
+                "订单号": row.get("订单号") or "",
+                "交付月份": row.get("交付月份") or "",
+                "账龄": row.get("账龄"),
+                "应收金额": amount,
+                "档": band,
+                "原因": SUGGEST_REASON[band],
+                "旁注": side_note(row),
+                "_金额": amount,
+            }
+        )
+    picked.sort(key=lambda item: (SUGGEST_ORDER[item["档"]], -item["_金额"], str(item["销售"]), str(item["客户"])))
+    for item in picked:
+        item.pop("_金额", None)
+    return picked
+
+
+def build(facts: list[dict], config: dict, check_month: int, keywords: list[tuple[str, str]], pay_index: dict | None = None):
     sales_order = []
     for row in facts:
         if row.get("销售") not in sales_order:
@@ -406,7 +572,10 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
             copied["规则"] = "已豁免"
             pool.append(copied)
             continue
-        if fully_paid(row):
+        if "坏账" in str(row.get("标记") or "") or "坏账" in str(row.get("销售解释") or ""):
+            exempt.append((row, "坏账", str(row.get("订单号") or ""), "销售解释里写了坏账"))
+            continue
+        if fully_paid(row) and paid_confirmed(row, pay_index or {}):
             exempt.append((row, "已回款", str(row.get("已回款订单号") or row.get("订单号") or ""), ""))
             continue
         rule = judge(as_int(row.get("台账命中条数")), row.get("台账确认"))
@@ -415,6 +584,8 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
             continue
         copied = dict(row)
         copied["规则"] = rule
+        if fully_paid(row):
+            copied["回款未证实"] = True
         pool.append(copied)
     seen_names = {
         str(row.get("客户") or "").strip()
@@ -516,7 +687,8 @@ def main(argv=None) -> int:
             return ask("豁免清单里没有关键词这一列。先别出待抽。")
         raise
     print(f"exempt_keywords={len(keywords)}")
-    pool, exempt, kept = build(facts, config, month, keywords)
+    pay_index = pay_index_from(zhiyun_header, zhiyun_rows)
+    pool, exempt, kept = build(facts, config, month, keywords, pay_index)
     fact_customer_order = fact_names
     news_out = merge_news(fact_customer_order, news_rows, config["aliases"], str(args.retrieved))
     if len(news_out) != len({canon_name(name, config["aliases"]) for name in fact_names}):
@@ -582,11 +754,21 @@ def main(argv=None) -> int:
         if not item.get("销售") and customer in sales_of:
             counts = sales_of[customer]
             item["销售"] = max(counts, key=lambda name: counts[name])
+    stages = so_stage_index(facts)
+    for item in zhiyun_out:
+        customer = str(item.get("客户") or "").strip()
+        token = str(item.get("订单号") or "").strip().upper()
+        stage = stages.get((customer, token), "")
+        item["销售结算阶段"] = stage
+        item["回款核对"] = pay_verdict(stage, str(item.get("订单状态") or ""))
     zhiyun_out.sort(key=lambda item: (str(item.get("销售") or "￿"), str(item.get("客户") or ""), str(item.get("订单号") or "")))
+    high_news = {row["客户"] for row in news_out if row.get("风险等级") == "高"}
+    suggest_out = suggest_rows(pool, month, high_news)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     sheets = [
         (POOL_SHEET, POOL_HEADERS, pool_out),
+        (SUGGEST_SHEET, SUGGEST_HEADERS, suggest_out),
         (EXEMPT_SHEET, EXEMPT_HEADERS, exempt_out),
         (NEWS_SHEET, NEWS_HEADERS, news_out),
         (ZHIYUN_SHEET, ZHIYUN_HEADERS, zhiyun_out),
@@ -603,6 +785,7 @@ def main(argv=None) -> int:
     print("status=ok")
     print(f"groups={len(facts)}")
     print(f"pool={len(pool_out)}")
+    print(f"suggest={len(suggest_out)}")
     print(f"exempt={sum(1 for _row, reason, _no, _why in exempt if reason != '待确认')}")
     print(f"draft={sum(1 for _row, reason, _no, _why in exempt if reason == '待确认')}")
     print(f"kept={len(kept)}")

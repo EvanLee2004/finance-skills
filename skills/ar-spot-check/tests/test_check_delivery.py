@@ -23,13 +23,15 @@ def test_four_sheets_with_link_or_not_found_pass(tmp_path):
     path = tmp_path / "out.xlsx"
     wb = Workbook()
     wb.active.title = "待抽查清单"
+    suggest = wb.create_sheet("建议本次抽")
+    suggest.append(["销售", "客户", "档", "原因"])
     wb.create_sheet("豁免与已回款")
     news = wb.create_sheet("风险提示")
     news.append(["客户", "新闻摘要", "链接", "说明"])
     news.append(["甲", "未查到", "", "未查到"])
     zy = wb.create_sheet("智云核对")
-    zy.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"])
-    zy.append(["甲销", "甲", "SO1", "20260001", "OP4/项目已交付", ""])
+    zy.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "回款核对"])
+    zy.append(["甲销", "甲", "SO1", "20260001", "OP4/项目已交付", "", ""])
     wb.save(path)
     assert check_delivery.main(["--workbook", str(path)]) == 0
 

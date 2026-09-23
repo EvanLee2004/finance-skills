@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import defaultdict
+from datetime import date, datetime
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -77,6 +78,36 @@ def cell(ws, row, col):
     return ws.cell(row, col).value
 
 
+def as_amount(value):
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, str):
+        value = value.replace(",", "").strip()
+        if not value:
+            return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def as_date(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip().replace("-", "").replace("/", "").replace(".", "")
+    if len(text) >= 8 and text[:8].isdigit():
+        year, month, day = int(text[:4]), int(text[4:6]), int(text[6:8])
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    return None
+
+
 def as_month(value):
     if isinstance(value, float) and value == int(value):
         value = int(value)
@@ -140,6 +171,9 @@ def load_sales(path: Path, sheet: str):
         "month": find_col(headers, "交付月份"),
         "age": find_col(headers, "账龄"),
         "stage": find_col(headers, "结算阶段"),
+        "amount": find_col(headers, "应收金额"),
+        "expect": find_col(headers, "预计回款"),
+        "explain": find_col(headers, "解释"),
     }
     rows = []
     for row in range(2, (ws.max_row or 1) + 1):
@@ -162,6 +196,9 @@ def load_sales(path: Path, sheet: str):
                 "age": age,
                 "stage": stage,
                 "paid": "已回款" in stage,
+                "amount": as_amount(cell(ws, row, cols["amount"])),
+                "expect": as_date(cell(ws, row, cols["expect"])),
+                "explain": "" if cell(ws, row, cols["explain"]) is None else str(cell(ws, row, cols["explain"])).strip(),
             }
         )
     wb.close()
@@ -213,6 +250,10 @@ def build(entries, pending, sales_rows):
                 "paid_sos": [],
                 "sos": [],
                 "unpaid_sos": set(),
+                "amount": 0.0,
+                "explains": [],
+                "expects": [],
+                "so_stage": {},
             },
         )
         bucket["orders"] += 1
@@ -227,6 +268,15 @@ def build(entries, pending, sales_rows):
             bucket["stages"].append(row["stage"])
         if row["paid"] and row["so"] and row["so"].upper() not in {item.upper() for item in bucket["paid_sos"]}:
             bucket["paid_sos"].append(row["so"])
+        bucket["amount"] += row.get("amount") or 0
+        if row.get("explain") and row["explain"] not in bucket["explains"]:
+            bucket["explains"].append(row["explain"])
+        if row.get("expect") and not row["paid"]:
+            bucket["expects"].append(row["expect"])
+        if row["so"]:
+            token = row["so"].upper()
+            if not row["paid"] or token not in bucket["so_stage"]:
+                bucket["so_stage"][token] = row["stage"]
         for item in matching_entries(entries, row):
             if id(item) in bucket["hit_ids"]:
                 continue
@@ -259,6 +309,16 @@ def build(entries, pending, sales_rows):
             order_count = bucket["orders"]
             paid_count = bucket["paid"]
             paid_list = bucket["paid_sos"]
+        explain = "；".join(bucket["explains"])
+        marks = []
+        if "坏账" in explain:
+            marks.append("坏账")
+        if any(word in explain for word in ("没有合同", "无合同", "没合同", "合同还在流程", "合同在流程", "尚未签", "找不到合同")):
+            marks.append("没有合同")
+        if any(word in explain for word in ("季结", "半年一结", "半年结", "按季度")):
+            marks.append("季结")
+        expect = min(bucket["expects"]) if bucket["expects"] else None
+        stage_pairs = [f"{so}={bucket['so_stage'].get(so.upper(), '')}" for so in bucket["sos"]]
         out.append(
             [
                 bucket["sales"],
@@ -277,6 +337,11 @@ def build(entries, pending, sales_rows):
                 "；".join(raws),
                 unrecognized.get(bucket["name"], 0),
                 "；".join(paid_list),
+                round(bucket["amount"], 2),
+                "" if expect is None else expect.strftime("%Y%m%d"),
+                explain[:2000],
+                "；".join(marks),
+                "；".join(stage_pairs),
             ]
         )
     return out, age_conflict, len(pending)
@@ -299,6 +364,11 @@ HEADERS = [
     "台账原月份",
     "同客户无法识别的台账行",
     "已回款订单号",
+    "应收金额",
+    "预计回款日",
+    "销售解释",
+    "标记",
+    "单号阶段",
 ]
 
 

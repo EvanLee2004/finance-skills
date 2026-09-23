@@ -9,7 +9,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-REQUIRED = ["待抽查清单", "豁免与已回款", "风险提示", "智云核对"]
+REQUIRED = ["待抽查清单", "建议本次抽", "豁免与已回款", "风险提示", "智云核对"]
 
 
 def main(argv=None) -> int:

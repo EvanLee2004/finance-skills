@@ -11,6 +11,7 @@ import compose  # noqa: E402
 FACTS = [
     "销售", "客户", "订单号", "交付月份", "粒度", "订单数", "已回款订单数", "账龄", "账龄冲突",
     "结算阶段", "台账命中条数", "台账确认", "台账抽查日", "台账原月份", "同客户无法识别的台账行", "已回款订单号",
+    "应收金额", "预计回款日", "销售解释", "标记", "单号阶段",
 ]
 
 
@@ -42,8 +43,8 @@ def write_news(directory: Path, rows: list[dict]):
     )
 
 
-def fact(sales, name, month, age, hits, confirm, dates="", orders=1, paid=0, so="", paid_so="", grain="客户月", conflict="", unrecognized=0):
-    return [sales, name, so, month, grain, orders, paid, age, conflict, "未对账", hits, confirm, dates, "", unrecognized, paid_so]
+def fact(sales, name, month, age, hits, confirm, dates="", orders=1, paid=0, so="", paid_so="", grain="客户月", conflict="", unrecognized=0, amount=0, expect="", explain="", marks="", stages=""):
+    return [sales, name, so, month, grain, orders, paid, age, conflict, "未对账", hits, confirm, dates, "", unrecognized, paid_so, amount, expect, explain, marks, stages]
 
 
 def names_of(ws):
@@ -79,7 +80,7 @@ def test_sort_paid_pass_and_soft(tmp_path):
     assert code == 0
     wb = load_workbook(out, data_only=True)
     pool = names_of(wb["待抽查清单"])
-    assert pool == ["老单", "空确认", "再抽", "部分回", "新单", "刚交付", "更老", "微信", "没盖成"]
+    assert pool == ["已回", "老单", "空确认", "再抽", "部分回", "新单", "刚交付", "更老", "微信", "没盖成"]
     rules = {row[1]: row[5] for row in wb["待抽查清单"].iter_rows(min_row=2, values_only=True)}
     assert rules["老单"] == "没查过"
     assert rules["再抽"] == "未提供或未反馈"
@@ -91,7 +92,11 @@ def test_sort_paid_pass_and_soft(tmp_path):
     assert "已回款1/2" in partial[9]
     assert "写不成月份" in partial[9]
     exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
-    assert exempt[0][1] == "已回" and exempt[0][2] == "SO1；SO2" and exempt[0][5] == "已回款"
+    assert all(row[1] != "已回" for row in exempt)
+    suggest = {row[1]: row[6] for row in wb["建议本次抽"].iter_rows(min_row=2, values_only=True)}
+    assert "刚交付" not in suggest
+    assert "老单" not in suggest
+    assert "已回" not in suggest
     assert "拿到" not in pool and "盖章" not in pool
     assert [row[0] for row in wb["风险提示"].iter_rows(min_row=2, values_only=True)] == customers
     wb.close()
@@ -155,7 +160,7 @@ def test_news_risk_sorts_high_to_low_and_colors_column_e(tmp_path):
         news,
         [
             {"customer": "无新闻", "summary": "未查到", "url": "", "note": "未查到"},
-            {"customer": "有新闻", "summary": "被执行", "url": "https://example.com/a", "note": "法院", "risk": "高"},
+            {"customer": "有新闻", "summary": "被执行", "url": "https://example.com/a", "note": "法院", "risk": "高", "reason": "已被法院执行，付钱会受影响。"},
         ],
     )
     zhiyun = tmp_path / "zhiyun.xlsx"
@@ -166,7 +171,9 @@ def test_news_risk_sorts_high_to_low_and_colors_column_e(tmp_path):
     rows = list(wb["风险提示"].iter_rows(min_row=2, values_only=True))
     assert [row[0] for row in rows] == ["有新闻", "无新闻"]
     assert rows[0][4] == "高" and rows[1][4] == "无"
-    assert rows[0][5] == "2026-09-22"
+    assert rows[0][5] == "已被法院执行，付钱会受影响。"
+    assert rows[1][5] in (None, "")
+    assert rows[0][6] == "2026-09-22"
     colored = wb["风险提示"].cell(2, 5)
     assert colored.fill.fgColor.rgb.endswith("F4C7C3")
     wb.close()
@@ -280,4 +287,62 @@ def test_unmatched_keyword_is_marked_on_the_exempt_sheet(tmp_path):
     assert missed[0][5] == "已豁免"
     assert "这期销售反馈里没有对上" in str(missed[0][6])
     assert "框架合同" in str(missed[0][6])
+    wb.close()
+
+
+def test_suggest_follows_age_amount_and_bad_debt(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(
+        facts,
+        [
+            fact("甲", "零", 202609, 0, 0, ""),
+            fact("甲", "信用", 202608, 2, 0, ""),
+            fact("甲", "没合同", 202607, 2, 0, "", amount=5000, marks="没有合同"),
+            fact("甲", "逾期", 202605, 4, 0, "", amount=80000),
+            fact("甲", "老", 202001, 30, 0, "", amount=20),
+            fact("甲", "更大", 202001, 30, 0, "", amount=8000),
+            fact("甲", "次危大", 202401, 10, 0, "", amount=120000),
+            fact("甲", "坏", 202001, 40, 0, "", explain="这是坏账", marks="坏账"),
+        ],
+    )
+    names = ["零", "信用", "没合同", "逾期", "老", "更大", "次危大", "坏"]
+    news = tmp_path / "news"
+    write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in names])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, names)
+    out = tmp_path / "out.xlsx"
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)]) == 0
+    wb = load_workbook(out, data_only=True)
+    suggest = [(row[1], row[6]) for row in wb["建议本次抽"].iter_rows(min_row=2, values_only=True)]
+    assert [name for name, _band in suggest] == ["更大", "次危大", "没合同"]
+    assert [band for _name, band in suggest] == ["高危", "次危", "信用期内但要看"]
+    pool = names_of(wb["待抽查清单"])
+    assert "坏" not in pool and "坏" not in [name for name, _band in suggest]
+    reasons = [row[5] for row in wb["豁免与已回款"].iter_rows(min_row=2, values_only=True) if row[1] == "坏"]
+    assert reasons == ["坏账"]
+    wb.close()
+
+
+def test_paid_needs_zhiyun_and_patent_news_drops(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(facts, [fact("甲", "已回", 202401, 20, 0, "", orders=1, paid=1, so="SO9", paid_so="SO9", stages="SO9=已回款，已核销")])
+    news = tmp_path / "news"
+    write_news(news, [{"customer": "已回", "summary": "申请了一项专利", "url": "https://example.com/p", "note": "公告", "risk": "中"}])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "智云核对"
+    ws.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"])
+    ws.append(["甲", "已回", "SO9", "20260009", "SP4/已回款", ""])
+    wb.save(zhiyun)
+    out = tmp_path / "out.xlsx"
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)]) == 0
+    wb = load_workbook(out, data_only=True)
+    exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
+    assert exempt[0][1] == "已回" and exempt[0][5] == "已回款"
+    assert "已回" not in names_of(wb["待抽查清单"])
+    assert list(wb["风险提示"].iter_rows(min_row=2, values_only=True))[0][4] == "中"
+    verdict = list(wb["智云核对"].iter_rows(min_row=2, values_only=True))[0]
+    assert verdict[6] == "已回款，已核销"
+    assert verdict[7] == "一致"
     wb.close()
