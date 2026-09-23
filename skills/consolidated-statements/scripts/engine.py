@@ -280,9 +280,11 @@ def parse_sheet(rows, sheet, period, file_name, file_hash, *, bs_reclassified=Fa
                 values[42,metric]=Value(values[24,metric].amount+values[27,metric].amount,"derived",values[24,metric].refs+values[27,metric].refs)
             if values[25,metric].state!="reported":
                 issues.append("持续经营净利润未填，不能解释为经济意义上的零")
-            if template=="small" and values[8,metric].amount:
-                issues.append("净利息细项与利息费用不等价，保留来源待确认")
-                values[8,metric]=Value(ZERO,"semantic_unknown")
+            # 小企业准则利润表「其中：利息费用（收入以"-"号填列）」是**净利息**，
+            # 而「财务费用」= 净利息 + 手续费等，两者本就不相等（实例：济南 −179.97 = −377.16 + 197.19），
+            # 属正常口径而非异常。历史实现曾在此把该格归零并挂 issue，会丢失金蝶原值、
+            # 并因 issue 使 complete 永远无法达成，故按"以金蝶为准"保留来源原值。
+            # （不再归零：保留来源原值，仅由来源自带状态决定）
     report=Report(company,period,kind,file_name,file_hash,sheet,rows,values,sorted(set(issues)),template)
     report.metric_basis=metric_basis
     return report

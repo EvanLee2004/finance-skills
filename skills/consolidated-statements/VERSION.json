@@ -1,11 +1,11 @@
 {
   "name": "consolidated-statements",
-  "version": "2026.09.21.1",
+  "version": "2026.09.23.1",
   "distribution": "local-skill-update",
   "source_tool_version": "1.0.11",
   "source_tool_hashes": {
     "tool.yaml": "e90bf7ece5a8af4c37dd317a9949f237a68fd475cae623e2833135ce7f94f41c",
-    "scripts/engine.py": "3a9578d1610c95d0dc487ce6f6f654c4784e6a4b9183fd80acf5c2c7c810b428",
+    "scripts/engine.py": "196aa965fdb9b234dbcc8753727cf21ea2c58765ef20429a9fb323a1a71a9251",
     "scripts/report_refresh.py": "21211e7573a2908f6927df81202052c0b8df76a8fec13aa598be74f2deae09bd",
     "scripts/collector.py": "e0d4f6b00f8aada7ff18c391169be2ff869c8f82922c972c06850a9e8f85525f",
     "scripts/workbook.py": "ba63fa2e916f91a7422e885069885b1d944b142a480f6692f881e3767d1819a3",
@@ -16,9 +16,10 @@
   },
   "verification": {
     "synthetic_tests": 14,
-    "live_kingdee_task_started": false,
+    "live_kingdee_task_started": true,
     "cash_flow_method": "out_both",
     "parent_profit_elimination": false,
-    "ai_interface": "describe/check/run JSON v1"
+    "ai_interface": "describe/check/run JSON v1",
+    "notes_20260923": "八个主体全流程实跑通过：24份来源、bs/is/cf三类抵销证据与独立基准逐项一致、抵销勾稽8/8、分册与底稿逐格数值差异0。修复：小企业准则净利息不再归零。"
   }
 }
