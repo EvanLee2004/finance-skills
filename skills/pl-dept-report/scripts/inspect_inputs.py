@@ -238,7 +238,12 @@ def inspect_dir(input_dir: Path) -> list[dict]:
         if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
             continue
         parents = path.relative_to(input_dir).parts[:-1]
-        if any(part.startswith("月度损益表_") or part.startswith("全源_") or part == "引出" for part in parents):
+        if any(
+            part.startswith("月度损益表_")
+            or part.startswith("全源_")
+            or part in {"引出", "01_脏数据", "02_清洗后", "03_结果"}
+            for part in parents
+        ):
             continue
         found.extend(inspect_file(path))
     return found

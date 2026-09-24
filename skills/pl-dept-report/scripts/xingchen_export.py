@@ -674,9 +674,7 @@ async def _export_profit_query(page, dest: Path, period: str) -> tuple[bool, str
         return False, "export_failed"
     got = _profit_file_period(tmp)
     if got and got != period:
-        alt = dest.with_name(f"{dest.name.split('_利润表')[0]}_利润表_{got}.xlsx")
-        if alt != tmp:
-            alt.write_bytes(tmp.read_bytes())
+        # 期间不对就丢掉这次文件，不要覆盖已经引出的别的月份。
         tmp.unlink(missing_ok=True)
         return False, f"wrong_period={got}"
     dest.write_bytes(tmp.read_bytes())
@@ -725,12 +723,18 @@ async def export_book(
             else:
                 note.setdefault("empty", []).append(kind)
         except Exception as e:
-            detail = str(e).split(":")[0][:24]
-            note.setdefault("errors", []).append(f"{kind}:{type(e).__name__}:{detail}")
+            text = str(e)
+            if "period_not_set" in text or "wrong_period" in text:
+                note.setdefault("errors", []).append(f"{kind}:{text[:80]}")
+            else:
+                detail = text.split(":")[0][:24]
+                note.setdefault("errors", []).append(f"{kind}:{type(e).__name__}:{detail}")
     if "profit" in wanted:
         dest = profit_dest_name(out_dir, header, period)
         try:
             ok, reason = await _export_profit_query(page, dest, period)
+            if not ok and reason != "denied":
+                ok, reason = await _export_profit_query(page, dest, period)
             if ok:
                 note["files"].append(dest.name)
             else:

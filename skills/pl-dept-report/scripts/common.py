@@ -107,6 +107,12 @@ def _collect_periods(blob: str) -> list[str] | None:
         if value:
             found.append(value)
     for m in re.finditer(r"(20\d{2})[./-](0?\d{1,2})(?!\d)(?![./-]\d)", blob):
+        # 金额 2062.07 不是会计期间。只有同一行写了期间/会计/期/月才认。
+        if re.fullmatch(r"\d+\.\d{2}", m.group(0)):
+            line_start = blob.rfind("\n", 0, m.start()) + 1
+            prefix = blob[line_start:m.start()]
+            if not re.search(r"期间|会计|期|月", prefix):
+                continue
         value = _yyyy_mm(m.group(1), int(m.group(2)))
         if value:
             found.append(value)

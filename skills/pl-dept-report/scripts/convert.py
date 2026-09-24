@@ -59,6 +59,21 @@ from common import (
     stdout_safe,
 )
 from formula_eval import eval_workbook
+from model_book import (
+    find_staged,
+    model_path,
+    read_agency_records,
+    read_payroll_rows,
+    read_rent_lines,
+    read_source_model,
+    result_path,
+    stage_dirty,
+    write_agency_records,
+    write_gap_sheet,
+    write_payroll_rows,
+    write_rent_lines,
+    write_source_model,
+)
 from inspect_inputs import inspect_dir, inspect_file, inspect_downloads_dept_assist
 from offline_profit import (
     apply_offline_profit,
@@ -702,7 +717,8 @@ def write_profit_sheet(wb, layout: dict, period: str, current: dict, previous: d
                     cur_l = get_column_letter(2 + j)
                     prev_l = get_column_letter(10 + j)
                     ws.cell(r, 2 + j).value = (
-                        f'=IF(N({prev_l}{br})=0,"",({cur_l}{br}-{prev_l}{br})/{prev_l}{br})'
+                        f'=IF(N({prev_l}{br})=0,"",IF(ISNUMBER({cur_l}{br}),'
+                        f"({cur_l}{br}-{prev_l}{br})/{prev_l}{br},\"\"))"
                     )
                     set_nf(ws.cell(r, 2 + j))
 
@@ -803,10 +819,17 @@ def write_report(path: Path, payload: dict) -> None:
     lines = [
         f"期间={payload['period']}",
         f"材料夹={payload.get('input_name') or '无'}",
+        f"模型={payload.get('model_name') or '无'}",
         f"有源账套={','.join(payload['has_source']) or '无'}",
         f"缺源账套={','.join(payload['missing']) or '无'}",
         f"利润表缺源={','.join(payload.get('profit_missing') or []) or '无'}",
         f"利润表上月缺线下={','.join(payload.get('prev_offline_missing') or []) or '无'}",
+        f"没取到={payload.get('not_fetched') or '无'}",
+        f"取到本期发生为0={payload.get('zero_occurrence') or '无'}",
+        f"取到利润表本月为0={payload.get('zero_profit') or '无'}",
+        f"清洗未用={payload.get('dropped_sources') or '无'}",
+        f"网页期间未对准={payload.get('period_miss') or '无'}",
+        f"网页引出未保存={payload.get('export_miss') or '无'}",
         f"未映射部门个数={payload['unmapped_count']}",
         f"核对非0科目编码个数={payload['nonzero_checks']}",
         f"核对非0绿行={','.join(payload.get('nonzero_sijia') or []) or '无'}",
@@ -889,10 +912,17 @@ def abort_for_login(out: Path, period: str, notes: list[str], ask: str, secrets:
     text = (
         f"期间={period}\n"
         f"材料夹=无\n"
+        f"模型=无\n"
         f"有源账套=无\n"
         f"缺源账套=无\n"
         f"利润表缺源=无\n"
         f"利润表上月缺线下=无\n"
+        f"没取到=无\n"
+        f"取到本期发生为0=无\n"
+        f"取到利润表本月为0=无\n"
+        f"清洗未用=无\n"
+        f"网页期间未对准=无\n"
+        f"网页引出未保存=无\n"
         f"未映射部门个数=0\n"
         f"核对非0科目编码个数=0\n"
         f"核对非0绿行=无\n"
@@ -1149,12 +1179,69 @@ def _export_xingchen_gaps(
     except Exception as e:
         notes.append(f"网页引出失败={type(e).__name__}")
         return inspected
+    note_export_errors(result, notes)
+    return gather_inspected(input_dir, extra_files, notes)
+
+
+def _pair_has_amount(pair: dict) -> bool:
+    for key in ("debit", "credit"):
+        val = (pair or {}).get(key)
+        if val is None:
+            continue
+        if Decimal(str(val)) != 0:
+            return True
+    return False
+
+
+def _values_all_zero(values) -> bool:
+    seen = False
+    for val in values:
+        seen = True
+        if val is None:
+            continue
+        if Decimal(str(val)) != 0:
+            return False
+    return seen
+
+
+def _note_bits(notes: list[str], prefix: str) -> str:
+    bits = [n.split("=", 1)[1] for n in notes if n.startswith(prefix)]
+    return "、".join(dict.fromkeys(bits))
+
+
+def source_buckets(notes: list[str], profit_missing: list[str]) -> dict[str, str]:
+    dropped = "、".join(
+        bit
+        for bit in (
+            _note_bits(notes, "期间冲突="),
+            _note_bits(notes, "期间不符="),
+            _note_bits(notes, "期间未写明="),
+            _note_bits(notes, "表头认不出="),
+        )
+        if bit
+    )
+    return {
+        "not_fetched": ("利润表:" + ",".join(profit_missing)) if profit_missing else "",
+        "zero_occurrence": _note_bits(notes, "取到本期发生为0="),
+        "zero_profit": _note_bits(notes, "取到利润表本月为0="),
+        "dropped_sources": dropped,
+        "period_miss": _note_bits(notes, "网页期间未对准="),
+        "export_miss": _note_bits(notes, "网页引出未保存="),
+    }
+
+
+def note_export_errors(result: dict, notes: list[str]) -> None:
+    """登录失败才停整张表。期间没对准只记下来，不覆盖别的月份，也不当登录失败。"""
     for header in result.get("denied") or []:
         notes.append(f"利润表无查询权限={header}")
     for err in result.get("errors") or []:
-        if "denied" in str(err) or "wrong_period" in str(err) or "no_query_page" in str(err):
-            notes.append(f"网页引出失败={err}")
-    return gather_inspected(input_dir, extra_files, notes)
+        text = str(err)
+        if any(bit in text for bit in ("denied", "no_query_page", "bad_password", "missing_creds", "login_failed")):
+            notes.append(f"网页引出失败={text}")
+        elif "wrong_period" in text or "period_not_set" in text:
+            notes.append(f"网页期间未对准={text}")
+        else:
+            notes.append(f"网页引出未保存={text}")
 
 
 def ensure_xingchen_current(
@@ -1206,20 +1293,41 @@ def run(
     elif offline_xlsx:
         extra_files = [str(offline_xlsx)]
     extra_files = list(extra_files) + cwd_sidecar_files(extra_files, input_dir)
+    dirty = stage_dirty(input_dir, extra_files)
     if not no_api:
         from dump_api_excel import dump_if_needed
 
-        dump_if_needed(period, Path(input_dir) / "API", notes)
+        dump_if_needed(period, dirty / "API", notes)
         from dump_api_excel import dump_prev_profit_if_needed
 
-        dump_prev_profit_if_needed(period, Path(input_dir) / "API", notes)
+        dump_prev_profit_if_needed(period, dirty / "API", notes)
     from clean_sources import inherit_file_periods
 
-    inspected = inherit_file_periods(gather_inspected(input_dir, extra_files, notes))
+    inspected = inherit_file_periods(gather_inspected(dirty, [], notes))
     note_ignored_finished_pl(input_dir, extra_files, notes)
-    inspected = ensure_xingchen_current(period, input_dir, inspected, extra_files, no_api, notes)
+    inspected = ensure_xingchen_current(period, dirty, inspected, [], no_api, notes)
+    inspected_all = list(inspected)
     inspected = drop_other_period_balances(inspected, period, notes)
     parsed = parse_inspected(inspected) if inspected else {"accounts": {}, "depts": [], "profits": {}}
+    early_zero = [
+        ent
+        for ent, codes in (parsed.get("accounts") or {}).items()
+        if codes and not any(_pair_has_amount(pair) for pair in codes.values())
+    ]
+    if early_zero:
+        notes.append("取到本期发生为0=" + ",".join(early_zero))
+    early_profit_zero = []
+    for ent, raw in ((parsed.get("profits_by_period") or {}).get(period) or {}).items():
+        if raw and _values_all_zero(raw.values()):
+            early_profit_zero.append(ent)
+    if early_profit_zero:
+        notes.append("取到利润表本月为0=" + ",".join(early_profit_zero))
+    stored = write_source_model(model_path(input_dir, period), period, inspected_all, inspected, parsed)
+    reloaded = read_source_model(stored)
+    parsed["accounts"] = reloaded["accounts"]
+    parsed["depts"] = reloaded["depts"]
+    parsed["profits_by_period"] = reloaded["profits_by_period"]
+    notes.append(f"模型={stored.name}")
     entity_amts: dict = {e: {} for e in layout["entities"]}
     amount_labels = {row["label"] for row in layout["profit_rows"] if row.get("kind") == "amount" and row.get("label")}
     hq_from_api = False
@@ -1359,6 +1467,13 @@ def run(
             bucket = entity_amts[ent].setdefault(target, {"debit": None, "credit": None})
             bucket["debit"] = add_money(bucket.get("debit"), pair.get("debit"))
             bucket["credit"] = add_money(bucket.get("credit"), pair.get("credit"))
+    zero_occ = [
+        ent
+        for ent, codes in (parsed.get("accounts") or {}).items()
+        if codes and not any(_pair_has_amount(pair) for pair in codes.values())
+    ]
+    if zero_occ and not any(n.startswith("取到本期发生为0=") for n in notes):
+        notes.append("取到本期发生为0=" + ",".join(zero_occ))
     assist_codes: dict[str, set[str]] = {}
     for row in parsed.get("depts") or []:
         assist_codes.setdefault(row.get("entity") or "", set()).add(row.get("code") or "")
@@ -1389,15 +1504,23 @@ def run(
             continue
         mapped = map_profit_dict(raw, layout)
         profit_cur[ent].update({k: v for k, v in mapped.items() if k in amount_labels})
+    zero_profit = [
+        ent
+        for ent, raw in current_profits.items()
+        if raw and _values_all_zero(raw.values())
+    ]
+    if zero_profit and not any(n.startswith("取到利润表本月为0=") for n in notes):
+        notes.append("取到利润表本月为0=" + ",".join(zero_profit))
     dept_rows, dept_note = pick_dept_rows(folded_depts, api_depts, hq_from_api)
     if dept_note:
         notes.append(dept_note)
     special_rules = load_ben_gongsi_rules()
     filled = accounts_as_bengongsi(entity_amts, dept_rows, special_rules, layout)
     # 她亲口指的台账（--payroll-xlsx）不看假数/明昊测试文件名；夹子里扫到的才过滤
-    payroll_files = explicit_payroll_files(payroll_xlsx)
+    staged_pay = [str(find_staged(dirty, raw)) for raw in (payroll_xlsx or [])]
+    payroll_files = explicit_payroll_files(staged_pay)
     seen_pay = {str(p.resolve()) for p in payroll_files}
-    for found in discover_payroll_files([input_dir, *extra_files], period):
+    for found in discover_payroll_files([dirty], period):
         if str(found.resolve()) not in seen_pay:
             payroll_files.append(found)
     payroll_parsed: dict = {}
@@ -1455,6 +1578,9 @@ def run(
     )
     payroll_covered: set[str] = set()
     payroll_codes: dict[str, set[str]] = {}
+    if payroll_parsed.get("rows"):
+        write_payroll_rows(stored, payroll_parsed["rows"])
+        payroll_parsed["rows"] = read_payroll_rows(stored)
     if payroll_parsed.get("rows") or payroll_parsed.get("dirty_sheets") or payroll_parsed.get("empty_sheets"):
         payroll_covered, payroll_codes = apply_payroll(
             entity_amts, dept_amts, payroll_parsed, layout, notes, report_tmp
@@ -1462,7 +1588,9 @@ def run(
         if "甲骨易" in payroll_covered:
             notes[:] = [n for n in notes if "总部工资社保无部门辅助" not in n]
 
-    prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
+    prev_xlsx = input_dir / "03_结果" / f"月度损益表_{prev_period(period)}.xlsx"
+    if not prev_xlsx.is_file():
+        prev_xlsx = input_dir / f"月度损益表_{prev_period(period)}.xlsx"
     profit_prev = load_prev_profit(prev_xlsx if prev_xlsx.is_file() else None, layout)
     for ent, raw in previous_profits.items():
         mapped = map_profit_dict(raw, layout)
@@ -1472,8 +1600,14 @@ def run(
     offline_records = []
     if not skip_offline:
         offline_records = collect_offline_records(
-            inspected, extra_files, period, notes, sibling_period=prev_period(period)
+            inspected, [], period, notes, sibling_period=prev_period(period)
         )
+        prev_offline = collect_offline_records(
+            inspected, [], prev_period(period), notes, sibling_period=period
+        )
+        write_agency_records(stored, list(offline_records) + list(prev_offline))
+        offline_records = read_agency_records(stored, period)
+        prev_offline = read_agency_records(stored, prev_period(period))
         apply_offline_profit(
             entity_amts,
             dept_amts,
@@ -1489,9 +1623,6 @@ def run(
         missing_off = [e for e in needed if e not in have]
         if missing_off:
             notes.append("缺线下利润表=" + ",".join(missing_off))
-        prev_offline = collect_offline_records(
-            inspected, extra_files, prev_period(period), notes, sibling_period=period
-        )
         for rec in prev_offline:
             ent = rec.get("entity")
             if not ent:
@@ -1510,6 +1641,8 @@ def run(
     apply_income_leftover(
         entity_amts, dept_amts, layout, notes, report_tmp.get("income_blocked")
     )
+    write_rent_lines(stored, rent_lines)
+    rent_lines = read_rent_lines(stored)
     apply_rent_abstract_split(dept_amts, rent_lines, layout, notes)
     rollup_entity_parents(entity_amts, layout)
     parent_residual = parent_left_residuals(entity_amts, layout)
@@ -1532,10 +1665,15 @@ def run(
             has_source.append(header)
         else:
             missing.append(header)
+    zero_profit_names = set()
+    for note in notes:
+        if note.startswith("取到利润表本月为0="):
+            zero_profit_names.update(part for part in note.split("=", 1)[1].split(",") if part)
     for header in xingchen:
         if header in fetched and not entity_amts.get(header) and not profit_cur.get(header):
-            notes.append(f"已取但无损益科目={header}")
-        if header in has_source and header != "甲骨易" and not profit_cur.get(header):
+            if header not in zero_profit_names and not any(n.startswith("取到本期发生为0=") and header in n for n in notes):
+                notes.append(f"已取但无损益科目={header}")
+        if header in has_source and header != "甲骨易" and not profit_cur.get(header) and header not in zero_profit_names:
             notes.append(f"利润表无本月源={header}")
     profit_missing = [
         n.split("=", 1)[1]
@@ -1580,6 +1718,7 @@ def run(
             if n.startswith("缺上月线下利润表=")
         ],
         "input_name": input_dir.name,
+        "model_name": stored.name,
     }
     asks: list[str] = []
     miss_note = next((n for n in notes if n.startswith("缺线下利润表=")), "")
@@ -1632,18 +1771,41 @@ def run(
         asks.append(
             "利润表无本月源="
             + ",".join(profit_missing)
-            + "。请打开财务报表→利润表（不要走个别报表列表），会计期间选当期，点查询看本月金额再引出。不要点新增/生成。把表放到文件夹。"
+            + "。请打开财务报表→利润表（不要走个别报表列表），会计期间选当期，点查询看本月金额再引出。不要点新增/生成。把表放到文件夹。不要拿别的月份或做好的损益表来填。"
         )
+    unsaved = [n.split("=", 1)[1] for n in notes if n.startswith("网页引出未保存=")]
+    if unsaved:
+        asks.append(
+            "这些引出没有保存成文件："
+            + "、".join(dict.fromkeys(unsaved))
+            + "。不要拿上月那张表顶上。"
+        )
+    period_miss = [n.split("=", 1)[1] for n in notes if n.startswith("网页期间未对准=")]
+    if period_miss:
+        asks.append(
+            "这些引出没有停在本次月份，文件没有保存："
+            + "、".join(dict.fromkeys(period_miss))
+            + "。不要拿上月那张表顶上。"
+        )
+    payload.update(source_buckets(notes, profit_missing))
     payload["ask"] = " ".join(asks)
+    write_gap_sheet(stored, notes, profit_missing)
     report_path = out.with_name(out.stem + "_运行报告.txt")
     write_report(report_path, payload)
     text = (
         f"期间={period}\n"
         f"材料夹={input_dir.name}\n"
+        f"模型={stored.name}\n"
         f"有源账套={','.join(has_source) or '无'}\n"
         f"缺源账套={','.join(missing) or '无'}\n"
         f"利润表缺源={','.join(profit_missing) or '无'}\n"
         f"利润表上月缺线下={','.join(payload['prev_offline_missing']) or '无'}\n"
+        f"没取到={payload.get('not_fetched') or '无'}\n"
+        f"取到本期发生为0={payload.get('zero_occurrence') or '无'}\n"
+        f"取到利润表本月为0={payload.get('zero_profit') or '无'}\n"
+        f"清洗未用={payload.get('dropped_sources') or '无'}\n"
+        f"网页期间未对准={payload.get('period_miss') or '无'}\n"
+        f"网页引出未保存={payload.get('export_miss') or '无'}\n"
         f"未映射部门个数={payload['unmapped_count']}\n"
         f"核对非0科目编码个数={nonzero}\n"
         f"核对非0绿行={','.join(sijia_codes) or '无'}\n"
@@ -1677,10 +1839,17 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "期间=\n"
             "材料夹=无\n"
+            "模型=无\n"
             "有源账套=无\n"
             "缺源账套=无\n"
             "利润表缺源=无\n"
             "利润表上月缺线下=无\n"
+            "没取到=无\n"
+            "取到本期发生为0=无\n"
+            "取到利润表本月为0=无\n"
+            "清洗未用=无\n"
+            "网页期间未对准=无\n"
+            "网页引出未保存=无\n"
             "未映射部门个数=0\n"
             "核对非0科目编码个数=0\n"
             "核对非0绿行=无\n"
@@ -1698,7 +1867,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         out = Path(args.out).expanduser()
     else:
-        out = default_desktop_dir("月度损益表") / f"月度损益表_{period}.xlsx"
+        out = result_path(input_dir, period)
     return run(
         period,
         input_dir,

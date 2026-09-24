@@ -270,6 +270,19 @@ class Parser:
             return a if truth else b
         if name == "N":
             return _num(args[0] if args else None)
+        if name == "ISNUMBER":
+            val = args[0] if args else None
+            if isinstance(val, bool) or val is None or val == "":
+                return False
+            if isinstance(val, (int, float, Decimal)):
+                return True
+            if isinstance(val, str):
+                try:
+                    Decimal(val.replace(",", ""))
+                except (InvalidOperation, ValueError):
+                    return False
+                return True
+            return False
         if name == "ABS":
             return abs(_num(args[0] if args else None))
         if name == "OR":
