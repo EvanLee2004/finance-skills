@@ -51,6 +51,13 @@ def names_of(ws):
     return [row[1] for row in ws.iter_rows(min_row=2, values_only=True) if row[1]]
 
 
+def write_judgment(path: Path, suggest, keywords=None, people=None):
+    path.write_text(
+        json.dumps({"同一人": people or [], "关键词": keywords or [], "建议": suggest}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def test_sort_paid_pass_and_soft(tmp_path):
     facts = tmp_path / "facts.xlsx"
     write_facts(
@@ -75,8 +82,16 @@ def test_sort_paid_pass_and_soft(tmp_path):
     write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in customers])
     zhiyun = tmp_path / "zhiyun.xlsx"
     write_zhiyun(zhiyun, customers)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [
+            {"销售": "甲", "客户": "新单", "交付月份": 202608, "档": "补位", "原因": "这个销售还没有别的可抽"},
+            {"销售": "乙", "客户": "更老", "交付月份": 202401, "档": "次危", "原因": "账龄已满6个月"},
+        ],
+    )
     out = tmp_path / "out.xlsx"
-    code = compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)])
+    code = compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)])
     assert code == 0
     wb = load_workbook(out, data_only=True)
     pool = names_of(wb["待抽查清单"])
@@ -94,8 +109,8 @@ def test_sort_paid_pass_and_soft(tmp_path):
     exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
     assert all(row[1] != "已回" for row in exempt)
     suggest = {row[1]: row[6] for row in wb["建议本次抽"].iter_rows(min_row=2, values_only=True)}
+    assert suggest == {"新单": "补位", "更老": "次危"}
     assert "刚交付" not in suggest
-    assert "老单" not in suggest
     assert "已回" not in suggest
     assert "拿到" not in pool and "盖章" not in pool
     assert [row[0] for row in wb["风险提示"].iter_rows(min_row=2, values_only=True)] == customers
@@ -117,8 +132,10 @@ def test_alias_merges_news_but_not_the_pool(tmp_path):
     write_zhiyun(zhiyun, ["甲公司", "甲"])
     config = tmp_path / "config.md"
     config.write_text("# 豁免与别名\n\n## 已确认豁免\n\n客户名称\n\n## 已确认别名\n\n写法 | 合成后的客户\n甲公司 | 甲\n\n## 草稿\n\n还没人点头。待抽清单里仍然留着。\n丙草稿\n", encoding="utf-8")
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [{"销售": "甲", "客户": "甲", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"}])
     out = tmp_path / "out.xlsx"
-    code = compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--config", str(config), "--out", str(out)])
+    code = compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--config", str(config), "--judgment", str(judgment), "--out", str(out)])
     assert code == 0
     wb = load_workbook(out, data_only=True)
     assert names_of(wb["待抽查清单"]) == ["甲", "甲公司"]
@@ -140,8 +157,10 @@ def test_confirmed_exempt_leaves_the_pool(tmp_path):
     write_zhiyun(zhiyun, ["免", "不免"])
     config = tmp_path / "config.md"
     config.write_text("## 已确认豁免\n\n免\n\n## 已确认别名\n\n## 草稿\n\n", encoding="utf-8")
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [{"销售": "甲", "客户": "不免", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"}])
     out = tmp_path / "out.xlsx"
-    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--config", str(config), "--out", str(out)]) == 0
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--config", str(config), "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out, data_only=True)
     assert names_of(wb["待抽查清单"]) == ["不免", "免"]
     reasons = {row[1]: row[5] for row in wb["待抽查清单"].iter_rows(min_row=2, values_only=True)}
@@ -165,8 +184,10 @@ def test_news_risk_sorts_high_to_low_and_colors_column_e(tmp_path):
     )
     zhiyun = tmp_path / "zhiyun.xlsx"
     write_zhiyun(zhiyun, ["无新闻", "有新闻"])
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [{"销售": "甲", "客户": "有新闻", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"}])
     out = tmp_path / "out.xlsx"
-    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--retrieved", "2026-09-22", "--out", str(out)]) == 0
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--retrieved", "2026-09-22", "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out, data_only=True)
     rows = list(wb["风险提示"].iter_rows(min_row=2, values_only=True))
     assert [row[0] for row in rows] == ["有新闻", "无新闻"]
@@ -213,8 +234,16 @@ def test_zhiyun_sales_follows_each_order(tmp_path):
     ws.append(["", "客户", "SO2", "20260001", "OP4/项目已交付", ""])
     ws.append(["", "客户", "SO1", "未找到", "OP1/项目确认中", "下单有这张单，没有合同归档号。"])
     wb.save(zhiyun)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [
+            {"销售": "甲", "客户": "客户", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"},
+            {"销售": "乙", "客户": "客户", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"},
+        ],
+    )
     out = tmp_path / "out.xlsx"
-    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)]) == 0
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out)
     sheet = wb["智云核对"]
     rows = list(sheet.iter_rows(min_row=2, values_only=True))
@@ -244,10 +273,12 @@ def test_exempt_and_fully_paid_is_marked_on_both_sheets(tmp_path):
     sheet.append(["豁免客户关键词", "豁免原因"])
     sheet.append(["免", "集团统一"])
     book.save(ledger)
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [], [{"词": "免", "含义": "客户名称", "豁免原因": "集团统一"}])
     out = tmp_path / "out.xlsx"
     assert compose.main([
         "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
-        "--ledger", str(ledger), "--check-month", "202609", "--out", str(out),
+        "--ledger", str(ledger), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
     ]) == 0
     wb = load_workbook(out, data_only=True)
     pool = list(wb["待抽查清单"].iter_rows(min_row=2, values_only=True))
@@ -255,8 +286,7 @@ def test_exempt_and_fully_paid_is_marked_on_both_sheets(tmp_path):
     assert "这个月每笔都已回款" in str(pool[0][9])
     exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
     assert exempt[0][5] == "已豁免"
-    assert "集团统一" in str(exempt[0][6])
-    assert "这个月每笔都已回款" in str(exempt[0][6])
+    assert exempt[0][6] == "集团统一"
     wb.close()
 
 
@@ -274,10 +304,16 @@ def test_unmatched_keyword_is_marked_on_the_exempt_sheet(tmp_path):
     sheet.append(["序号", "豁免客户关键词", "豁免原因"])
     sheet.append([1, "对不上的词", "框架合同"])
     book.save(ledger)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [{"销售": "甲", "客户": "在册客户", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"}],
+        [{"词": "对不上的词", "含义": "客户名称", "豁免原因": "框架合同"}],
+    )
     out = tmp_path / "out.xlsx"
     assert compose.main([
         "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
-        "--ledger", str(ledger), "--check-month", "202609", "--out", str(out),
+        "--ledger", str(ledger), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
     ]) == 0
     wb = load_workbook(out, data_only=True)
     rows = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
@@ -285,8 +321,7 @@ def test_unmatched_keyword_is_marked_on_the_exempt_sheet(tmp_path):
     assert len(missed) == 1
     assert missed[0][0] in (None, "")
     assert missed[0][5] == "已豁免"
-    assert "这期销售反馈里没有对上" in str(missed[0][6])
-    assert "框架合同" in str(missed[0][6])
+    assert missed[0][6] == "框架合同"
     wb.close()
 
 
@@ -310,8 +345,17 @@ def test_suggest_follows_age_amount_and_bad_debt(tmp_path):
     write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in names])
     zhiyun = tmp_path / "zhiyun.xlsx"
     write_zhiyun(zhiyun, names)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [
+            {"销售": "甲", "客户": "更大", "交付月份": 202001, "档": "高危", "原因": "账龄已满24个月"},
+            {"销售": "甲", "客户": "次危大", "交付月份": 202401, "档": "次危", "原因": "账龄已满6个月"},
+            {"销售": "甲", "客户": "没合同", "交付月份": 202607, "档": "信用期内但要看", "原因": "还在信用期，但有经营风险、没合同、季结或预计回款已过"},
+        ],
+    )
     out = tmp_path / "out.xlsx"
-    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)]) == 0
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out, data_only=True)
     suggest = [(row[1], row[6]) for row in wb["建议本次抽"].iter_rows(min_row=2, values_only=True)]
     assert [name for name, _band in suggest] == ["更大", "次危大", "没合同"]
@@ -335,14 +379,129 @@ def test_paid_needs_zhiyun_and_patent_news_drops(tmp_path):
     ws.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"])
     ws.append(["甲", "已回", "SO9", "20260009", "SP4/已回款", ""])
     wb.save(zhiyun)
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [])
     out = tmp_path / "out.xlsx"
-    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)]) == 0
+    assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out, data_only=True)
     exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
-    assert exempt[0][1] == "已回" and exempt[0][5] == "已回款"
+    assert exempt[0][1] == "已回" and exempt[0][5] == "销售和智云都已回款"
     assert "已回" not in names_of(wb["待抽查清单"])
     assert list(wb["风险提示"].iter_rows(min_row=2, values_only=True))[0][4] == "中"
     verdict = list(wb["智云核对"].iter_rows(min_row=2, values_only=True))[0]
     assert verdict[6] == "已回款，已核销"
     assert verdict[7] == "一致"
     wb.close()
+
+
+def test_keyword_reads_person_and_stops_before_note(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(
+        facts,
+        [
+            fact("梁玲玲-高美杰", "在册客户", 202601, 4, 0, ""),
+            fact("甲", "别人", 202601, 4, 0, ""),
+        ],
+    )
+    news = tmp_path / "news"
+    write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in ("在册客户", "别人")])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["在册客户", "别人"])
+    ledger = tmp_path / "ledger.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "豁免清单"
+    sheet.append(["序号", "豁免客户关键词", "豁免原因"])
+    sheet.append([1, "在册客户", "单独核对"])
+    sheet.append([2, "高美杰", "高美杰"])
+    sheet.append([None, None, None])
+    sheet.append(["豁免口径（供参考）", None, None])
+    sheet.append(["交付月份豁免", "交付月份早于 202401", None])
+    sheet.append(["GM单号", "以 GM 为前缀的订单豁免", None])
+    book.save(ledger)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [{"销售": "甲", "客户": "别人", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"}],
+        [
+            {"词": "在册客户", "含义": "客户名称", "豁免原因": "单独核对"},
+            {"词": "高美杰", "含义": "销售人员", "豁免原因": "高美杰"},
+        ],
+    )
+    out = tmp_path / "out.xlsx"
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--ledger", str(ledger), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
+    ]) == 0
+    wb = load_workbook(out, data_only=True)
+    exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
+    reasons = {row[1]: row[6] for row in exempt}
+    assert reasons["在册客户"] == "单独核对；高美杰"
+    assert "别人" not in reasons
+    assert "交付月份早于 202401" not in reasons
+    assert "以 GM 为前缀的订单豁免" not in reasons
+    assert all("口径" not in str(row[1]) for row in exempt)
+    pool = {row[1]: row[5] for row in wb["待抽查清单"].iter_rows(min_row=2, values_only=True)}
+    assert pool["在册客户"] == "已豁免"
+    assert pool["别人"] == "没查过"
+    suggest = names_of(wb["建议本次抽"])
+    assert "在册客户" not in suggest
+    wb.close()
+
+
+def test_same_person_counts_as_one_salesperson(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(
+        facts,
+        [
+            fact("梁玲玲", "甲客户", 202401, 20, 0, "", amount=8000),
+            fact("梁玲玲-高美杰", "乙客户", 202401, 20, 0, "", amount=9000),
+        ],
+    )
+    news = tmp_path / "news"
+    write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in ("甲客户", "乙客户")])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["甲客户", "乙客户"])
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [{"销售": "梁玲玲", "客户": "甲客户", "交付月份": 202401, "档": "高危", "原因": "账龄已满24个月"}],
+        people=[{"算作": "梁玲玲", "写成": ["梁玲玲", "梁玲玲-高美杰"]}],
+    )
+    out = tmp_path / "out.xlsx"
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
+    ]) == 0
+    wb = load_workbook(out, data_only=True)
+    assert names_of(wb["建议本次抽"]) == ["甲客户"]
+    wb.close()
+
+
+def test_missing_salesperson_is_asked(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(facts, [fact("甲", "甲客户", 202401, 20, 0, ""), fact("乙", "乙客户", 202401, 20, 0, "")])
+    news = tmp_path / "news"
+    write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in ("甲客户", "乙客户")])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["甲客户", "乙客户"])
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [{"销售": "甲", "客户": "甲客户", "交付月份": 202401, "档": "高危", "原因": "账龄已满24个月"}])
+    out = tmp_path / "out.xlsx"
+    code = compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
+    ])
+    assert code == 2
+
+
+def test_asks_without_judgment(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(facts, [fact("甲", "甲客户", 202401, 20, 0, "")])
+    news = tmp_path / "news"
+    write_news(news, [{"customer": "甲客户", "summary": "未查到", "url": "", "note": "未查到"}])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["甲客户"])
+    out = tmp_path / "out.xlsx"
+    code = compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--out", str(out)])
+    assert code == 2

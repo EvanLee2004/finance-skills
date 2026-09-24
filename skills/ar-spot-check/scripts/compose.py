@@ -24,13 +24,9 @@ SUGGEST_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "�
 EXEMPT_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "原因", "豁免原因"]
 NEWS_HEADERS = ["客户", "新闻摘要", "链接", "说明", "风险等级", "判断原因", "检索日期"]
 ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "回款核对"]
-SUGGEST_ORDER = {"高危": 0, "次危": 1, "延期": 2, "信用期内但要看": 3}
-SUGGEST_REASON = {
-    "高危": "账龄已满24个月",
-    "次危": "账龄已满6个月",
-    "延期": "逾期，账龄3到5个月",
-    "信用期内但要看": "还在信用期，但有经营风险、没合同、季结或预计回款已过",
-}
+SUGGEST_ORDER = {"高危": 0, "次危": 1, "信用期内但要看": 2, "补位": 3}
+ELIGIBLE = {"没查过", "未提供或未反馈", "确认为空", "待你定"}
+KEYWORD_MEANINGS = {"客户名称", "销售人员"}
 RISK_ORDER = {"高": 0, "中": 1, "低": 2, "无": 3}
 RISK_STYLE = {
     "高": ("F4C7C3", "9C1B1B"),
@@ -49,7 +45,7 @@ POOL_WIDTHS = {
     "销售": 12, "客户": 36, "订单号": 28, "交付月份": 12, "账龄": 8,
     "抽查原因": 16, "已回款笔数": 12, "订单数": 10, "台账确认": 22, "旁注": 28,
 }
-EXEMPT_WIDTHS = {"销售": 12, "客户": 36, "订单号": 28, "交付月份": 12, "账龄": 8, "原因": 12, "豁免原因": 36}
+EXEMPT_WIDTHS = {"销售": 12, "客户": 36, "订单号": 28, "交付月份": 12, "账龄": 8, "原因": 24, "豁免原因": 36}
 NEWS_WIDTHS = {"客户": 36, "新闻摘要": 46, "链接": 28, "说明": 28, "风险等级": 10, "判断原因": 36, "检索日期": 14}
 SHEET_WIDTHS = {
     POOL_SHEET: POOL_WIDTHS,
@@ -71,8 +67,8 @@ HEADER_NOTES = {
         "旁注": "按订单抽、回了一部分、整月都已回款，或台账里有写不成月份的旧记录。",
     },
     EXEMPT_SHEET: {
-        "原因": "已豁免是豁免清单对上的客户。已回款是这个月每笔都标了已回款。",
-        "豁免原因": "豁免清单里写的原因。这期销售反馈里对不上的关键词会注明。",
+        "原因": "已豁免是豁免清单对上的。销售和智云都已回款，是销售结算阶段和智云订单状态两边都写了已回款。",
+        "豁免原因": "豁免清单里的原话，一个字不改。",
     },
     NEWS_SHEET: {
         "新闻摘要": "近半年公开报道的一句话。没查到就写未查到。",
@@ -86,13 +82,13 @@ HEADER_NOTES = {
         "回款核对": "两边都写了已回款才是一致。只有一边写了就是不一致。不对银行流水。",
     },
     SUGGEST_SHEET: {
-        "档": "这周建议抽的短名单。高危要满1000，次危要满100000。延期和不满1000的不在这页。",
+        "档": "模型按技能里的标准定的档。补位表示这个销售没有别的能进线的行，仍抽一条。",
         "应收金额": "这一组销售反馈的应收金额合计。同一档里金额大的在前。",
         "原因": "这一行为什么进这次建议。",
     },
 }
-MISS_NOTE = "这期销售反馈里没有对上"
 PAID_NOTE = "这个月每笔都已回款"
+BOTH_PAID = "销售和智云都已回款"
 
 
 
@@ -102,6 +98,25 @@ def as_int(value, default=0) -> int:
     if isinstance(value, float) and value == int(value):
         value = int(value)
     return int(value)
+
+
+def note_marker(text: str) -> bool:
+    return "口径" in text or "供参考" in text
+
+
+def seq_is_number(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
 
 
 def load_keywords(path: Path | None) -> list[tuple[str, str]]:
@@ -117,13 +132,20 @@ def load_keywords(path: Path | None) -> list[tuple[str, str]]:
     header = ["" if cell is None else str(cell) for cell in next(rows)]
     key_at = next((i for i, name in enumerate(header) if "关键词" in name or name == "客户"), None)
     why_at = next((i for i, name in enumerate(header) if "原因" in name), None)
+    seq_at = next((i for i, name in enumerate(header) if "序号" in name), None)
     found = []
     if key_at is None:
         wb.close()
         raise KeyError("ledger-column")
     for row in rows:
+        seq_raw = row[seq_at] if seq_at is not None and seq_at < len(row) else None
+        seq = "" if seq_raw is None else str(seq_raw).strip()
         key = str(row[key_at] or "").strip() if key_at < len(row) else ""
         why = str(row[why_at] or "").strip() if why_at is not None and why_at < len(row) else ""
+        if note_marker(seq) or note_marker(key):
+            break
+        if seq_at is not None and seq and not seq_is_number(seq_raw):
+            continue
         if key:
             found.append((key, why))
     wb.close()
@@ -407,19 +429,6 @@ def write_sheet(ws, header: list[str], rows: list[dict]) -> None:
         ws.column_dimensions[get_column_letter(col)].width = widths.get(title, 18)
 
 
-def match_exemption(name: str, keywords: list[tuple[str, str]]) -> str:
-    folded = name.casefold()
-    hits = [(len(key), reason) for key, reason in keywords if key and key.casefold() in folded]
-    if not hits:
-        return ""
-    hits.sort(reverse=True)
-    reasons = []
-    for _, reason in hits:
-        if reason and reason not in reasons:
-            reasons.append(reason)
-    return "；".join(reasons) or "已确认豁免"
-
-
 def paid_confirmed(row: dict, pay_index: dict) -> bool:
     if not fully_paid(row):
         return False
@@ -483,57 +492,147 @@ def pay_verdict(stage: str, status: str) -> str:
     return ""
 
 
-def expect_passed(row: dict, check_month: int) -> bool:
-    text = str(row.get("预计回款日") or "")
-    return len(text) >= 6 and text[:6].isdigit() and int(text[:6]) < check_month
+def load_judgment(path: Path | None) -> dict:
+    if path is None:
+        raise KeyError("judgment-missing")
+    if not path.exists():
+        raise KeyError("judgment-missing")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise KeyError("judgment-json")
+    if not isinstance(data, dict):
+        raise KeyError("judgment-shape")
+    alias = {}
+    for item in data.get("同一人") or []:
+        if not isinstance(item, dict):
+            raise KeyError("judgment-shape")
+        canon = str(item.get("算作") or "").strip()
+        names = item.get("写成") or []
+        if not canon or not isinstance(names, list) or not names:
+            raise KeyError("judgment-shape")
+        for name in names:
+            alias[str(name).strip()] = canon
+    keywords = []
+    for item in data.get("关键词") or []:
+        if not isinstance(item, dict):
+            raise KeyError("judgment-shape")
+        word = str(item.get("词") or "").strip()
+        meaning = str(item.get("含义") or "").strip()
+        reason = str(item.get("豁免原因") or "").strip()
+        if not word or meaning not in KEYWORD_MEANINGS:
+            raise KeyError("judgment-keyword")
+        keywords.append((word, meaning, reason))
+    suggest = []
+    for item in data.get("建议") or []:
+        if not isinstance(item, dict):
+            raise KeyError("judgment-shape")
+        band = str(item.get("档") or "").strip()
+        if band not in SUGGEST_ORDER:
+            raise KeyError("judgment-band")
+        suggest.append(
+            {
+                "销售": str(item.get("销售") or "").strip(),
+                "客户": str(item.get("客户") or "").strip(),
+                "交付月份": as_int(item.get("交付月份")),
+                "订单号": str(item.get("订单号") or "").strip(),
+                "档": band,
+                "原因": str(item.get("原因") or "").strip(),
+            }
+        )
+    return {"alias": alias, "keywords": keywords, "suggest": suggest}
 
 
-def suggest_band(row: dict, check_month: int, high_news: set[str]):
-    if row.get("规则") == "已豁免" or row.get("账龄") in (None, ""):
-        return None
-    age = as_int(row.get("账龄"))
-    marks = str(row.get("标记") or "")
-    watched = (
-        str(row.get("客户") or "") in high_news
-        or "没有合同" in marks
-        or "季结" in marks
-        or expect_passed(row, check_month)
-        or row.get("回款未证实")
-    )
-    if age <= 0:
-        return None
-    if age <= 2:
-        return "信用期内但要看" if watched else None
-    if age <= 5:
-        return "延期"
-    if age <= 23:
-        return "次危"
-    return "高危"
+def judgment_matches_ledger(judgment: dict, ledger_keywords: list[tuple[str, str]]) -> str:
+    got = {word: (meaning, reason) for word, meaning, reason in judgment["keywords"]}
+    expected = {word: reason for word, reason in ledger_keywords}
+    if set(got) != set(expected):
+        return "判断.json 的关键词要和豁免清单正式行一一对应。口径那几行不要写进去。"
+    for word, reason in expected.items():
+        if got[word][1] != reason:
+            return "判断.json 里的豁免原因必须和豁免清单原话一样。"
+    return ""
 
 
-def on_this_weeks_list(band: str, amount: float) -> bool:
-    if amount < 1000:
+def keyword_hits(customer: str, sales: str, word: str, meaning: str) -> bool:
+    needle = word.casefold()
+    if not needle:
         return False
-    if band == "延期":
+    if meaning == "客户名称":
+        return needle in customer.casefold()
+    if meaning == "销售人员":
+        return needle in sales.casefold()
+    return False
+
+
+def match_exemption(customer: str, sales: str, keywords: list[tuple[str, str, str]]) -> str:
+    hits = [
+        (len(word), reason)
+        for word, meaning, reason in keywords
+        if keyword_hits(customer, sales, word, meaning)
+    ]
+    if not hits:
+        return ""
+    hits.sort(reverse=True)
+    reasons = []
+    for _, reason in hits:
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return "；".join(reasons) or "已确认豁免"
+
+
+def canon_sales(name: str, alias: dict[str, str]) -> str:
+    text = str(name or "").strip()
+    return alias.get(text, text)
+
+
+def fact_matches(row: dict, item: dict) -> bool:
+    if str(row.get("销售") or "").strip() != item["销售"]:
         return False
-    if band == "次危":
-        return amount >= 100000
-    return band in {"高危", "信用期内但要看"}
+    if str(row.get("客户") or "").strip() != item["客户"]:
+        return False
+    if as_int(row.get("交付月份")) != item["交付月份"]:
+        return False
+    if item.get("订单号") and str(row.get("订单号") or "").strip() != item["订单号"]:
+        return False
+    return True
 
 
-def suggest_rows(pool: list[dict], check_month: int, high_news: set[str]) -> list[dict]:
-    picked = []
+def suggest_problem(facts: list[dict], pool: list[dict], judgment: dict) -> str:
+    alias = judgment["alias"]
+    seen = set()
+    for item in judgment["suggest"]:
+        key = (item["销售"], item["客户"], item["交付月份"], item.get("订单号") or "")
+        if key in seen:
+            return "建议本次抽里有重复的一行。同一销售、同一客户、同一交付月、同一订单号只留一条。"
+        seen.add(key)
+        matches = [row for row in facts if fact_matches(row, item)]
+        if len(matches) != 1:
+            return "建议本次抽里有对不上的一行，或对上了多张单。写上订单号再跑。"
+        pool_hit = [row for row in pool if fact_matches(row, item)]
+        if len(pool_hit) != 1 or pool_hit[0].get("规则") not in ELIGIBLE:
+            return "建议本次抽只能从待抽里还要跟的行里挑。已豁免、已拿到、坏账、两边都已回款不要放进来。"
+    covered = {canon_sales(item["销售"], alias) for item in judgment["suggest"]}
+    needed = set()
     for row in pool:
-        band = suggest_band(row, check_month, high_news)
-        if not band:
-            continue
+        if row.get("规则") in ELIGIBLE:
+            needed.add(canon_sales(str(row.get("销售") or ""), alias))
+    missing = needed - covered
+    if missing:
+        print(f"uncovered={len(missing)}")
+        return "还有销售一条都没进建议本次抽。同一人按判断.json 合并后再补。"
+    return ""
+
+
+def materialize_suggest(facts: list[dict], judgment: dict) -> list[dict]:
+    picked = []
+    for order, item in enumerate(judgment["suggest"]):
+        row = next(row for row in facts if fact_matches(row, item))
         amount = row.get("应收金额")
         try:
             amount = round(float(amount or 0), 2)
         except (TypeError, ValueError):
             amount = 0
-        if not on_this_weeks_list(band, amount):
-            continue
         picked.append(
             {
                 "销售": row.get("销售") or "",
@@ -542,19 +641,19 @@ def suggest_rows(pool: list[dict], check_month: int, high_news: set[str]) -> lis
                 "交付月份": row.get("交付月份") or "",
                 "账龄": row.get("账龄"),
                 "应收金额": amount,
-                "档": band,
-                "原因": SUGGEST_REASON[band],
+                "档": item["档"],
+                "原因": item["原因"],
                 "旁注": side_note(row),
-                "_金额": amount,
+                "_序": order,
             }
         )
-    picked.sort(key=lambda item: (SUGGEST_ORDER[item["档"]], -item["_金额"], str(item["销售"]), str(item["客户"])))
+    picked.sort(key=lambda item: (SUGGEST_ORDER[item["档"]], item["_序"]))
     for item in picked:
-        item.pop("_金额", None)
+        item.pop("_序", None)
     return picked
 
 
-def build(facts: list[dict], config: dict, check_month: int, keywords: list[tuple[str, str]], pay_index: dict | None = None):
+def build(facts: list[dict], config: dict, check_month: int, keywords: list[tuple[str, str, str]], pay_index: dict | None = None):
     sales_order = []
     for row in facts:
         if row.get("销售") not in sales_order:
@@ -562,11 +661,10 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
     pool, exempt, kept = [], [], []
     for row in facts:
         name = str(row.get("客户") or "").strip()
-        why = match_exemption(name, keywords)
+        sales_name = str(row.get("销售") or "").strip()
+        why = match_exemption(name, sales_name, keywords)
         if why or name in config["exempt"]:
             her = why or "已确认豁免"
-            if fully_paid(row) and PAID_NOTE not in her:
-                her = f"{her}；{PAID_NOTE}"
             exempt.append((row, "已豁免", str(row.get("订单号") or row.get("已回款订单号") or ""), her))
             copied = dict(row)
             copied["规则"] = "已豁免"
@@ -576,7 +674,7 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
             exempt.append((row, "坏账", str(row.get("订单号") or ""), "销售解释里写了坏账"))
             continue
         if fully_paid(row) and paid_confirmed(row, pay_index or {}):
-            exempt.append((row, "已回款", str(row.get("已回款订单号") or row.get("订单号") or ""), ""))
+            exempt.append((row, BOTH_PAID, str(row.get("已回款订单号") or row.get("订单号") or ""), ""))
             continue
         rule = judge(as_int(row.get("台账命中条数")), row.get("台账确认"))
         if rule == "已拿到":
@@ -612,14 +710,13 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
     matched = set()
     for row in facts:
         customer = str(row.get("客户") or "")
-        for key, _reason in keywords:
-            if key and key.casefold() in customer.casefold():
+        sales_name = str(row.get("销售") or "")
+        for key, meaning, _reason in keywords:
+            if keyword_hits(customer, sales_name, key, meaning):
                 matched.add(key)
-    for key, reason in keywords:
+    for key, _meaning, reason in keywords:
         if key not in matched:
-            text = str(reason or "").strip()
-            why = MISS_NOTE if not text or MISS_NOTE in text else f"{MISS_NOTE}。{text}"
-            exempt.append(({"销售": "", "客户": key, "交付月份": "", "账龄": ""}, "已豁免", "", why))
+            exempt.append(({"销售": "", "客户": key, "交付月份": "", "账龄": ""}, "已豁免", "", str(reason or "").strip()))
     exempt.sort(key=lambda item: (str(item[0].get("销售") or "￿"), str(item[0].get("客户") or ""), as_int(item[0].get("交付月份"), 0)))
     return ordered, exempt, kept
 
@@ -634,6 +731,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "config" / "豁免与别名.md")
     parser.add_argument("--retrieved", default="", help="新闻检索日期，写进风险提示")
     parser.add_argument("--ledger", type=Path, default=None, help="她维护的台账，里面有豁免清单")
+    parser.add_argument("--judgment", type=Path, default=None, help="模型写的判断.json")
     args = parser.parse_args(argv)
     month = args.check_month
     if not (200001 <= month <= 209912 and 1 <= month % 100 <= 12):
@@ -687,8 +785,27 @@ def main(argv=None) -> int:
             return ask("豁免清单里没有关键词这一列。先别出待抽。")
         raise
     print(f"exempt_keywords={len(keywords)}")
+    try:
+        judgment = load_judgment(args.judgment)
+    except KeyError as exc:
+        label = str(exc)
+        if label == "judgment-missing":
+            return ask("还没有判断.json。先按技能读事实和豁免清单，写出同一人、关键词含义和本周建议，再跑。")
+        if label == "judgment-json":
+            return ask("判断.json 读不了。")
+        if label == "judgment-keyword":
+            return ask("判断.json 里每个关键词都要写含义：客户名称，或销售人员。")
+        if label == "judgment-band":
+            return ask("建议本次抽的档只能是高危、次危、信用期内但要看、补位。")
+        return ask("判断.json 的格式不对。按技能里的样子重写。")
+    mismatch = judgment_matches_ledger(judgment, keywords)
+    if mismatch:
+        return ask(mismatch)
     pay_index = pay_index_from(zhiyun_header, zhiyun_rows)
-    pool, exempt, kept = build(facts, config, month, keywords, pay_index)
+    pool, exempt, kept = build(facts, config, month, judgment["keywords"], pay_index)
+    problem = suggest_problem(facts, pool, judgment)
+    if problem:
+        return ask(problem)
     fact_customer_order = fact_names
     news_out = merge_news(fact_customer_order, news_rows, config["aliases"], str(args.retrieved))
     if len(news_out) != len({canon_name(name, config["aliases"]) for name in fact_names}):
@@ -762,8 +879,7 @@ def main(argv=None) -> int:
         item["销售结算阶段"] = stage
         item["回款核对"] = pay_verdict(stage, str(item.get("订单状态") or ""))
     zhiyun_out.sort(key=lambda item: (str(item.get("销售") or "￿"), str(item.get("客户") or ""), str(item.get("订单号") or "")))
-    high_news = {row["客户"] for row in news_out if row.get("风险等级") == "高"}
-    suggest_out = suggest_rows(pool, month, high_news)
+    suggest_out = materialize_suggest(facts, judgment)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     sheets = [
