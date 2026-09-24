@@ -111,7 +111,12 @@ def test_sort_paid_pass_and_soft(tmp_path):
     assert "写不成月份" in partial[9]
     exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
     assert all(row[1] != "已回" for row in exempt)
-    suggest = {row[1]: row[6] for row in wb["建议本次抽"].iter_rows(min_row=2, values_only=True)}
+    suggest_sheet = wb["建议本次抽"]
+    assert "补位" in str(suggest_sheet.cell(1, 1).value)
+    assert "高危" in str(suggest_sheet.cell(1, 1).value)
+    assert suggest_sheet.cell(2, 1).value == "销售"
+    assert suggest_sheet.freeze_panes == "C3"
+    suggest = {row[1]: row[6] for row in suggest_sheet.iter_rows(min_row=3, values_only=True)}
     assert suggest == {"新单": "补位", "更老": "次危"}
     assert "刚交付" not in suggest
     assert "已回" not in suggest
@@ -323,8 +328,50 @@ def test_suggest_note_matches_pool_when_zhiyun_has_not_confirmed(tmp_path):
     ]) == 0
     wb = load_workbook(out, data_only=True)
     pool_note = list(wb["待抽查清单"].iter_rows(min_row=2, values_only=True))[0][9]
-    suggest_note = list(wb["建议本次抽"].iter_rows(min_row=2, values_only=True))[0][8]
+    suggest_note = list(wb["建议本次抽"].iter_rows(min_row=3, values_only=True))[0][8]
     assert pool_note == suggest_note == "销售标了已回款，智云没有"
+    wb.close()
+
+
+def test_credit_reason_is_the_row_itself(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(
+        facts,
+        [
+            fact("甲", "季结户", 202607, 2, 0, "", amount=5000, explain="客户季结"),
+            fact("乙", "说不清", 202607, 2, 0, "", amount=5000),
+        ],
+    )
+    news = tmp_path / "news"
+    write_news(news, [
+        {"customer": "季结户", "summary": "未查到", "url": "", "note": "未查到"},
+        {"customer": "说不清", "summary": "未查到", "url": "", "note": "未查到"},
+    ])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["季结户", "说不清"])
+    canned = tmp_path / "canned.json"
+    write_judgment(canned, [
+        {"销售": "甲", "客户": "季结户", "交付月份": 202607, "档": "信用期内但要看", "原因": "还在信用期，但有经营风险、没合同、季结或预计回款已过"},
+        {"销售": "乙", "客户": "说不清", "交付月份": 202607, "档": "信用期内但要看", "原因": "还在信用期，但有经营风险、没合同、季结或预计回款已过"},
+    ])
+    out = tmp_path / "out.xlsx"
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(canned), "--out", str(out),
+    ]) == 2
+    clear = tmp_path / "clear.json"
+    write_judgment(clear, [
+        {"销售": "甲", "客户": "季结户", "交付月份": 202607, "档": "信用期内但要看", "原因": "还在信用期，但有经营风险、没合同、季结或预计回款已过"},
+        {"销售": "乙", "客户": "说不清", "交付月份": 202607, "档": "信用期内但要看", "原因": "销售口头说下月付清"},
+    ])
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(clear), "--out", str(out),
+    ]) == 0
+    wb = load_workbook(out, data_only=True)
+    reasons = {row[1]: row[7] for row in wb["建议本次抽"].iter_rows(min_row=3, values_only=True)}
+    assert reasons["季结户"] == "季结"
+    assert reasons["说不清"] == "销售口头说下月付清"
     wb.close()
 
 
@@ -395,7 +442,7 @@ def test_suggest_follows_age_amount_and_bad_debt(tmp_path):
     out = tmp_path / "out.xlsx"
     assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out, data_only=True)
-    suggest = [(row[1], row[6]) for row in wb["建议本次抽"].iter_rows(min_row=2, values_only=True)]
+    suggest = [(row[1], row[6]) for row in wb["建议本次抽"].iter_rows(min_row=3, values_only=True)]
     assert [name for name, _band in suggest] == ["更大", "次危大", "没合同"]
     assert [band for _name, band in suggest] == ["高危", "次危", "信用期内但要看"]
     pool = names_of(wb["待抽查清单"])
@@ -484,7 +531,7 @@ def test_keyword_reads_person_and_stops_before_note(tmp_path):
     pool = {row[1]: row[5] for row in wb["待抽查清单"].iter_rows(min_row=2, values_only=True)}
     assert pool["在册客户"] == "已豁免"
     assert pool["别人"] == "没查过"
-    suggest = names_of(wb["建议本次抽"])
+    suggest = [row[1] for row in wb["建议本次抽"].iter_rows(min_row=3, values_only=True) if row[1]]
     assert "在册客户" not in suggest
     wb.close()
 
@@ -514,7 +561,7 @@ def test_same_person_counts_as_one_salesperson(tmp_path):
         "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
     ]) == 0
     wb = load_workbook(out, data_only=True)
-    assert names_of(wb["建议本次抽"]) == ["甲客户"]
+    assert [row[1] for row in wb["建议本次抽"].iter_rows(min_row=3, values_only=True) if row[1]] == ["甲客户"]
     wb.close()
 
 

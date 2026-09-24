@@ -21,6 +21,14 @@ NEWS_SHEET = "风险提示"
 ZHIYUN_SHEET = "智云核对"
 POOL_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "抽查原因", "已回款笔数", "订单数", "台账确认", "旁注"]
 SUGGEST_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "应收金额", "档", "原因", "旁注"]
+SUGGEST_BANNER = (
+    "这周的短名单，不是全部待抽。先丢掉下面四类，再按账龄和金额进线，进不了线的销售补1条。\n"
+    "不进：已豁免；已拿到盖章或对公邮件；销售解释里写了坏账；销售和智云都已回款。\n"
+    "高危：账龄满24个月，金额满1000。次危：账龄6到23个月，金额满10万。\n"
+    "信用期内但要看：账龄1到2个月，金额满1000，并且有一条：新闻风险高、没合同、合同还在流程、季结、半年结，或预计回款日已经过了还没回。\n"
+    "补位：这个销售按上面一条都进不去，但仍有待抽的行，硬放1条。不是按金额进来的。\n"
+    "账龄0、账龄空、账龄3到5个月、金额不满1000，留在待抽。梁玲玲和梁玲玲-高美杰算一个人。同一档里金额大的在前。"
+)
 EXEMPT_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "原因", "豁免原因"]
 NEWS_HEADERS = ["客户", "新闻摘要", "链接", "说明", "风险等级", "判断原因", "检索日期"]
 ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "智云订单状态核对"]
@@ -393,14 +401,23 @@ def write_sheet(ws, header: list[str], rows: list[dict]) -> None:
     bold = Font(name="微软雅黑", bold=True, size=11, color="000000")
     body = Font(name="微软雅黑", size=11, color="000000")
     link_font = Font(name="微软雅黑", size=11, color="0563C1", underline="single")
+    header_row = 1
+    if ws.title == SUGGEST_SHEET:
+        header_row = 2
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(header))
+        banner = ws.cell(1, 1, SUGGEST_BANNER)
+        banner.font = Font(name="微软雅黑", size=11, color="000000")
+        banner.alignment = Alignment(wrap_text=True, vertical="center")
+        banner.fill = PatternFill("solid", fgColor="FFF2CC")
+        ws.row_dimensions[1].height = 96
     for col, title in enumerate(header, start=1):
-        cell = ws.cell(1, col, title)
+        cell = ws.cell(header_row, col, title)
         cell.font = bold
         cell.alignment = Alignment(wrap_text=False, vertical="center")
         note = HEADER_NOTES.get(ws.title, {}).get(title)
         if note:
             cell.comment = Comment(note, "应收抽查", width=240, height=48)
-    for index, row in enumerate(rows, start=2):
+    for index, row in enumerate(rows, start=header_row + 1):
         for col, title in enumerate(header, start=1):
             value = row.get(title, "")
             text = "" if value is None else value
@@ -423,8 +440,13 @@ def write_sheet(ws, header: list[str], rows: list[dict]) -> None:
                 cell.fill = PatternFill("solid", fgColor="F4C7C3")
             elif ws.title == SUGGEST_SHEET and title == "档" and text == "高危":
                 cell.fill = PatternFill("solid", fgColor="F4C7C3")
-    ws.freeze_panes = "B2" if ws.title == NEWS_SHEET else "C2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(header))}{max(1, len(rows) + 1)}"
+    if ws.title == SUGGEST_SHEET:
+        ws.freeze_panes = "C3"
+        last_row = max(header_row, len(rows) + header_row)
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(header))}{last_row}"
+    else:
+        ws.freeze_panes = "B2" if ws.title == NEWS_SHEET else "C2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(header))}{max(1, len(rows) + 1)}"
     widths = SHEET_WIDTHS.get(ws.title, {})
     for col, title in enumerate(header, start=1):
         ws.column_dimensions[get_column_letter(col)].width = widths.get(title, 18)
@@ -635,10 +657,58 @@ def suggest_problem(facts: list[dict], pool: list[dict], judgment: dict) -> str:
     return ""
 
 
-def materialize_suggest(facts: list[dict], judgment: dict) -> list[dict]:
+CANNED_CREDIT_REASON = "还在信用期，但有经营风险、没合同、季结或预计回款已过"
+CREDIT_MARKS = (
+    ("没有合同", "没合同"),
+    ("合同还在流程", "合同还在流程"),
+    ("季结", "季结"),
+    ("半年结", "半年结"),
+)
+
+
+def credit_hits(row: dict, check_month: int, news_high: set[str]) -> list[str]:
+    text = str(row.get("标记") or "") + str(row.get("销售解释") or "")
+    found = []
+    if str(row.get("客户") or "").strip() in news_high:
+        found.append("新闻风险高")
+    for needle, label in CREDIT_MARKS:
+        if needle in text:
+            found.append(label)
+    expect = str(row.get("预计回款日") or "")
+    if len(expect) >= 6 and expect[:6].isdigit() and int(expect[:6]) < check_month:
+        found.append("预计回款日已过还没回")
+    if row.get("回款未证实"):
+        found.append("销售写了已回款，智云没有")
+    return found
+
+
+def specific_reason(row: dict, band: str, written: str, check_month: int, news_high: set[str]) -> str:
+    age = as_int(row.get("账龄"))
+    if band == "高危" and age >= 24:
+        return "账龄满24个月"
+    if band == "次危" and 6 <= age <= 23:
+        return "账龄6到23个月，金额满10万"
+    if band == "补位":
+        return "这个销售按线进不去，补1条"
+    if band == "信用期内但要看":
+        found = credit_hits(row, check_month, news_high)
+        if found:
+            return "；".join(found)
+        text = str(written or "").strip()
+        if text and text != CANNED_CREDIT_REASON and "或" not in text:
+            return text
+        return ""
+    return str(written or "").strip()
+
+
+def materialize_suggest(facts: list[dict], judgment: dict, check_month: int, news_high: set[str]) -> tuple[list[dict], str]:
     picked = []
+    missing = 0
     for order, item in enumerate(judgment["suggest"]):
         row = next(row for row in facts if fact_matches(row, item))
+        reason = specific_reason(row, item["档"], item.get("原因") or "", check_month, news_high)
+        if not reason:
+            missing += 1
         amount = row.get("应收金额")
         try:
             amount = round(float(amount or 0), 2)
@@ -653,15 +723,18 @@ def materialize_suggest(facts: list[dict], judgment: dict) -> list[dict]:
                 "账龄": row.get("账龄"),
                 "应收金额": amount,
                 "档": item["档"],
-                "原因": item["原因"],
+                "原因": reason,
                 "旁注": side_note(row),
                 "_序": order,
             }
         )
+    if missing:
+        print(f"reason_unspecified={missing}")
+        return [], "信用期内但要看有行写不出具体原因。在判断.json 里给这一行写真正的原因，不要整档共用一句。"
     picked.sort(key=lambda item: (SUGGEST_ORDER[item["档"]], item["_序"]))
     for item in picked:
         item.pop("_序", None)
-    return picked
+    return picked, ""
 
 
 def build(facts: list[dict], config: dict, check_month: int, keywords: list[tuple[str, str, str]], pay_index: dict | None = None):
@@ -918,7 +991,10 @@ def main(argv=None) -> int:
         print(f"status_unchecked={missing}")
         return ask("还有智云和销售两边都写了状态、但判断.json 没给核对结果的单。先判断再跑。")
     zhiyun_out.sort(key=lambda item: (str(item.get("销售") or "￿"), str(item.get("客户") or ""), str(item.get("订单号") or "")))
-    suggest_out = materialize_suggest(facts, judgment)
+    news_high = {row["客户"] for row in news_out if row.get("风险等级") == "高"}
+    suggest_out, reason_problem = materialize_suggest(facts, judgment, month, news_high)
+    if reason_problem:
+        return ask(reason_problem)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     sheets = [
