@@ -1,4 +1,4 @@
-"""交卷前检查。四页不齐、新闻是占位、智云页是空的，就退出。"""
+"""交卷前检查。五页不齐、新闻是占位、智云页缺列或核对空着，就退出。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ REQUIRED = ["待抽查清单", "建议本次抽", "豁免与已回款", "风险�
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="检查交给亮晶的工作簿是否四页都落地")
+    parser = argparse.ArgumentParser(description="检查交给亮晶的工作簿是否五页都落地")
     parser.add_argument("--workbook", type=Path, required=True)
     args = parser.parse_args(argv)
     if not args.workbook.exists():
@@ -56,18 +56,21 @@ def main(argv=None) -> int:
             no_link_and_not_missing += 1
     def column_index(header, needle: str):
         for index, cell in enumerate(header):
-            if cell and needle in str(cell):
+            if cell and str(cell).strip() == needle:
                 return index
         return None
 
     order_col = column_index(zhiyun_header, "订单号")
     archive_col = column_index(zhiyun_header, "合同归档号")
     status_col = column_index(zhiyun_header, "订单状态")
+    stage_col = column_index(zhiyun_header, "销售结算阶段")
+    verdict_col = column_index(zhiyun_header, "智云订单状态核对")
     zhiyun_rows = 0
     zhiyun_names = set()
     messy = 0
     blank_pair = 0
     multi_order = 0
+    bad_verdict = 0
     for row in zhiyun_iter:
         if not any(cell not in (None, "") for cell in row):
             continue
@@ -86,8 +89,19 @@ def main(argv=None) -> int:
             blank_pair += 1
         if order != "未找到" and any(mark in order for mark in ("；", ";", "、", "\n")):
             multi_order += 1
+        if verdict_col is None or stage_col is None or status_col is None:
+            continue
+        verdict = str(row[verdict_col] or "").strip() if verdict_col < len(row) else ""
+        stage = str(row[stage_col] or "").strip() if stage_col < len(row) else ""
+        if verdict not in ("", "不冲突", "不一致"):
+            bad_verdict += 1
+        elif status and status != "未找到" and stage:
+            if verdict not in ("不冲突", "不一致"):
+                bad_verdict += 1
+        elif verdict:
+            bad_verdict += 1
     missing_customers = len((news_names - zhiyun_names) | (zhiyun_names - news_names - news_tokens))
-    header_gap = order_col is None or archive_col is None or status_col is None
+    header_gap = None in (order_col, archive_col, status_col, stage_col, verdict_col)
     wb.close()
     ok = (
         placeholder == 0
@@ -99,6 +113,7 @@ def main(argv=None) -> int:
         and messy == 0
         and blank_pair == 0
         and multi_order == 0
+        and bad_verdict == 0
     )
     print("status=ok" if ok else "ask")
     print(f"news_rows={news_rows}")
@@ -109,14 +124,15 @@ def main(argv=None) -> int:
     print(f"zhiyun_messy={messy}")
     print(f"zhiyun_blank={blank_pair}")
     print(f"zhiyun_multi_order={multi_order}")
+    print(f"zhiyun_bad_verdict={bad_verdict}")
     if placeholder or no_link_and_not_missing:
         print("ask=风险提示还有没检索或没链接的行。查完再写未查到，不要留未检索。")
         return 2
     if zhiyun_rows == 0:
         print("ask=智云核对还是空的。用 Playwright 按销售反馈里的客户找单子和合同，写进这一页。")
         return 2
-    if header_gap or messy or blank_pair or multi_order:
-        print("ask=智云核对要按销售反馈的单号一行，写合同归档号和订单状态。没有就写未找到，不要写看不出来。")
+    if header_gap or messy or blank_pair or multi_order or bad_verdict:
+        print("ask=智云核对要按销售反馈的单号一行，写合同归档号、订单状态和智云订单状态核对。没核到就留空，核对过只写不冲突或不一致。")
         return 2
     if missing_customers:
         print("ask=智云核对没有盖住风险提示里的每个客户。对不上就写未找到，不要少人。")

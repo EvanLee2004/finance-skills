@@ -51,9 +51,12 @@ def names_of(ws):
     return [row[1] for row in ws.iter_rows(min_row=2, values_only=True) if row[1]]
 
 
-def write_judgment(path: Path, suggest, keywords=None, people=None):
+def write_judgment(path: Path, suggest, keywords=None, people=None, orders=None):
     path.write_text(
-        json.dumps({"同一人": people or [], "关键词": keywords or [], "建议": suggest}, ensure_ascii=False),
+        json.dumps(
+            {"同一人": people or [], "关键词": keywords or [], "建议": suggest, "订单状态核对": orders or []},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -241,6 +244,10 @@ def test_zhiyun_sales_follows_each_order(tmp_path):
             {"销售": "甲", "客户": "客户", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"},
             {"销售": "乙", "客户": "客户", "交付月份": 202601, "档": "补位", "原因": "这个销售还没有别的可抽"},
         ],
+        orders=[
+            {"客户": "客户", "订单号": "SO1", "核对": "不冲突"},
+            {"客户": "客户", "订单号": "SO2", "核对": "不冲突"},
+        ],
     )
     out = tmp_path / "out.xlsx"
     assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)]) == 0
@@ -283,10 +290,41 @@ def test_exempt_and_fully_paid_is_marked_on_both_sheets(tmp_path):
     wb = load_workbook(out, data_only=True)
     pool = list(wb["待抽查清单"].iter_rows(min_row=2, values_only=True))
     assert pool[0][5] == "已豁免"
-    assert "这个月每笔都已回款" in str(pool[0][9])
+    assert "销售标了已回款，智云没有" in str(pool[0][9])
+    assert "这个月每笔都已回款" not in str(pool[0][9])
     exempt = list(wb["豁免与已回款"].iter_rows(min_row=2, values_only=True))
     assert exempt[0][5] == "已豁免"
     assert exempt[0][6] == "集团统一"
+    wb.close()
+
+
+def test_suggest_note_matches_pool_when_zhiyun_has_not_confirmed(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(facts, [fact("甲", "甲客户", 202401, 20, 0, "", orders=1, paid=1, so="SO1", paid_so="SO1", stages="SO1=已回款，未核销")])
+    news = tmp_path / "news"
+    write_news(news, [{"customer": "甲客户", "summary": "未查到", "url": "", "note": "未查到"}])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "智云核对"
+    sheet.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"])
+    sheet.append(["甲", "甲客户", "SO1", "20260001", "OP5/销售已验收", ""])
+    book.save(zhiyun)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [{"销售": "甲", "客户": "甲客户", "交付月份": 202401, "档": "高危", "原因": "账龄已满24个月"}],
+        orders=[{"客户": "甲客户", "订单号": "SO1", "核对": "不一致"}],
+    )
+    out = tmp_path / "out.xlsx"
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
+    ]) == 0
+    wb = load_workbook(out, data_only=True)
+    pool_note = list(wb["待抽查清单"].iter_rows(min_row=2, values_only=True))[0][9]
+    suggest_note = list(wb["建议本次抽"].iter_rows(min_row=2, values_only=True))[0][8]
+    assert pool_note == suggest_note == "销售标了已回款，智云没有"
     wb.close()
 
 
@@ -380,7 +418,7 @@ def test_paid_needs_zhiyun_and_patent_news_drops(tmp_path):
     ws.append(["甲", "已回", "SO9", "20260009", "SP4/已回款", ""])
     wb.save(zhiyun)
     judgment = tmp_path / "判断.json"
-    write_judgment(judgment, [])
+    write_judgment(judgment, [], orders=[{"客户": "已回", "订单号": "SO9", "核对": "不冲突"}])
     out = tmp_path / "out.xlsx"
     assert compose.main(["--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun), "--check-month", "202609", "--judgment", str(judgment), "--out", str(out)]) == 0
     wb = load_workbook(out, data_only=True)
@@ -388,9 +426,11 @@ def test_paid_needs_zhiyun_and_patent_news_drops(tmp_path):
     assert exempt[0][1] == "已回" and exempt[0][5] == "销售和智云都已回款"
     assert "已回" not in names_of(wb["待抽查清单"])
     assert list(wb["风险提示"].iter_rows(min_row=2, values_only=True))[0][4] == "中"
-    verdict = list(wb["智云核对"].iter_rows(min_row=2, values_only=True))[0]
+    sheet = wb["智云核对"]
+    assert sheet.cell(1, 8).value == "智云订单状态核对"
+    verdict = list(sheet.iter_rows(min_row=2, values_only=True))[0]
     assert verdict[6] == "已回款，已核销"
-    assert verdict[7] == "一致"
+    assert verdict[7] == "不冲突"
     wb.close()
 
 
@@ -493,6 +533,83 @@ def test_missing_salesperson_is_asked(tmp_path):
         "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
     ])
     assert code == 2
+
+
+def test_status_check_blanks_when_it_cannot_see_both_sides(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(
+        facts,
+        [
+            fact("甲", "甲客户", 202401, 20, 0, "", so="SO1", stages="SO1=已回款，未核销"),
+            fact("甲", "乙客户", 202401, 4, 0, "", so="SO2", stages="SO2=未对账"),
+        ],
+    )
+    news = tmp_path / "news"
+    write_news(news, [{"customer": name, "summary": "未查到", "url": "", "note": "未查到"} for name in ("甲客户", "乙客户")])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "智云核对"
+    sheet.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"])
+    sheet.append(["甲", "甲客户", "SO1", "未找到", "未找到", "下单里没有这个单号。"])
+    sheet.append(["甲", "乙客户", "SO2", "20260001", "OP5/销售已验收", ""])
+    book.save(zhiyun)
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [{"销售": "甲", "客户": "乙客户", "交付月份": 202401, "档": "高危", "原因": "账龄已满24个月"}],
+        orders=[{"客户": "乙客户", "订单号": "SO2", "核对": "不冲突"}],
+    )
+    out = tmp_path / "out.xlsx"
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(judgment), "--out", str(out),
+    ]) == 0
+    wb = load_workbook(out)
+    rows = {row[2]: row for row in wb["智云核对"].iter_rows(min_row=2, values_only=True)}
+    assert rows["SO1"][7] in (None, "")
+    assert rows["SO2"][7] == "不冲突"
+    for index in range(2, 4):
+        cell = wb["智云核对"].cell(index, 8)
+        if cell.value == "不冲突":
+            assert cell.fill.fgColor is None or cell.fill.fgColor.rgb in (None, "00000000")
+    wb.close()
+
+
+def test_status_conflict_is_red_and_missing_judgment_asks(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(facts, [fact("甲", "甲客户", 202401, 20, 0, "", so="SO1", stages="SO1=未对账")])
+    news = tmp_path / "news"
+    write_news(news, [{"customer": "甲客户", "summary": "未查到", "url": "", "note": "未查到"}])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "智云核对"
+    sheet.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明"])
+    sheet.append(["甲", "甲客户", "SO1", "20260001", "SP4/已回款", ""])
+    book.save(zhiyun)
+    bare = tmp_path / "bare.json"
+    write_judgment(bare, [{"销售": "甲", "客户": "甲客户", "交付月份": 202401, "档": "高危", "原因": "账龄已满24个月"}])
+    out = tmp_path / "out.xlsx"
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(bare), "--out", str(out),
+    ]) == 2
+    judged = tmp_path / "judged.json"
+    write_judgment(
+        judged,
+        [{"销售": "甲", "客户": "甲客户", "交付月份": 202401, "档": "高危", "原因": "账龄已满24个月"}],
+        orders=[{"客户": "甲客户", "订单号": "SO1", "核对": "不一致"}],
+    )
+    assert compose.main([
+        "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+        "--check-month", "202609", "--judgment", str(judged), "--out", str(out),
+    ]) == 0
+    wb = load_workbook(out)
+    cell = wb["智云核对"].cell(2, 8)
+    assert cell.value == "不一致"
+    assert cell.fill.fgColor.rgb == "00F4C7C3"
+    wb.close()
 
 
 def test_asks_without_judgment(tmp_path):

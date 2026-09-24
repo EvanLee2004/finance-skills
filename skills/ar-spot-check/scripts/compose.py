@@ -23,7 +23,8 @@ POOL_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "抽�
 SUGGEST_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "应收金额", "档", "原因", "旁注"]
 EXEMPT_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "原因", "豁免原因"]
 NEWS_HEADERS = ["客户", "新闻摘要", "链接", "说明", "风险等级", "判断原因", "检索日期"]
-ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "回款核对"]
+ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "智云订单状态核对"]
+STATUS_VERDICTS = {"不冲突", "不一致"}
 SUGGEST_ORDER = {"高危": 0, "次危": 1, "信用期内但要看": 2, "补位": 3}
 ELIGIBLE = {"没查过", "未提供或未反馈", "确认为空", "待你定"}
 KEYWORD_MEANINGS = {"客户名称", "销售人员"}
@@ -40,7 +41,7 @@ ZHIYUN_NOTES = {
     "订单状态": "智云「下单」页这一列。下单里没有这张单就写未找到。",
     "说明": "归档号和订单状态都有了，这里是空的。只在对不上时写原因。",
 }
-ZHIYUN_WIDTHS = {"销售": 12, "客户": 36, "订单号": 22, "合同归档号": 18, "订单状态": 24, "说明": 42}
+ZHIYUN_WIDTHS = {"销售": 12, "客户": 36, "订单号": 22, "合同归档号": 18, "订单状态": 24, "说明": 42, "销售结算阶段": 18, "智云订单状态核对": 20}
 POOL_WIDTHS = {
     "销售": 12, "客户": 36, "订单号": 28, "交付月份": 12, "账龄": 8,
     "抽查原因": 16, "已回款笔数": 12, "订单数": 10, "台账确认": 22, "旁注": 28,
@@ -79,7 +80,7 @@ HEADER_NOTES = {
     ZHIYUN_SHEET: {
         **ZHIYUN_NOTES,
         "销售结算阶段": "这张单在销售反馈里写的结算阶段。",
-        "回款核对": "两边都写了已回款才是一致。只有一边写了就是不一致。不对银行流水。",
+        "智云订单状态核对": "模型看销售结算阶段和智云订单状态冲不冲突。没核到就空着。不一致标红。不对银行流水。",
     },
     SUGGEST_SHEET: {
         "档": "模型按技能里的标准定的档。补位表示这个销售没有别的能进线的行，仍抽一条。",
@@ -418,7 +419,7 @@ def write_sheet(ws, header: list[str], rows: list[dict]) -> None:
                 cell.font = Font(name="微软雅黑", color=style[1], bold=True, size=11)
             elif ws.title == ZHIYUN_SHEET and title in {"合同归档号", "订单状态"} and text == "未找到":
                 cell.fill = MISSING_FILL
-            elif ws.title == ZHIYUN_SHEET and title == "回款核对" and text == "不一致":
+            elif ws.title == ZHIYUN_SHEET and title == "智云订单状态核对" and text == "不一致":
                 cell.fill = PatternFill("solid", fgColor="F4C7C3")
             elif ws.title == SUGGEST_SHEET and title == "档" and text == "高危":
                 cell.fill = PatternFill("solid", fgColor="F4C7C3")
@@ -482,14 +483,14 @@ def so_stage_index(facts: list[dict]) -> dict:
     return found
 
 
-def pay_verdict(stage: str, status: str) -> str:
-    sales_paid = "已回款" in stage
-    zhiyun_paid = "已回款" in status and status != "未找到"
-    if sales_paid and zhiyun_paid:
-        return "一致"
-    if sales_paid or zhiyun_paid:
-        return "不一致"
-    return ""
+def needs_status_check(stage: str, status: str) -> bool:
+    status_text = str(status or "").strip()
+    stage_text = str(stage or "").strip()
+    if not status_text or status_text == "未找到":
+        return False
+    if not stage_text:
+        return False
+    return True
 
 
 def load_judgment(path: Path | None) -> dict:
@@ -540,7 +541,17 @@ def load_judgment(path: Path | None) -> dict:
                 "原因": str(item.get("原因") or "").strip(),
             }
         )
-    return {"alias": alias, "keywords": keywords, "suggest": suggest}
+    checks = []
+    for item in data.get("订单状态核对") or []:
+        if not isinstance(item, dict):
+            raise KeyError("judgment-shape")
+        verdict = str(item.get("核对") or "").strip()
+        customer = str(item.get("客户") or "").strip()
+        order = str(item.get("订单号") or "").strip().upper()
+        if not customer or not order or verdict not in STATUS_VERDICTS:
+            raise KeyError("judgment-status")
+        checks.append({"客户": customer, "订单号": order, "核对": verdict})
+    return {"alias": alias, "keywords": keywords, "suggest": suggest, "checks": checks}
 
 
 def judgment_matches_ledger(judgment: dict, ledger_keywords: list[tuple[str, str]]) -> str:
@@ -662,6 +673,8 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
     for row in facts:
         name = str(row.get("客户") or "").strip()
         sales_name = str(row.get("销售") or "").strip()
+        if fully_paid(row) and not paid_confirmed(row, pay_index or {}):
+            row["回款未证实"] = True
         why = match_exemption(name, sales_name, keywords)
         if why or name in config["exempt"]:
             her = why or "已确认豁免"
@@ -682,8 +695,6 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
             continue
         copied = dict(row)
         copied["规则"] = rule
-        if fully_paid(row):
-            copied["回款未证实"] = True
         pool.append(copied)
     seen_names = {
         str(row.get("客户") or "").strip()
@@ -797,6 +808,8 @@ def main(argv=None) -> int:
             return ask("判断.json 里每个关键词都要写含义：客户名称，或销售人员。")
         if label == "judgment-band":
             return ask("建议本次抽的档只能是高危、次危、信用期内但要看、补位。")
+        if label == "judgment-status":
+            return ask("订单状态核对只能写不冲突或不一致，并且要有客户和订单号。")
         return ask("判断.json 的格式不对。按技能里的样子重写。")
     mismatch = judgment_matches_ledger(judgment, keywords)
     if mismatch:
@@ -877,7 +890,33 @@ def main(argv=None) -> int:
         token = str(item.get("订单号") or "").strip().upper()
         stage = stages.get((customer, token), "")
         item["销售结算阶段"] = stage
-        item["回款核对"] = pay_verdict(stage, str(item.get("订单状态") or ""))
+        status = str(item.get("订单状态") or "")
+        if needs_status_check(stage, status):
+            item["智云订单状态核对"] = ""
+            item["_待核"] = True
+        else:
+            item["智云订单状态核对"] = ""
+    check_index = {}
+    for item in judgment["checks"]:
+        key = (item["客户"], item["订单号"])
+        if key in check_index:
+            return ask("订单状态核对里同一张单写了两次。")
+        check_index[key] = item["核对"]
+    missing = 0
+    for item in zhiyun_out:
+        item.pop("_待核", None)
+        if not needs_status_check(item.get("销售结算阶段"), item.get("订单状态")):
+            item["智云订单状态核对"] = ""
+            continue
+        key = (str(item.get("客户") or "").strip(), str(item.get("订单号") or "").strip().upper())
+        verdict = check_index.get(key)
+        if verdict not in STATUS_VERDICTS:
+            missing += 1
+            continue
+        item["智云订单状态核对"] = verdict
+    if missing:
+        print(f"status_unchecked={missing}")
+        return ask("还有智云和销售两边都写了状态、但判断.json 没给核对结果的单。先判断再跑。")
     zhiyun_out.sort(key=lambda item: (str(item.get("销售") or "￿"), str(item.get("客户") or ""), str(item.get("订单号") or "")))
     suggest_out = materialize_suggest(facts, judgment)
     args.out.parent.mkdir(parents=True, exist_ok=True)
