@@ -1,5 +1,6 @@
 ---
 name: consolidated-statements
+version: "1.2"
 description: 按指定月份完成甲骨易八主体报表取数、标准映射、汇总和内部抵销，交付六表底稿及合并、母公司分册；也用于核查合并范围和抵销差异。
 ---
 

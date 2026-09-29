@@ -12,7 +12,7 @@
 |------|------|
 | **发布源（开发 push / 同事 pull）** | Gitee **https://gitee.com/Lee157/finance-skills** |
 | 分支 | 默认 **`main`** |
-| 版本 | 每个 skill 的 `SKILL.md` YAML `version`，2026-09-15 起全员 **1.0**；改哪个 skill 只给那个 +0.1 |
+| 版本 | 每个 skill 的 `SKILL.md` YAML `version`，以仓根 `README.md` 技能表为准。改哪个 skill 只给那个 +0.1 |
 
 本地开发目录（明昊机器）：
 
@@ -32,7 +32,7 @@
 | 角色 | 动作 |
 |------|------|
 | **开发** | 改码 → 该 skill `version` +0.1 → 测绿 → `git push gitee main`。 |
-| **同事本机** | 说「更新财务部skills」= 从 **Gitee** `https://gitee.com/Lee157/finance-skills` 的 `main` 拉到 opencode skills（不要 GitHub）。只覆盖 `pack.json` 白名单；本机 `config/` 默认保留（核销跟仓库）；不要清空自己另装的技能。 |
+| **同事本机** | 说「更新财务部skills」= 从 **Gitee** `https://gitee.com/Lee157/finance-skills` 的 `main` 拉到 opencode skills（不要 GitHub）。仓库公开，拉代码用 `git -c credential.helper=`，不要登录，不要弹 Git 账号框。只覆盖 `pack.json` 白名单；本机 `config/` 默认保留（核销跟仓库）；不要清空自己另装的技能。 |
 
 ---
 
@@ -58,7 +58,7 @@
 
 ## 四、同事怎么更新
 
-从 Gitee `Lee157/finance-skills` 的 `main` 拉到本机 opencode skills。只覆盖 `pack.json` 白名单。本机已有 `config/` 默认不覆盖（核销跟仓库）。不要清空白名单外自己装的夹。开口对照 `skills/财务技能_说什么用哪个.md`。
+从 Gitee `Lee157/finance-skills` 的 `main` 拉到本机 opencode skills。仓库公开。拉代码只用 `git -c credential.helper= clone` 或 `fetch` / `pull --ff-only`，禁止普通 git pull，不要填 Gitee 用户名密码，不要改全局 git 配置。只覆盖 `pack.json` 白名单。本机已有 `config/` 默认不覆盖（核销跟仓库）。不要清空白名单外自己装的夹。开口对照 `skills/财务技能_说什么用哪个.md`。
 
 ## 五、开发侧 push（明昊 / AI）
 

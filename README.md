@@ -12,9 +12,20 @@
 | 分支 | `main` |
 | git | `https://gitee.com/Lee157/finance-skills.git` |
 
-本机已装过：把 opencode 里这份仓 `git fetch` + `git pull` 到 `origin/main`（remote 若不是 Gitee，先改成上面这个地址再 pull）。只更新 `pack.json` 白名单里的技能夹；本机 `config/` 默认留着（核销跟仓库走）。不要清空同事自己装的其它 skill。
+仓库公开。拉代码不要登录，不要填用户名密码，不要改全局 git 配置。弹出 Git Credential Manager 就关掉。禁止普通 `git clone` / `git fetch` / `git pull`，每次都加 `-c credential.helper=`。
 
-没装过：`git clone https://gitee.com/Lee157/finance-skills.git`，再把 `skills/` 拷进 opencode skills 目录。
+本机已装过：
+
+```bash
+git -c credential.helper= -C 仓库目录 remote set-url origin https://gitee.com/Lee157/finance-skills.git
+git -c credential.helper= -C 仓库目录 fetch origin
+git -c credential.helper= -C 仓库目录 checkout main
+git -c credential.helper= -C 仓库目录 pull --ff-only origin main
+```
+
+没装过：`git -c credential.helper= clone https://gitee.com/Lee157/finance-skills.git`，再把 `skills/` 拷进 opencode skills 目录。
+
+只更新 `pack.json` 白名单里的技能夹；本机 `config/` 默认留着（核销跟仓库走）。不要清空同事自己装的其它 skill。
 
 跑任务只有两条路，不要混：
 
@@ -35,9 +46,9 @@ flowchart TD
 
 ## 版本
 
-每个 skill 的 `SKILL.md` 里有 `version`。这次起业务 skill 是 **1.1**。
+每个 skill 的 `SKILL.md` 里有 `version`。下表跟这一列对齐。不是全员同一个号。
 
-改某个 `skills/<id>/` 的脚本、config 或 SKILL.md，只给那一个 +0.1，并改本表。没改的不要动版本。测绿后 `git push gitee main`。
+改某个 `skills/<id>/` 的脚本、config 或 SKILL.md，只给那一个 +0.1，并改本表。没改的不要动版本。测绿后 `git push gitee main`。不推 GitHub。
 
 ## 技能表
 
@@ -52,7 +63,7 @@ flowchart TD
 | 劳务发票核对（亮晶） | labor-invoice-check | 1.1 | 有票 / 800 以下 / 无票 | Excel：应发明细 + 当月个人发票汇总 |
 | 九点下单统计（亮晶） | order-daily-summary | 1.1 | 下单数据（万元） | 智云账号密码；或离线：九点下单明细 Excel |
 | 追觅应收进度对比（亮晶） | dreame-ar-progress-diff | 1.1 | 两版追觅 list 的进度差 | Excel：两版追觅应收 list |
-| 应收抽查（亮晶） | ar-spot-check | 1.1 | 建议本次抽，另有待抽底稿、豁免、风险提示、智云核对 | Excel：合规抽查台账（含豁免清单）+ 当期销售反馈。智云用本机已保存的登录 |
+| 应收抽查（亮晶） | ar-spot-check | 1.4 | 五页：建议本次抽、待抽底稿、豁免与已回款、风险提示、智云核对 | Excel：合规抽查台账（含豁免清单）+ 当期销售反馈。开口「这周抽查」。智云用本机已保存的登录，每次重登 |
 
 ### 明妹
 
@@ -65,11 +76,11 @@ flowchart TD
 | 名称 | id | version | 简介 | 需要提供 |
 |------|----|---------|------|----------|
 | 金蝶入账（斯佳） | kingdee-posting | 1.4 | 销项 / 收款填引入表，人去点引入 | 金蝶开放平台应用 ID/密钥。销项/收款另要金蝶网页账密。收款：中行收款 Excel；销售空了才要智云账号 |
-| 供应商付款入金蝶（斯佳） | kingdee-payment | 1.1 | 付款台账+发票 PDF 填引入表 | 金蝶开放平台 + 网页账密。台账 Excel + 各家发票夹。不要说「金蝶入账」那句 |
-| 月度损益表（斯佳） | pl-dept-report | 1.1 | 星辰多账套拼损益表和利润表 | 金蝶网页账密 + 开放平台应用 ID/密钥。山东/四川/济南：代账利润表 Excel。薪酬台账 Excel 有就给 |
+| 供应商付款入金蝶（斯佳） | kingdee-payment | 1.5 | 付款台账+发票 PDF 填引入表 | 金蝶开放平台应用号。台账 Excel + 各家发票夹。开口「付款入金蝶」。不登网页 |
+| 月度损益表（斯佳） | pl-dept-report | 1.4 | 星辰多账套拼损益表和利润表 | 金蝶网页账密 + 开放平台应用 ID/密钥。山东/四川/济南：代账利润表 Excel。薪酬台账 Excel 有就给 |
 | 序时账入金蝶（斯佳） | kingdee-gl-import | 1.1 | 序时账转官方引入表 | Excel：序时账。不要金蝶/智云账密 |
 | 部门费用归集分摊（斯佳） | dept-expense-alloc | 1.1 | 用友按人拆部门费用 | Excel：用友余额表、收入底稿、人员归属、按人明细（工资社保有就给） |
-| 合并报表（斯佳） | consolidated-statements | 1.1 | 八主体资负利润现金流底稿 | 会计月份 YYYYMM。从金蝶拉：金蝶网页账密（五个星辰账套）。山东/四川/济南：人放公司报表 Excel |
+| 合并报表（斯佳） | consolidated-statements | 1.2 | 八主体资负利润现金流底稿。小企业净利息按来源原值留 | 会计月份 YYYYMM。从金蝶拉：金蝶网页账密（五个星辰账套）。山东/四川/济南：人放公司报表 Excel |
 | 代扣代缴申报表重命名（斯佳） | withholding-report-rename | 1.1 | 申报 PDF 按公司名+金额改名 | PDF：代扣代缴申报表一夹。不要账密 |
 
 ### 通用
