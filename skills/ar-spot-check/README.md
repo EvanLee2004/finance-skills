@@ -9,7 +9,7 @@ flowchart TD
   A[两张表，按表头认。台账里有豁免清单] --> B[prepare.py 只出事实]
   B --> C{账龄冲突或认不出}
   C -->|是| Q[停下问人]
-  C -->|否| D[新闻：脚本检索摘录，清单可以先出]
+  C -->|否| D[新闻：只留写到客户的摘录，清单可以先出]
   C -->|否| E[智云：重新登录，一张单一行]
   D --> J[判断.json：谁进建议本次抽]
   E --> J
@@ -24,6 +24,6 @@ flowchart TD
 
 开口说「这周抽查」。已下线的 `compliance-spot-check` 不要再跑。
 
-新闻先跑 `scripts/news_plan.py`，再跑 `scripts/news_fetch.py`。不要开子代理，也不要把必搜名单拆组。她要先看清单时，`compose.py` 加 `--news-pending`，`check_delivery.py` 加 `--list-only`，看到 `status=list_ready` 再给。最终交卷这两个参数都不要加。
+新闻先跑 `scripts/news_plan.py`，再跑 `scripts/news_fetch.py`。脚本只用客户名搜索，摘录里没有这家客户的写成未查到。不要开子代理，也不要把必搜名单拆组。她要先看清单时，`compose.py` 加 `--news-pending`，`check_delivery.py` 加 `--list-only`，看到 `status=list_ready` 再给。最终交卷这两个参数都不要加。
 
 真表、口令、客户明细不进这个仓库。同事从 Gitee `main` 更新。

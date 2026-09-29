@@ -17,13 +17,13 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 PROBE_QUERY = "北京"
-QUERY_TAIL = "被执行 失信 破产 停产 裁员 亏损 业绩下降 资金链"
 SEARCH = "https://cn.bing.com/search?format=rss&q="
 HALF_YEAR_DAYS = 183
 MAX_HITS = 5
 EMPTY_BATCH = 20
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 CN_PUB = re.compile(r"(\d{1,2})\s+(\d{1,2})月\s+(\d{4})")
+SUFFIXES = ("集团股份有限公司", "股份有限公司", "有限责任公司", "有限公司", "（集团）", "(集团)")
 
 
 def ask(text: str) -> int:
@@ -34,6 +34,43 @@ def ask(text: str) -> int:
 
 def search_url(query: str) -> str:
     return SEARCH + quote(query, safe="")
+
+
+def search_query(name: str) -> str:
+    cleaned = name.replace('"', "").replace("“", "").replace("”", "").strip()
+    return f'"{cleaned}"'
+
+
+def name_forms(name: str) -> list[str]:
+    raw = name.strip()
+    forms: list[str] = []
+
+    def add(text: str, minimum: int) -> None:
+        text = text.strip()
+        if len(text) >= minimum and text not in forms:
+            forms.append(text)
+
+    def add_with_suffixes(text: str, minimum: int) -> None:
+        add(text, minimum)
+        base = text.strip()
+        for suffix in SUFFIXES:
+            if base.endswith(suffix) and len(base) - len(suffix) >= 4:
+                base = base[: -len(suffix)].strip()
+                add(base, 4)
+
+    add_with_suffixes(raw, 1)
+    for open_, close_ in (("（", "）"), ("(", ")")):
+        if open_ not in raw or close_ not in raw:
+            continue
+        inside = raw.split(open_, 1)[1].split(close_, 1)[0]
+        add_with_suffixes(inside, 4)
+        add_with_suffixes(raw.replace(open_ + inside + close_, "", 1), 4)
+    return forms
+
+
+def mentions(name: str, title: str, summary: str) -> bool:
+    blob = f"{title}\n{summary}"
+    return any(form in blob for form in name_forms(name))
 
 
 def clean_text(value: str, limit: int) -> str:
@@ -143,7 +180,7 @@ def probe_ok(fetch, timeout: float) -> bool:
 
 def lookup(name: str, fetch, timeout: float, today: date):
     try:
-        text = fetch(search_url(f"{name} {QUERY_TAIL}"), timeout)
+        text = fetch(search_url(search_query(name)), timeout)
     except (URLError, TimeoutError, OSError, ValueError):
         return "fail", []
     items = parse_items(text)
@@ -152,7 +189,7 @@ def lookup(name: str, fetch, timeout: float, today: date):
     kept = []
     for item in items:
         hit = keep_hit(item, today)
-        if hit:
+        if hit and mentions(name, hit["title"], hit["summary"]):
             kept.append(hit)
         if len(kept) == MAX_HITS:
             break
