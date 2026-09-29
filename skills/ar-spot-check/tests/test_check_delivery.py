@@ -83,6 +83,36 @@ def test_missing_status_check_column_is_not_done(tmp_path):
     assert check_delivery.main(["--workbook", str(path)]) == 2
 
 
+def finished_book(path: Path, summary: str, link: str, note: str) -> None:
+    wb = Workbook()
+    wb.active.title = "待抽查清单"
+    wb.create_sheet("建议本次抽")
+    wb.create_sheet("豁免与已回款")
+    news = wb.create_sheet("风险提示")
+    news.append(["客户", "新闻摘要", "链接", "说明"])
+    news.append(["甲", summary, link, note])
+    zy = wb.create_sheet("智云核对")
+    zy.append(["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "智云订单状态核对"])
+    zy.append(["甲销", "甲", "SO1", "20260001", "OP4/项目已交付", "", "已对账，待开票", "不冲突"])
+    wb.save(path)
+
+
+def test_pending_news_is_a_list_until_requested(tmp_path, capsys):
+    path = tmp_path / "out.xlsx"
+    finished_book(path, "新闻后补", "", "新闻后补")
+    assert check_delivery.main(["--workbook", str(path)]) == 2
+    assert "新闻还没搜完" in capsys.readouterr().out
+    assert check_delivery.main(["--workbook", str(path), "--list-only"]) == 0
+    assert "status=list_ready" in capsys.readouterr().out
+
+
+def test_pending_news_with_a_link_is_not_a_list(tmp_path, capsys):
+    path = tmp_path / "out.xlsx"
+    finished_book(path, "新闻后补", "https://example.com/a", "新闻后补")
+    assert check_delivery.main(["--workbook", str(path), "--list-only"]) == 2
+    assert "status=list_ready" not in capsys.readouterr().out
+
+
 def test_checkable_order_without_verdict_is_not_done(tmp_path):
     path = tmp_path / "out.xlsx"
     wb = Workbook()

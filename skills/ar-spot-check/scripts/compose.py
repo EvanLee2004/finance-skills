@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把事实、新闻和智云核对合成亮晶要的四页。规则只执行判断.md 里写死的那几条。"""
+"""把事实、新闻、智云核对和判断.json 合成亮晶要的五页。字段筛选在脚本里，抽谁由判断.json 写回。"""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ SUGGEST_BANNER = (
     "补位：这个销售按上面一条都进不去，但仍有待抽的行，硬放1条。不是按金额进来的。\n"
     "账龄0、账龄空、账龄3到5个月、金额不满1000，留在待抽。梁玲玲和梁玲玲-高美杰算一个人。同一档里金额大的在前。"
 )
+PENDING_LINE = "新闻还没搜完。信用期内只因为新闻要看的，这一版先不放，新闻补完再出。"
 EXEMPT_HEADERS = ["销售", "客户", "订单号", "交付月份", "账龄", "原因", "豁免原因"]
 NEWS_HEADERS = ["客户", "新闻摘要", "链接", "说明", "风险等级", "判断原因", "检索日期"]
 ZHIYUN_HEADERS = ["销售", "客户", "订单号", "合同归档号", "订单状态", "说明", "销售结算阶段", "智云订单状态核对"]
@@ -298,6 +299,10 @@ def news_bad(row: dict) -> str:
     if "未检索" in blob or "本次未" in blob:
         return "placeholder"
     url = str(row.get("url") or "").strip()
+    if "新闻后补" in blob:
+        if url.startswith("http") or "未查到" in blob:
+            return "pending"
+        return ""
     if url.startswith("http"):
         return ""
     if "未查到" in blob:
@@ -397,19 +402,20 @@ def ask(text: str) -> int:
     return 2
 
 
-def write_sheet(ws, header: list[str], rows: list[dict]) -> None:
+def write_sheet(ws, header: list[str], rows: list[dict], suggest_banner: str | None = None) -> None:
     bold = Font(name="微软雅黑", bold=True, size=11, color="000000")
     body = Font(name="微软雅黑", size=11, color="000000")
     link_font = Font(name="微软雅黑", size=11, color="0563C1", underline="single")
     header_row = 1
     if ws.title == SUGGEST_SHEET:
         header_row = 2
+        banner_text = suggest_banner or SUGGEST_BANNER
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(header))
-        banner = ws.cell(1, 1, SUGGEST_BANNER)
+        banner = ws.cell(1, 1, banner_text)
         banner.font = Font(name="微软雅黑", size=11, color="000000")
         banner.alignment = Alignment(wrap_text=True, vertical="center")
         banner.fill = PatternFill("solid", fgColor="FFF2CC")
-        ws.row_dimensions[1].height = 96
+        ws.row_dimensions[1].height = 112 if banner_text != SUGGEST_BANNER else 96
     for col, title in enumerate(header, start=1):
         cell = ws.cell(header_row, col, title)
         cell.font = bold
@@ -701,6 +707,27 @@ def specific_reason(row: dict, band: str, written: str, check_month: int, news_h
     return str(written or "").strip()
 
 
+def news_only(text: str) -> bool:
+    parts = [part.strip() for part in re.split(r"[；;]", str(text or "")) if part.strip()]
+    return bool(parts) and all("新闻" in part for part in parts)
+
+
+def drop_news_only(facts: list[dict], judgment: dict, check_month: int, news_high: set[str]) -> tuple[dict, int]:
+    kept = []
+    held = 0
+    for item in judgment["suggest"]:
+        if item.get("档") == "信用期内但要看" and news_only(item.get("原因")):
+            matches = [row for row in facts if fact_matches(row, item)]
+            hits = credit_hits(matches[0], check_month, news_high) if len(matches) == 1 else ["keep"]
+            if not hits:
+                held += 1
+                continue
+        kept.append(item)
+    copied = dict(judgment)
+    copied["suggest"] = kept
+    return copied, held
+
+
 def materialize_suggest(facts: list[dict], judgment: dict, check_month: int, news_high: set[str]) -> tuple[list[dict], str]:
     picked = []
     missing = 0
@@ -806,7 +833,7 @@ def build(facts: list[dict], config: dict, check_month: int, keywords: list[tupl
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="合成交给亮晶的四页工作簿")
+    parser = argparse.ArgumentParser(description="合成交给亮晶的五页工作簿")
     parser.add_argument("--facts", type=Path, required=True)
     parser.add_argument("--news", type=Path, required=True)
     parser.add_argument("--zhiyun", type=Path, required=True)
@@ -814,6 +841,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "config" / "豁免与别名.md")
     parser.add_argument("--retrieved", default="", help="新闻检索日期，写进风险提示")
+    parser.add_argument("--news-pending", action="store_true", help="缺的客户先写成新闻后补，清单可以先交")
     parser.add_argument("--ledger", type=Path, default=None, help="她维护的台账，里面有豁免清单")
     parser.add_argument("--judgment", type=Path, default=None, help="模型写的判断.json")
     args = parser.parse_args(argv)
@@ -847,7 +875,13 @@ def main(argv=None) -> int:
     news_names = {str(row.get("customer") or "").strip() for row in news_rows}
     missing_news = [name for name in fact_names if name not in news_names]
     extra_news = news_names - set(fact_names)
-    if missing_news or extra_news:
+    pending_count = 0
+    if args.news_pending and missing_news and not extra_news:
+        for name in missing_news:
+            news_rows.append({"customer": name, "summary": "新闻后补", "url": "", "note": "新闻后补", "risk": "无"})
+        pending_count = len(missing_news)
+        print(f"news_pending={pending_count}")
+    elif missing_news or extra_news:
         print(f"news_missing={len(missing_news)}")
         print(f"news_extra={len(extra_news)}")
         return ask("风险提示要覆盖这期销售反馈里的每个客户，不多也不少。别名只在合成时并成一行。")
@@ -889,9 +923,6 @@ def main(argv=None) -> int:
         return ask(mismatch)
     pay_index = pay_index_from(zhiyun_header, zhiyun_rows)
     pool, exempt, kept = build(facts, config, month, judgment["keywords"], pay_index)
-    problem = suggest_problem(facts, pool, judgment)
-    if problem:
-        return ask(problem)
     fact_customer_order = fact_names
     news_out = merge_news(fact_customer_order, news_rows, config["aliases"], str(args.retrieved))
     if len(news_out) != len({canon_name(name, config["aliases"]) for name in fact_names}):
@@ -992,6 +1023,13 @@ def main(argv=None) -> int:
         return ask("还有智云和销售两边都写了状态、但判断.json 没给核对结果的单。先判断再跑。")
     zhiyun_out.sort(key=lambda item: (str(item.get("销售") or "￿"), str(item.get("客户") or ""), str(item.get("订单号") or "")))
     news_high = {row["客户"] for row in news_out if row.get("风险等级") == "高"}
+    if pending_count:
+        judgment, held = drop_news_only(facts, judgment, month, news_high)
+        if held:
+            print(f"news_held={held}")
+    problem = suggest_problem(facts, pool, judgment)
+    if problem:
+        return ask(problem)
     suggest_out, reason_problem = materialize_suggest(facts, judgment, month, news_high)
     if reason_problem:
         return ask(reason_problem)
@@ -1004,13 +1042,14 @@ def main(argv=None) -> int:
         (NEWS_SHEET, NEWS_HEADERS, news_out),
         (ZHIYUN_SHEET, ZHIYUN_HEADERS, zhiyun_out),
     ]
+    suggest_banner = SUGGEST_BANNER + "\n" + PENDING_LINE if pending_count else None
     first = wb.active
     if first is None:
         raise RuntimeError("workbook has no sheet")
     first.title = sheets[0][0]
     write_sheet(first, sheets[0][1], sheets[0][2])
     for title, header, rows in sheets[1:]:
-        write_sheet(wb.create_sheet(title), header, rows)
+        write_sheet(wb.create_sheet(title), header, rows, suggest_banner if title == SUGGEST_SHEET else None)
     wb.save(args.out)
     wb.close()
     print("status=ok")

@@ -659,6 +659,79 @@ def test_status_conflict_is_red_and_missing_judgment_asks(tmp_path):
     wb.close()
 
 
+def test_pending_news_holds_news_only_rows_and_keeps_other_reasons(tmp_path, capsys):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(
+        facts,
+        [
+            fact("甲", "补位客", 202601, 8, 0, "", amount=2000),
+            fact("甲", "新闻客", 202608, 1, 0, "", amount=5000),
+            fact("甲", "季结客", 202608, 1, 0, "", amount=5000, explain="季结"),
+        ],
+    )
+    news = tmp_path / "news"
+    write_news(news, [{"customer": "补位客", "summary": "未查到", "url": "", "note": "未查到", "risk": "无"}])
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["补位客", "新闻客", "季结客"])
+    judgment = tmp_path / "判断.json"
+    write_judgment(
+        judgment,
+        [
+            {"销售": "甲", "客户": "补位客", "交付月份": 202601, "档": "补位", "原因": "这个销售按线进不去，补1条"},
+            {"销售": "甲", "客户": "新闻客", "交付月份": 202608, "档": "信用期内但要看", "原因": "新闻风险高"},
+            {"销售": "甲", "客户": "季结客", "交付月份": 202608, "档": "信用期内但要看", "原因": "新闻风险高"},
+        ],
+    )
+    out = tmp_path / "out.xlsx"
+    code = compose.main(
+        [
+            "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+            "--check-month", "202609", "--retrieved", "2026-09-29", "--judgment", str(judgment),
+            "--news-pending", "--out", str(out),
+        ]
+    )
+    captured = capsys.readouterr().out
+    assert code == 0
+    assert "news_pending=2" in captured and "news_held=1" in captured
+    wb = load_workbook(out, data_only=True)
+    assert "新闻还没搜完" in str(wb["建议本次抽"].cell(1, 1).value)
+    suggest = {row[1]: row[7] for row in wb["建议本次抽"].iter_rows(min_row=3, values_only=True)}
+    assert suggest == {"补位客": "这个销售按线进不去，补1条", "季结客": "季结"}
+    news_rows = {row[0]: (row[1], row[4]) for row in wb["风险提示"].iter_rows(min_row=2, values_only=True)}
+    assert news_rows["新闻客"] == ("新闻后补", "无")
+    assert news_rows["季结客"] == ("新闻后补", "无")
+    assert news_rows["补位客"][0] == "未查到"
+    wb.close()
+    blocked = tmp_path / "blocked.xlsx"
+    assert compose.main(
+        [
+            "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+            "--check-month", "202609", "--judgment", str(judgment), "--out", str(blocked),
+        ]
+    ) == 2
+    assert not blocked.exists()
+
+
+def test_pending_news_still_asks_when_a_salesperson_only_has_news(tmp_path):
+    facts = tmp_path / "facts.xlsx"
+    write_facts(facts, [fact("甲", "新闻客", 202608, 1, 0, "", amount=5000)])
+    news = tmp_path / "news"
+    write_news(news, [])
+    (news / "news.jsonl").write_text("", encoding="utf-8")
+    zhiyun = tmp_path / "zhiyun.xlsx"
+    write_zhiyun(zhiyun, ["新闻客"])
+    judgment = tmp_path / "判断.json"
+    write_judgment(judgment, [{"销售": "甲", "客户": "新闻客", "交付月份": 202608, "档": "信用期内但要看", "原因": "新闻风险高"}])
+    out = tmp_path / "out.xlsx"
+    assert compose.main(
+        [
+            "--facts", str(facts), "--news", str(news), "--zhiyun", str(zhiyun),
+            "--check-month", "202609", "--judgment", str(judgment), "--news-pending", "--out", str(out),
+        ]
+    ) == 2
+    assert not out.exists()
+
+
 def test_asks_without_judgment(tmp_path):
     facts = tmp_path / "facts.xlsx"
     write_facts(facts, [fact("甲", "甲客户", 202401, 20, 0, "")])

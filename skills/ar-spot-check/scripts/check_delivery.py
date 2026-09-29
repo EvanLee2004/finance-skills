@@ -1,4 +1,4 @@
-"""交卷前检查。五页不齐、新闻是占位、智云页缺列或核对空着，就退出。"""
+"""交卷前检查。五页不齐、新闻是占位、智云页缺列或核对空着，就退出。新闻后补只能先出清单。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ REQUIRED = ["待抽查清单", "建议本次抽", "豁免与已回款", "风险�
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="检查交给亮晶的工作簿是否五页都落地")
     parser.add_argument("--workbook", type=Path, required=True)
+    parser.add_argument("--list-only", action="store_true", help="新闻后补时只确认清单能先给")
     args = parser.parse_args(argv)
     if not args.workbook.exists():
         print("status=ask")
@@ -36,6 +37,7 @@ def main(argv=None) -> int:
     news_rows = 0
     placeholder = 0
     no_link_and_not_missing = 0
+    pending = 0
     news_names = set()
     news_tokens = set()
     for row in news_iter:
@@ -50,9 +52,15 @@ def main(argv=None) -> int:
         link = ""
         if len(row) >= 3 and row[2]:
             link = str(row[2])
+        later = "新闻后补" in blob
+        linked = "http" in link or "http" in blob
         if "未检索" in blob or "本次未" in blob:
             placeholder += 1
-        elif "未查到" not in blob and "http" not in link and "http" not in blob:
+        elif later and (linked or "未查到" in blob):
+            no_link_and_not_missing += 1
+        elif later:
+            pending += 1
+        elif "未查到" not in blob and not linked:
             no_link_and_not_missing += 1
     def column_index(header, needle: str):
         for index, cell in enumerate(header):
@@ -103,7 +111,7 @@ def main(argv=None) -> int:
     missing_customers = len((news_names - zhiyun_names) | (zhiyun_names - news_names - news_tokens))
     header_gap = None in (order_col, archive_col, status_col, stage_col, verdict_col)
     wb.close()
-    ok = (
+    finished = (
         placeholder == 0
         and no_link_and_not_missing == 0
         and zhiyun_rows
@@ -115,9 +123,15 @@ def main(argv=None) -> int:
         and multi_order == 0
         and bad_verdict == 0
     )
-    print("status=ok" if ok else "ask")
+    if finished and pending and args.list_only:
+        print("status=list_ready")
+    elif finished and pending == 0:
+        print("status=ok")
+    else:
+        print("ask")
     print(f"news_rows={news_rows}")
     print(f"news_placeholder={placeholder}")
+    print(f"news_pending={pending}")
     print(f"news_without_link_or_missing={no_link_and_not_missing}")
     print(f"zhiyun_rows={zhiyun_rows}")
     print(f"zhiyun_missing_customers={missing_customers}")
@@ -139,6 +153,9 @@ def main(argv=None) -> int:
         return 2
     if news_rows == 0:
         print("ask=风险提示还是空的。")
+        return 2
+    if pending and not args.list_only:
+        print("ask=新闻还没搜完。这版只能当清单。补完新闻后再交，不要加 --list-only。")
         return 2
     return 0
 
